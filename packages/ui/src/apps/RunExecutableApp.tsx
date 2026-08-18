@@ -11,6 +11,7 @@ import {
   type GuestProcessResult,
 } from '@bk/core';
 import { useUi } from '../context';
+import { setGuestText, useGuestText } from '../guest-text';
 
 interface RunExecutableProps {
   /** 要运行的 .exe（store 路径），来自 open 动词或桌面拖入。 */
@@ -88,8 +89,10 @@ interface GuestWindowViewProps {
  * guest via runner.postText, and closing the window posts WM_CLOSE so the
  * guest process terminates. */
 export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowViewProps) {
-  const [text, setText] = useState('');
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  // Live text of the guest EDIT control: notepad's own WM_SETTEXT (New,
+  // paste, ...) flows back through onTextChanged -> setGuestText.
+  const text = useGuestText(editHwnd);
   useEffect(() => {
     // Window closed (unmounted) -> tell the guest to close too.
     return () => {
@@ -97,9 +100,10 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
     };
   }, [runner, hwnd]);
 
-  // Real menu only — no fallback: the RT_MENU parser handles top-level popups
-  // well (File/View parse fully) but nested submenus (Edit > Format) flatten
-  // incorrectly, so drop broken sections instead of showing fake menus.
+  // Real menu only — no fallback: keep the sections the RT_MENU parser
+  // produced (File/Edit parse fully; nested submenus flatten into items).
+  // Ampersands are Win32 accelerator markers ("&File" -> "File").
+  const stripAmps = (s: string): string => s.replace(/&/g, '');
   const sections = menu.filter(
     (s) => s.items.length > 0 && !s.title.includes('\t') && /^[A-Za-z&]/.test(s.title),
   );
@@ -113,20 +117,20 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
               className="bk-gwin-menu-title"
               onClick={() => setOpenMenu(openMenu === s.title ? null : s.title)}
             >
-              {s.title}
+              {stripAmps(s.title)}
             </span>
             {openMenu === s.title && (
               <div className="bk-gwin-menu-pop">
                 {s.items.map((it) => (
                   <button
-                    key={`${s.title}-${it.id}`}
+                    key={`${s.title}-${it.id}-${it.label}`}
                     className="bk-gwin-menu-item"
                     onClick={() => {
                       setOpenMenu(null);
                       runner.postMessage({ hwnd, msg: 0x0111 /* WM_COMMAND */, wParam: it.id, lParam: 0 });
                     }}
                   >
-                    {it.label}
+                    {stripAmps(it.label)}
                   </button>
                 ))}
               </div>
@@ -140,8 +144,10 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
         value={text}
         onChange={(e) => {
           const t = e.target.value;
-          if (editHwnd) runner.postText(editHwnd, t);
-          setText(t);
+          if (editHwnd) {
+            runner.postText(editHwnd, t);
+            setGuestText(editHwnd, t);
+          }
         }}
         spellCheck={false}
       />

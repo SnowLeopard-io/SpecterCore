@@ -4,6 +4,7 @@ export * from './context';
 export * from './types';
 export * from './apps';
 export * from './builtin-win';
+export * from './guest-text';
 export * from './plugin';
 export * from './components/Desktop';
 export * from './components/WindowFrame';

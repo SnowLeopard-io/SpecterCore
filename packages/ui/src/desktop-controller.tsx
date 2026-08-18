@@ -32,6 +32,7 @@ import { UiContext } from './context';
 import { Desktop } from './components/Desktop';
 import { DEFAULT_APPS } from './apps';
 import { ensureBuiltinWinFiles } from './builtin-win';
+import { setGuestText } from './guest-text';
 import { GuestWindowView } from './apps/RunExecutableApp';
 import { InstalledAppView } from './apps/InstalledAppView';
 import type { AppDefinition, UiController } from './types';
@@ -372,7 +373,17 @@ export class DesktopControllerImpl implements DesktopController {
               .then((h) => guestWinIds.set(w.hwnd, h.id));
           }
         },
+        onTextChanged: (hwnd, text) => setGuestText(hwnd, text),
       });
+      // Process exited (WM_QUIT / ExitProcess) — close the hosted windows.
+      for (const id of guestWinIds.values()) {
+        try {
+          await this.windowManager.closeWindow(id);
+        } catch {
+          // already gone
+        }
+      }
+      guestWinIds.clear();
     } catch (err) {
       console.error(`[desktop] guest ${source.name} failed:`, err);
       await this.showGuestError(source.name, String(err));

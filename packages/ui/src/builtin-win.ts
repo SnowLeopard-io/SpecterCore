@@ -11,6 +11,11 @@ export const BUILTIN_WIN_FILES: Array<{ url: string; storePath: string }> = [
   { url: '/win/notepad.exe', storePath: 'Windows/SysWOW64/notepad.exe' },
   { url: '/win/en-US/notepad.exe.mui', storePath: 'Windows/SysWOW64/en-US/notepad.exe.mui' },
   { url: '/win/zh-CN/notepad.exe.mui', storePath: 'Windows/SysWOW64/zh-CN/notepad.exe.mui' },
+  // Real files copied from the host C: drive so the virtual disk (and the
+  // file explorer / notepad open dialog) has genuine content by default.
+  { url: '/win/win.ini', storePath: 'Windows/win.ini' },
+  { url: '/win/hosts', storePath: 'Windows/System32/drivers/etc/hosts' },
+  { url: '/win/readme.txt', storePath: 'Users/Public/Documents/readme.txt' },
 ];
 
 /** Idempotent: writes each bundled file when missing/empty (fetch + write). */

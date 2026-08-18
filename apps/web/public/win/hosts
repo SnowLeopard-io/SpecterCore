@@ -1,0 +1,200 @@
+﻿
+# 127.0.0.1 fonts.gstatic.com
+# 127.0.0.1 secure.gravatar.com
+# 127.0.0.1 www.gravatar.com
+# 127.0.0.1 themes.googleusercontent.com
+# 127.0.0.1 ajax.googleapis.com
+# 127.0.0.1 fonts.googleapis.com
+# 127.0.0.1 api.github.com
+# 127.0.0.1 gist.github.com
+# 127.0.0.1 github.githubassets.com
+# 127.0.0.1 support-assets.githubassets.com
+# 127.0.0.1 education.github.com
+# 127.0.0.1 resources.github.com
+# 127.0.0.1 uploads.github.com
+# 127.0.0.1 archiveprogram.github.com
+# 127.0.0.1 raw.github.com
+# 127.0.0.1 raw.githubusercontent.com
+# 127.0.0.1 camo.githubusercontent.com
+# 127.0.0.1 cloud.githubusercontent.com
+# 127.0.0.1 avatars.githubusercontent.com
+# 127.0.0.1 avatars0.githubusercontent.com
+# 127.0.0.1 avatars1.githubusercontent.com
+# 127.0.0.1 avatars2.githubusercontent.com
+# 127.0.0.1 avatars3.githubusercontent.com
+# 127.0.0.1 user-images.githubusercontent.com
+# 127.0.0.1 objects.githubusercontent.com
+# 127.0.0.1 private-user-images.githubusercontent.com
+# 127.0.0.1 github.com
+# 127.0.0.1 pages.github.com
+# 127.0.0.1 www.github.io
+# 127.0.0.1 storage.live.com
+# 127.0.0.1 skyapi.onedrive.live.com
+# 127.0.0.1 onedrive.live.com
+# 127.0.0.1 imgur.com
+# 127.0.0.1 i.imgur.com
+# 127.0.0.1 s.imgur.com
+# 127.0.0.1 i.stack.imgur.com
+# 127.0.0.1 m.imgur.com
+# 127.0.0.1 api.imgur.com
+# 127.0.0.1 p.imgur.com
+# 127.0.0.1 www.imgur.com
+# 127.0.0.1 fufufu23.imgur.com
+# 127.0.0.1 thepoy.imgur.com
+# 127.0.0.1 blog.imgur.com
+# 127.0.0.1 cellcow.imgur.com
+# 127.0.0.1 t.imgur.com
+
+# Steam++ Start
+127.0.0.1 steamcdn-a.akamaihd.net
+127.0.0.1 steamuserimages-a.akamaihd.net
+127.0.0.1 cdn.akamai.steamstatic.com
+127.0.0.1 community.akamai.steamstatic.com
+127.0.0.1 avatars.akamai.steamstatic.com
+127.0.0.1 store.akamai.steamstatic.com
+127.0.0.1 community.steamstatic.com
+127.0.0.1 media.steampowered.com
+127.0.0.1 steamcommunity.com
+127.0.0.1 www.steamcommunity.com
+127.0.0.1 store.steampowered.com
+127.0.0.1 api.steampowered.com
+127.0.0.1 help.steampowered.com
+127.0.0.1 login.steampowered.com
+127.0.0.1 checkout.steampowered.com
+127.0.0.1 img.youtube.com
+127.0.0.1 shared.st.dl.eccdnx.com
+127.0.0.1 clan.st.dl.eccdnx.com
+127.0.0.1 store.st.dl.eccdnx.com
+127.0.0.1 avatars.st.dl.eccdnx.com
+127.0.0.1 media.st.dl.eccdnx.com
+127.0.0.1 video.st.dl.eccdnx.com
+127.0.0.1 origin-a.akamaihd.net
+127.0.0.1 fonts.gstatic.com
+127.0.0.1 gravatar.com
+127.0.0.1 secure.gravatar.com
+127.0.0.1 www.gravatar.com
+127.0.0.1 themes.googleusercontent.com
+127.0.0.1 ajax.googleapis.com
+127.0.0.1 fonts.googleapis.com
+127.0.0.1 maxcdn.bootstrapcdn.com
+127.0.0.1 google.com
+127.0.0.1 www.google.com
+127.0.0.1 hcaptcha.com
+127.0.0.1 assets.hcaptcha.com
+127.0.0.1 imgs.hcaptcha.com
+127.0.0.1 www.hcaptcha.com
+127.0.0.1 docs.hcaptcha.com
+127.0.0.1 js.hcaptcha.com
+127.0.0.1 newassets.hcaptcha.com
+127.0.0.1 imgs3.hcaptcha.com
+127.0.0.1 client-api.arkoselabs.com
+127.0.0.1 epic-games-api.arkoselabs.com
+127.0.0.1 cdn.arkoselabs.com
+127.0.0.1 prod-ireland.arkoselabs.com
+127.0.0.1 huggingface.co
+127.0.0.1 github.dev
+127.0.0.1 api.github.com
+127.0.0.1 github.githubassets.com
+127.0.0.1 support-assets.githubassets.com
+127.0.0.1 education.github.com
+127.0.0.1 resources.github.com
+127.0.0.1 uploads.github.com
+127.0.0.1 archiveprogram.github.com
+127.0.0.1 raw.github.com
+127.0.0.1 githubusercontent.com
+127.0.0.1 raw.githubusercontent.com
+127.0.0.1 camo.githubusercontent.com
+127.0.0.1 cloud.githubusercontent.com
+127.0.0.1 avatars.githubusercontent.com
+127.0.0.1 avatars0.githubusercontent.com
+127.0.0.1 avatars1.githubusercontent.com
+127.0.0.1 avatars2.githubusercontent.com
+127.0.0.1 avatars3.githubusercontent.com
+127.0.0.1 user-images.githubusercontent.com
+127.0.0.1 objects.githubusercontent.com
+127.0.0.1 private-user-images.githubusercontent.com
+127.0.0.1 github.com
+127.0.0.1 pages.github.com
+127.0.0.1 gist.github.com
+127.0.0.1 githubapp.com
+127.0.0.1 hub.docker.com
+127.0.0.1 greasyfork.org
+127.0.0.1 update.greasyfork.org
+127.0.0.1 github.io
+127.0.0.1 www.github.io
+127.0.0.1 fandom.com
+127.0.0.1 www.fandom.com
+127.0.0.1 nexusmods.com
+127.0.0.1 www.nexusmods.com
+127.0.0.1 staticdelivery.nexusmods.com
+127.0.0.1 cf-files.nexusmods.com
+127.0.0.1 staticstats.nexusmods.com
+127.0.0.1 users.nexusmods.com
+127.0.0.1 files.nexus-cdn.com
+127.0.0.1 premium-files.nexus-cdn.com
+127.0.0.1 supporter-files.nexus-cdn.com
+127.0.0.1 storage.live.com
+127.0.0.1 skyapi.onedrive.live.com
+127.0.0.1 onedrive.live.com
+127.0.0.1 onedrive.live
+127.0.0.1 mega.co.nz
+127.0.0.1 g.cdn1.mega.co.nz
+127.0.0.1 www.mega.co.nz
+127.0.0.1 userstroage.mega.co.nz
+127.0.0.1 g.api.mega.co.nz
+127.0.0.1 mega.io
+127.0.0.1 g.static.mega.co.nz
+127.0.0.1 mega.nz
+127.0.0.1 www.mega.nz
+127.0.0.1 aem.dropbox.com
+127.0.0.1 dropbox.com
+127.0.0.1 www.dropbox.com
+127.0.0.1 dl.dropboxusercontent.com
+127.0.0.1 uc07aaf207f16a978a3dbc24a1c9.dl.dropboxusercontent.com
+127.0.0.1 uc87442e427766fe8cf2a7a07827.dl.dropboxusercontent.com
+127.0.0.1 uc957f785cc03b9b273234fd24f9.dl.dropboxusercontent.com
+127.0.0.1 ucc541451e9df780e40777d477eb.dl.dropboxusercontent.com
+127.0.0.1 ucb277f9a438d6b3f4ea2147ac26.dl.dropboxusercontent.com
+127.0.0.1 uc4b4b602d4b01e27782f92ce984.dl.dropboxusercontent.com
+127.0.0.1 uc9c83355d6aa8bc75f7f597c7d6.dl.dropboxusercontent.com
+127.0.0.1 ucaf37cba09486e69c215bdfe2e2.dl.dropboxusercontent.com
+127.0.0.1 uca3a40eb53259715309022eb9fd.dl.dropboxusercontent.com
+127.0.0.1 pinterest.com
+127.0.0.1 www.pinterest.com
+127.0.0.1 pinimg.com
+127.0.0.1 sm.pinimg.com
+127.0.0.1 s.pinimg.com
+127.0.0.1 i.pinimg.com
+127.0.0.1 de.pinterest.com
+127.0.0.1 s2.pinimg.com
+127.0.0.1 artstation.com
+127.0.0.1 www.artstation.com
+127.0.0.1 cdn-learning.artstation.com
+127.0.0.1 cdna.artstation.com
+127.0.0.1 cdn.artstation.com
+127.0.0.1 cdnb.artstation.com
+127.0.0.1 aleksi.artstation.com
+127.0.0.1 aroll.artstation.com
+127.0.0.1 dya.artstation.com
+127.0.0.1 yourihoek.artstation.com
+127.0.0.1 rishablue.artstation.com
+127.0.0.1 ww.artstation.com
+127.0.0.1 magazine.artstation.com
+127.0.0.1 imgur.com
+127.0.0.1 i.imgur.com
+127.0.0.1 s.imgur.com
+127.0.0.1 i.stack.imgur.com
+127.0.0.1 m.imgur.com
+127.0.0.1 api.imgur.com
+127.0.0.1 p.imgur.com
+127.0.0.1 www.imgur.com
+127.0.0.1 fufufu23.imgur.com
+127.0.0.1 thepoy.imgur.com
+127.0.0.1 blog.imgur.com
+127.0.0.1 cellcow.imgur.com
+127.0.0.1 t.imgur.com
+127.0.0.1 vercel.app
+127.0.0.1 in.appcenter.ms
+127.0.0.1 appcenter.ms
+127.0.0.1 local.steampp.net
+# Steam++ End

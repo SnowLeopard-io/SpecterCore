@@ -2035,6 +2035,7 @@ export class GuestProcessRunner {
         switch (msg) {
           case 0x000c: { // WM_SETTEXT
             rec.text = readWStr(lParam);
+            this.onTextChanged?.(hwnd, rec.text);
             return { returnValue: 1, errorCode: E.NO_ERROR };
           }
           case 0x000d: { // WM_GETTEXT: copy rec.text (max-1 chars + NUL)
@@ -2050,6 +2051,23 @@ export class GuestProcessRunner {
           }
           case 0x000e: // WM_GETTEXTLENGTH
             return { returnValue: rec.text.length, errorCode: E.NO_ERROR };
+          case 0x00b8: // EM_GETMODIFY: report unmodified so New/Open/Exit
+            return { returnValue: 0, errorCode: E.NO_ERROR }; // skip save prompt
+          case 0x00b9: // EM_SETMODIFY
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          case 0x00b1: // EM_SETSEL
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          case 0x00c2: { // EM_REPLACESEL: notepad's New/Paste path — replace
+            // the (all-selected) text with the given string.
+            const rep = readWStr(lParam);
+            if (rec.text !== rep) {
+              rec.text = rep;
+              this.onTextChanged?.(hwnd, rec.text);
+            }
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
+          case 0x00b6: // EM_GETLINECOUNT
+            return { returnValue: rec.text === '' ? 1 : rec.text.split('\n').length, errorCode: E.NO_ERROR };
           default:
             return { returnValue: 0, errorCode: E.NO_ERROR };
         }
