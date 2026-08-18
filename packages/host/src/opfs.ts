@@ -120,7 +120,11 @@ export class OpfsFileStore {
   async openFile(path: string, mode: FileOpenMode): Promise<OpenedFile> {
     assertRoot(this.root);
     const store = this.toStore(path);
-    const handle = (await resolveHandle(this.root, store, true)) as FileSystemFileHandle | null;
+    // Only write-ish modes create the file; 'read' must fail on a missing
+    // file instead of silently creating an empty one (which then reads as
+    // "not a PE file" for a guest exe).
+    const create = mode === 'write' || mode === 'readwrite' || mode === 'create' || mode === 'append';
+    const handle = (await resolveHandle(this.root, store, create)) as FileSystemFileHandle | null;
     if (!handle || handle.kind !== 'file') throw new OpfsFileStoreError(`Not a file: ${path}`);
     return new OpfsOpenedFile(path, mode, handle, this.root);
   }
@@ -176,7 +180,13 @@ export class OpfsFileStore {
     if (store === '') {
       return { name: this.name, kind: 'directory', size: 0, modified: 0 };
     }
-    const handle = await resolveHandle(this.root, store, false);
+    let handle: FileSystemFileHandle | FileSystemDirectoryHandle | null;
+    try {
+      handle = await resolveHandle(this.root, store, false);
+    } catch {
+      // missing intermediate directory (or any FS error) -> "not found"
+      return null;
+    }
     if (!handle) return null;
     if (handle.kind === 'directory') return { name: this.lastSegment(store), kind: 'directory', size: 0, modified: 0 };
     const file = await handle.getFile();

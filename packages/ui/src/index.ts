@@ -3,6 +3,7 @@ export * from './desktop-controller';
 export * from './context';
 export * from './types';
 export * from './apps';
+export * from './builtin-win';
 export * from './plugin';
 export * from './components/Desktop';
 export * from './components/WindowFrame';

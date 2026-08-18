@@ -124,6 +124,11 @@ export interface DesktopController {
    * 用户取消时返回 null；环境不支持时返回 null。
    */
   pickLocalFile(): Promise<LocalFileInfo | null>;
+  /**
+   * 清空虚拟硬盘（format）并重置已安装应用缓存，随后刷新页面。
+   * 桌面右键菜单「Wipe Virtual Disk」调用。
+   */
+  wipeStorage(): Promise<void>;
 }
 
 export interface SystemInfo {

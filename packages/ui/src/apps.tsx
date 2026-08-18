@@ -79,6 +79,16 @@ export const DEFAULT_APPS: AppDefinition[] = [
     group: 'System',
     render: (args) => <RunExecutableApp initialFile={args?.path} />,
   },
+  {
+    appId: 'windows-notepad',
+    name: 'Notepad (Windows)',
+    icon: '📝',
+    description: 'Run the bundled Windows notepad.exe with its MUI resources',
+    group: 'System',
+    // Launch is special-cased in DesktopController: it runs the bundled
+    // notepad as a real guest window (no application-shell window).
+    render: () => null,
+  },
 ];
 
 export function toDesktopApp(app: AppDefinition): DesktopAppInfo {

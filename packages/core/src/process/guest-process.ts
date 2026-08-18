@@ -85,6 +85,17 @@ export interface PaintCommand {
   color?: number;
 }
 
+/** One flat menu section parsed from an RT_MENU resource (Layer 3). */
+export interface GuestMenuItem {
+  id: number;
+  label: string;
+}
+
+export interface GuestMenuSection {
+  title: string;
+  items: GuestMenuItem[];
+}
+
 /** Summary of a guest window as seen by the GUI bridge. */
 export interface GuestWindowRecord {
   hwnd: number;
@@ -92,6 +103,8 @@ export interface GuestWindowRecord {
   wndProc: number;
   parent: number;
   text: string;
+  /** Menu bar sections parsed from the window's RT_MENU (empty when none). */
+  menu: GuestMenuSection[];
 }
 
 export interface GuestProcessResult {
@@ -116,6 +129,10 @@ export interface GuestProcessResult {
   windows: GuestWindowRecord[];
   /** GDI draw operations captured during the run (Layer 2). */
   paintCommands: PaintCommand[];
+  /** True when MUI satellite resources were merged (real strings/menus). */
+  muiLoaded: boolean;
+  /** Path of the .mui file merged (diagnostics; '' when none). */
+  muiSource: string;
 }
 
 export interface GuestProcessOptions {
@@ -153,6 +170,18 @@ export interface GuestProcessOptions {
    * then already be in the correct mode).
    */
   createEngine?: (mode: 'x86' | 'x64') => JitEngine;
+  /**
+   * Interactive mode: GetMessageW blocks (awaits) when the synthetic queue is
+   * empty instead of returning 0 (WM_QUIT). The host keeps the process alive
+   * and drives it with `postMessage`/`postText` (e.g. keyboard input to a
+   * guest EDIT control). Without this the loop drains its queued messages
+   * (WM_CREATE/WM_PAINT) and exits — the CLI baseline.
+   */
+  interactive?: boolean;
+  /** Called when GetMessageW is about to block waiting for host messages. */
+  onMessageWait?: () => void;
+  /** Called when a guest EDIT control's text changes (host syncs the UI). */
+  onTextChanged?: (hwnd: number, text: string) => void;
 }
 
 export class GuestProcessRunner {
@@ -180,12 +209,35 @@ export class GuestProcessRunner {
    * synthetic message queue that drives the guest's GetMessageW loop.
    */
   private classWndProcs = new Map<number, number>();
-  private windowRecords = new Map<number, { wndProc: number; parent: number; className: string; text: string }>();
+  private windowRecords = new Map<
+    number,
+    { wndProc: number; parent: number; className: string; text: string; menu: GuestMenuSection[] }
+  >();
+  /** LoadMenuW handle -> parsed RT_MENU sections (Layer 3 menu bar). */
+  private menuByHandle = new Map<number, GuestMenuSection[]>();
+  /** Class atom -> menu parsed from WNDCLASSEXW.lpszMenuName (RT_MENU). */
+  private classMenus = new Map<number, GuestMenuSection[]>();
+  /** RT_MENU (type 4) resources by numeric id, from the exe/MUI table. */
+  private menuResourceTable = new Map<number, { size: number; address: number }>();
   private guiMessageQueue: Array<{ hwnd: number; msg: number; wParam: number; lParam: number }> = [];
   /** GDI draw operations captured by the Layer 2 bridge. */
   private paintCommands: PaintCommand[] = [];
   /** Pseudo object handles minted by GDI handlers (DC / font / brush / pen). */
   private gdiObjSeq = 0x3000;
+  /** Interactive mode flag (see GuestProcessOptions.interactive). */
+  private interactive = false;
+  /** Set by PostQuitMessage; GetMessageW returns 0 (WM_QUIT) once set. */
+  private quitRequested = false;
+  /** Resolver for the GetMessageW block in interactive mode. */
+  private pendingMessageResolve: (() => void) | null = null;
+  /** Host callback for EDIT text changes (see GuestProcessOptions.onTextChanged). */
+  private onTextChanged?: (hwnd: number, text: string) => void;
+  /** Host callback when GetMessageW blocks (see GuestProcessOptions.onMessageWait). */
+  private onMessageWait?: () => void;
+  /** True when MUI satellite resources were merged (real strings/menus). */
+  private muiLoaded = false;
+  /** Path of the .mui file that was merged (diagnostics). */
+  private muiSource = '';
 
   constructor(
     private readonly runtime: WasmRuntimeImpl,
@@ -213,6 +265,13 @@ export class GuestProcessRunner {
     this.guiMessageQueue.length = 0;
     this.paintCommands = [];
     this.gdiObjSeq = 0x3000;
+    this.interactive = options.interactive ?? false;
+    this.quitRequested = false;
+    this.pendingMessageResolve = null;
+    this.onTextChanged = options.onTextChanged;
+    this.onMessageWait = options.onMessageWait;
+    this.muiLoaded = false;
+    this.muiSource = '';
 
     this.runtime.resetCpu();
 
@@ -243,7 +302,9 @@ export class GuestProcessRunner {
     if (mode === 'x64') this.runtime.writeInt32(stackTop - 8, 0);
     this.runtime.setReg(mode === 'x64' ? 'rsp' : 'esp', stackTop - width);
 
-    const dispatcher = new ApiTrapDispatcher(this.interceptor, this.runtime, stubs, 8, mode);
+    // 16 arg slots: CreateWindowExW has 12 params and handlers (GUI bridge)
+    // read hWndParent at rawArgs[8] — the default 8 slots were not enough.
+    const dispatcher = new ApiTrapDispatcher(this.interceptor, this.runtime, stubs, 16, mode);
     this.installSehDispatch(dispatcher, jit, mode);
     this.installGuiBridge(dispatcher, jit, mode);
     const trapHandler: TrapHandler = {
@@ -283,8 +344,11 @@ export class GuestProcessRunner {
         wndProc: r.wndProc,
         parent: r.parent,
         text: r.text,
+        menu: r.menu,
       })),
       paintCommands: [...this.paintCommands],
+      muiLoaded: this.muiLoaded,
+      muiSource: this.muiSource,
     };
     if (guestResult.status === 'fault') options.onFault?.(this.runtime, guestResult);
     return guestResult;
@@ -444,27 +508,41 @@ export class GuestProcessRunner {
       // floor(id/16) and id%16, which looked up the wrong block (id 1 -> block
       // 0) and the wrong slot (id 16 -> slot 0 of block 1, which is empty).
       const block = resourceTable.get((6 << 16) | ((id >> 4) + 1));
-      if (!block) return { returnValue: 0, errorCode: E.NO_ERROR };
-      let off = block.address;
-      const slot = id & 0xf;
-      for (let i = 0; i < 16; i++) {
-        const b = this.runtime.readBytes(off, 1);
-        const len = b.byteLength >= 1 ? b[0]! : 0;
-        if (i === slot) {
-          const n = Math.min(len, cch);
-          const w = new Uint8Array(n * 2);
-          for (let j = 0; j < n; j++) {
-            const c = readWChar(off + 1 + j * 2);
-            w[j * 2] = c & 0xff;
-            w[j * 2 + 1] = (c >> 8) & 0xff;
+      if (block) {
+        let off = block.address;
+        const slot = id & 0xf;
+        for (let i = 0; i < 16; i++) {
+          const b = this.runtime.readBytes(off, 1);
+          const len = b.byteLength >= 1 ? b[0]! : 0;
+          if (i === slot) {
+            const n = Math.min(len, cch);
+            const w = new Uint8Array(n * 2);
+            for (let j = 0; j < n; j++) {
+              const c = readWChar(off + 1 + j * 2);
+              w[j * 2] = c & 0xff;
+              w[j * 2 + 1] = (c >> 8) & 0xff;
+            }
+            this.runtime.writeBytes(buf, w);
+            this.runtime.writeInt32(buf + n * 2, 0); // NUL terminator
+            return { returnValue: n, errorCode: E.NO_ERROR };
           }
-          this.runtime.writeBytes(buf, w);
-          this.runtime.writeInt32(buf + n * 2, 0); // NUL terminator
-          return { returnValue: n, errorCode: E.NO_ERROR };
+          off += 1 + len * 2;
         }
-        off += 1 + len * 2;
       }
-      return { returnValue: 0, errorCode: E.NO_ERROR };
+      // Fallback: the RT_STRING table is missing (no MUI satellite resources,
+      // e.g. in the browser). Real Windows aborts notepad here; returning a
+      // non-empty placeholder keeps the GUI init going so the window /
+      // message-loop / paint pipeline can be exercised. Content is a stub.
+      const placeholder = `S${id}`;
+      const n = Math.min(placeholder.length, cch - 1);
+      const w = new Uint8Array(n * 2 + 2);
+      for (let j = 0; j < n; j++) {
+        const c = placeholder.charCodeAt(j);
+        w[j * 2] = c & 0xff;
+        w[j * 2 + 1] = (c >> 8) & 0xff;
+      }
+      this.runtime.writeBytes(buf, w);
+      return { returnValue: n, errorCode: E.NO_ERROR };
     });
 
     // LoadMenuW/A + LoadAcceleratorsW: return the raw resource bytes (the
@@ -485,10 +563,18 @@ export class GuestProcessRunner {
         const s = readWStr(name).toLowerCase();
         if (s) entry = namedResources.get(`${type}:${s}`);
       }
-      if (!entry) return { returnValue: 0, errorCode: E.ERROR_FILE_NOT_FOUND };
-      return { returnValue: entry.address, errorCode: E.NO_ERROR };
+      if (entry) return { returnValue: entry.address, errorCode: E.NO_ERROR };
+      // Fallback: resource missing (no MUI) — mint a unique pseudo-handle so
+      // guests that null-check LoadMenuW/LoadAcceleratorsW keep going. The
+      // handle is never dereferenced as a real resource by our bridge.
+      return { returnValue: ++resHandleSeq, errorCode: E.NO_ERROR };
     };
-    this.interceptor.hook('user32.dll', 'LoadMenuW', (ctx) => loadResBytes(ctx, 4));
+    let resHandleSeq = 0x2000;
+    this.interceptor.hook('user32.dll', 'LoadMenuW', (ctx) => {
+      const res = loadResBytes(ctx, 4);
+      if (res.returnValue) this.menuByHandle.set(res.returnValue, this.parseMenuResource(res.returnValue));
+      return res;
+    });
     this.interceptor.hook('user32.dll', 'LoadMenuA', (ctx) => loadResBytes(ctx, 4));
     this.interceptor.hook('user32.dll', 'LoadAcceleratorsW', (ctx) => loadResBytes(ctx, 9));
     this.interceptor.hook('user32.dll', 'LoadAcceleratorsA', (ctx) => loadResBytes(ctx, 9));
@@ -1202,6 +1288,12 @@ export class GuestProcessRunner {
     // the hooks above (LoadStringW/LoadMenuW/...) resolve them. Needs bumpAlloc
     // (defined above) to copy the bytes into guest memory.
     await this.mergeMuiResources(resourceTable, namedResources, bumpAlloc);
+    // Keep the RT_MENU (type 4) entries for class-menu parsing (Layer 3):
+    // notepad attaches its menu via WNDCLASSEXW.lpszMenuName, not LoadMenuW.
+    this.menuResourceTable.clear();
+    for (const [key, entry] of resourceTable) {
+      if ((key >>> 16) === 4) this.menuResourceTable.set(key & 0xffff, entry);
+    }
   }
 
   /**
@@ -1235,15 +1327,22 @@ export class GuestProcessRunner {
       `C:/Windows/System32/zh-Hans/${base}.mui`,
     ];
     let mui: Uint8Array | null = null;
+    let muiPath = '';
     for (const p of candidates) {
       try {
         mui = await this.readFile(p);
       } catch {
         mui = null;
       }
-      if (mui && mui.byteLength > 0) break;
+      if (mui && mui.byteLength > 0) {
+        muiPath = p;
+        break;
+      }
     }
-    if (!mui || mui.byteLength === 0) return;
+    if (!mui || mui.byteLength === 0) {
+      console.warn(`[bk] MUI: no satellite found for ${this.modulePath} (candidates: ${candidates.join(', ')})`);
+      return;
+    }
 
     const view = new DataView(mui.buffer, mui.byteOffset, mui.byteLength);
     const u16 = (o: number): number => (o + 2 <= mui.byteLength ? view.getUint16(o, true) : 0);
@@ -1341,7 +1440,11 @@ export class GuestProcessRunner {
       merged += 1;
     }
     if (merged > 0) {
-      console.error(`[bk] merged ${merged} MUI resources (${base}.mui)`);
+      this.muiLoaded = true;
+      this.muiSource = muiPath;
+      console.error(`[bk] merged ${merged} MUI resources (${muiPath})`);
+    } else {
+      console.warn(`[bk] MUI: found ${muiPath} but merged 0 resources`);
     }
   }
 
@@ -1814,6 +1917,13 @@ export class GuestProcessRunner {
         this.classWndProcs.set(atom, peek(lpWndClass + 8)); // WNDCLASSEXW.lpfnWndProc
         const name = readWStr(peek(lpWndClass + 40)); // lpszClassName
         if (name) classNames.set(name.toLowerCase(), atom);
+        // WNDCLASSEXW.lpszMenuName (+36): numeric MAKEINTRESOURCE -> RT_MENU.
+        // notepad attaches its menu to the class, so parse it here (Layer 3).
+        const menuName = peek(lpWndClass + 36);
+        if ((menuName >>> 16) === 0) {
+          const entry = this.menuResourceTable.get(menuName & 0xffff);
+          if (entry) this.classMenus.set(atom, this.parseMenuResource(entry.address, entry.size));
+        }
       }
       return { returnValue: atom, errorCode: E.NO_ERROR };
     };
@@ -1825,16 +1935,26 @@ export class GuestProcessRunner {
       const classNameArg = ctx.rawArgs[1] ?? 0;
       let wndProc = 0;
       let className = '';
+      let atom = 0;
       if ((classNameArg >>> 16) === 0) {
         // Class given as an atom (MAKEINTRESOURCE).
         className = `#${classNameArg & 0xffff}`;
-        wndProc = this.classWndProcs.get(classNameArg & 0xffff) ?? 0;
+        atom = classNameArg & 0xffff;
+        wndProc = this.classWndProcs.get(atom) ?? 0;
       } else {
         className = readWStr(classNameArg);
-        const atom = className.toLowerCase() ? classNames.get(className.toLowerCase()) : undefined;
+        atom = className.toLowerCase() ? (classNames.get(className.toLowerCase()) ?? 0) : 0;
         if (atom) wndProc = this.classWndProcs.get(atom) ?? 0;
       }
-      this.windowRecords.set(hwnd, { wndProc, parent: ctx.rawArgs[8] ?? 0, className, text: '' });
+      const menu =
+        this.menuByHandle.get(ctx.rawArgs[9] ?? 0) ?? (atom ? (this.classMenus.get(atom) ?? []) : []);
+      this.windowRecords.set(hwnd, {
+        wndProc,
+        parent: ctx.rawArgs[8] ?? 0,
+        className,
+        text: '',
+        menu,
+      });
       // Windows delivers WM_CREATE to every window as it is created. Enqueue
       // it for windows that have a real guest window procedure so the message
       // loop actually delivers it (system classes like "EDIT" have none).
@@ -1855,10 +1975,10 @@ export class GuestProcessRunner {
 
     // Message loop: pop the synthetic queue. A non-empty queue yields one
     // message (return 1, MSG written to lpMsg); an empty queue is WM_QUIT
-    // (return 0) and the loop exits.
-    const getMessage = (ctx: ApiCallContext): ApiResult => {
-      const m = this.guiMessageQueue.shift();
-      if (!m) return { returnValue: 0, errorCode: E.NO_ERROR };
+    // (return 0) in the CLI baseline. In interactive mode the call BLOCKS
+    // (awaits) until the host pushes a message via postMessage/postText —
+    // this keeps the guest process alive for real input.
+    const writeMsg = (ctx: ApiCallContext, m: { hwnd: number; msg: number; wParam: number; lParam: number }): ApiResult => {
       const lpMsg = ctx.rawArgs[0] ?? 0;
       if (lpMsg) {
         runtime.writeInt32(lpMsg + 0, m.hwnd);
@@ -1871,6 +1991,19 @@ export class GuestProcessRunner {
       }
       return { returnValue: 1, errorCode: E.NO_ERROR };
     };
+    const getMessage = async (ctx: ApiCallContext): Promise<ApiResult> => {
+      const m = this.guiMessageQueue.shift();
+      if (m) return writeMsg(ctx, m);
+      if (this.quitRequested || !this.interactive) return { returnValue: 0, errorCode: E.NO_ERROR };
+      // Interactive: block until the host posts a message.
+      this.onMessageWait?.();
+      await new Promise<void>((resolve) => {
+        this.pendingMessageResolve = resolve;
+      });
+      const m2 = this.guiMessageQueue.shift();
+      if (!m2) return { returnValue: 0, errorCode: E.NO_ERROR };
+      return writeMsg(ctx, m2);
+    };
     this.interceptor.hook('user32.dll', 'GetMessageW', getMessage);
     this.interceptor.hook('user32.dll', 'GetMessageA', getMessage);
 
@@ -1880,7 +2013,13 @@ export class GuestProcessRunner {
     this.interceptor.hook('user32.dll', 'TranslateMessage', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'DefWindowProcW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'PostQuitMessage', () => {
-      this.guiMessageQueue.length = 0; // next GetMessageW returns 0 (WM_QUIT)
+      this.guiMessageQueue.length = 0;
+      this.quitRequested = true; // next GetMessageW returns 0 (WM_QUIT)
+      if (this.pendingMessageResolve) {
+        const r = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        r();
+      }
       return { returnValue: 0, errorCode: E.NO_ERROR };
     });
     // SendMessageW: minimal system-control behaviour — the EDIT control's
@@ -2153,6 +2292,111 @@ export class GuestProcessRunner {
   /** Small helper: BOOL TRUE with NO_ERROR. */
   private ok1(): ApiResult {
     return { returnValue: 1, errorCode: E.NO_ERROR };
+  }
+
+  /**
+   * Parses an RT_MENU (type 4) resource into flat menu sections for the host
+   * to render. notepad's layout: MENUHEADER {version, size} (4 bytes), then
+   * records of WORD flags + string. MF_POPUP (0x10) items carry their title
+   * right after the 4-byte header; plain items put it after the flags word.
+   * There is no mtID field in this menu, and notepad's command ids are the
+   * sequential 1..n classic layout — assign them in order.
+   */
+  private parseMenuResource(addr: number, size = 0): GuestMenuSection[] {
+    if (!addr) return [];
+    const mem = this.runtime.memory.buffer;
+    const peekW16 = (a: number): number =>
+      a + 2 <= mem.byteLength ? new DataView(mem).getUint16(a, true) : 0;
+    const readW = (a: number): string => {
+      if (!a) return '';
+      const view = new DataView(mem);
+      let s = '';
+      for (let i = 0; a + i + 1 < mem.byteLength && i < 512; i += 2) {
+        const c = view.getUint16(a + i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const sections: GuestMenuSection[] = [];
+    let cur: GuestMenuSection | null = null;
+    let depth = 0;
+    const limit = size > 0 ? addr + size : mem.byteLength;
+    let off = (addr + 4 + 3) & ~3;
+    for (let guard = 0; guard < 1024 && off + 2 <= limit; guard++) {
+      const flags = peekW16(off);
+      if (flags === 0) {
+        off += 2; // alignment/padding between records
+        continue;
+      }
+      if ((flags & 0x80) !== 0) {
+        // MF_END: popup items are done. Nested popups (submenus) flatten into
+        // the current top-level section; the section itself stays open until
+        // the next top-level popup (notepad puts File>Exit after an MF_END).
+        depth = Math.max(0, depth - 1);
+        off += 2;
+        continue;
+      }
+      if ((flags & 0x800) !== 0) {
+        // MF_SEPARATOR: no title — just the flags word.
+        off += 2;
+        continue;
+      }
+      if ((flags & 0x10) !== 0) {
+        // Popup: like plain items, the title immediately follows the flags
+        // word (there is no popupOffset field — notepad's first title char
+        // occupies that slot). Top-level popups open a section; nested ones
+        // (submenus like Edit>Format) become items of the current section
+        // (flattened, children appended after them).
+        const title = readW(off + 2);
+        if (depth === 0) {
+          cur = { title, items: [] };
+          sections.push(cur);
+        } else if (cur) {
+          cur.items.push({ id: flags & 0xffff, label: title });
+        }
+        depth += 1;
+        off = (off + 2 + (title.length + 1) * 2 + 3) & ~3;
+      } else {
+        const label = readW(off + 2);
+        if (cur && label) cur.items.push({ id: flags & 0xffff, label });
+        off = (off + 2 + (label.length + 1) * 2 + 3) & ~3;
+      }
+    }
+    return sections;
+  }
+
+  /**
+   * Interactive API (see GuestProcessOptions.interactive): pushes a message
+   * into the guest's queue and wakes a GetMessageW that is blocked waiting.
+   */
+  postMessage(msg: { hwnd: number; msg: number; wParam: number; lParam: number }): void {
+    this.guiMessageQueue.push(msg);
+    if (this.pendingMessageResolve) {
+      const r = this.pendingMessageResolve;
+      this.pendingMessageResolve = null;
+      r();
+    }
+  }
+
+  /** Replaces an EDIT control's text from the host side (input bridge). */
+  postText(hwnd: number, text: string): void {
+    const rec = this.windowRecords.get(hwnd);
+    if (!rec) return;
+    rec.text = text;
+    this.onTextChanged?.(hwnd, text);
+  }
+
+  /** Live window tree — the interactive host reads it while the process runs. */
+  getWindows(): GuestWindowRecord[] {
+    return [...this.windowRecords.entries()].map(([hwnd, r]) => ({
+      hwnd,
+      className: r.className,
+      wndProc: r.wndProc,
+      parent: r.parent,
+      text: r.text,
+      menu: r.menu,
+    }));
   }
 
   /**

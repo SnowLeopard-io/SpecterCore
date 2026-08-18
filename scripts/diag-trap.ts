@@ -36,7 +36,7 @@ class LoggingInterceptor extends ApiInterceptorImpl {
     if (ctx.proc.toLowerCase().includes('command_line') || ctx.proc.toLowerCase() === 'charnextw') {
       console.error(`[dbg] ${ctx.module}!${ctx.proc} normalized=${normalizeApiSetModule(ctx.module)} handler=${this.getHandler(normalizeApiSetModule(ctx.module), ctx.proc) ? 'YES' : 'NO'}`);
     }
-    const args = ctx.rawArgs.slice(0, 8).map((a) => `0x${(a >>> 0).toString(16)}`);
+    const args = ctx.rawArgs.slice(0, 12).map((a) => `0x${(a >>> 0).toString(16)}`);
     const result = await super.dispatch(ctx);
     console.error(
       `[api] ${ctx.module}!${ctx.proc}(${args.join(', ')}) -> 0x${(result.returnValue >>> 0).toString(16)}${result.returnValueHigh !== undefined ? `:0x${(result.returnValueHigh >>> 0).toString(16)}` : ''}`,
@@ -260,6 +260,7 @@ async function main(): Promise<void> {
     createEngine: (mode) => new JitEngineImpl(runtime, mode),
     modulePath,
     readFile: async (p) => {
+      if (process.env.BK_NO_MUI === '1') return null; // mimic browser env
       try {
         return new Uint8Array(await readFile(p));
       } catch {
@@ -286,6 +287,12 @@ async function main(): Promise<void> {
       console.error(
         `  [win] hwnd=0x${w.hwnd.toString(16)} class="${w.className}" wndProc=0x${w.wndProc.toString(16)} parent=0x${w.parent.toString(16)} text="${w.text}"`,
       );
+      if (w.menu && w.menu.length > 0) {
+        for (const s of w.menu) {
+          const items = s.items.map((it) => `${it.id}:${it.label}`).join(', ');
+          console.error(`  [menu] "${s.title}": ${items}`);
+        }
+      }
     }
   }
   if (result.paintCommands && result.paintCommands.length > 0) {

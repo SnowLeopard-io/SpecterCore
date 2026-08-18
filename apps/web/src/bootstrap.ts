@@ -3,8 +3,8 @@ import { HostLayerPlugin } from '@bk/host';
 import { BridgeLayerPlugin } from '@bk/bridges';
 import { CoreLayerPlugin } from '@bk/core';
 import { DriverLayerPlugin } from '@bk/drivers';
-import { UiLayerPlugin } from '@bk/ui';
-import { tokens } from '@bk/contracts';
+import { UiLayerPlugin, ensureBuiltinWinFiles } from '@bk/ui';
+import { tokens, type FileStore } from '@bk/contracts';
 import type { DesktopController } from '@bk/contracts';
 
 /**
@@ -59,6 +59,14 @@ export async function bootstrap(container: HTMLElement): Promise<Kernel> {
 
   await kernel.init();
   await kernel.start();
+
+  // Pre-provision the bundled notepad (+ MUI) into the virtual disk.
+  if (kernel.container.has(tokens.hostFileStore)) {
+    const fs = kernel.container.resolve(tokens.hostFileStore) as FileStore;
+    await ensureBuiltinWinFiles(fs)
+      .then(() => console.warn('[browser-kernel] builtin win files ready'))
+      .catch((err) => console.warn('[browser-kernel] builtin win files failed:', err));
+  }
 
   const desktop = kernel.container.resolve(tokens.uiDesktop) as DesktopController;
   await desktop.mount(container);

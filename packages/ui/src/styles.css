@@ -521,6 +521,15 @@
   text-align: center;
 }
 
+.bk-context-menu .bk-context-danger {
+  color: #c0392b;
+}
+
+.bk-context-menu .bk-context-danger:hover {
+  background: #c0392b;
+  color: #fff;
+}
+
 /* ---- app contents ---- */
 .bk-app-body {
   flex: 1;
@@ -1578,4 +1587,330 @@
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Run Executable — guest window panel (GUI bridge Layer 3) */
+.bk-run-running {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bk-tabs {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.bk-tabs button {
+  padding: 5px 14px;
+  border: 1px solid var(--bk-border, #333);
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--bk-text, #ccc);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bk-tabs button.active {
+  background: var(--bk-accent, #4a6cf7);
+  border-color: var(--bk-accent, #4a6cf7);
+  color: #fff;
+}
+
+.bk-win-close {
+  border: none;
+  background: transparent;
+  color: #aaa;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  flex: none;
+}
+
+.bk-win-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+.bk-guest {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.bk-guest-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2a2a2a;
+  color: #e0e0e0;
+  user-select: none;
+}
+
+.bk-guest-stage {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 14px;
+  padding: 14px;
+  background:
+    linear-gradient(0deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.02)),
+    #0c0c0c;
+}
+
+.bk-win {
+  width: 340px;
+  border-radius: 8px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  flex: none;
+}
+
+.bk-win-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: #2b2b2b;
+  border-bottom: 1px solid #333;
+  color: #e8e8e8;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.bk-win-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bk-win-id {
+  color: #8a8a8a;
+  font-family: Consolas, monospace;
+  font-weight: 400;
+  font-size: 11px;
+}
+
+.bk-win-body {
+  position: relative;
+  height: 210px;
+  overflow: hidden;
+  background: #151515;
+}
+
+.bk-win-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.bk-win-edit {
+  position: absolute;
+  inset: 0;
+  padding: 8px 10px;
+  background: #ffffff;
+  color: #1a1a1a;
+  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei', monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: hidden;
+  outline: none;
+  cursor: text;
+}
+
+.bk-win-caret {
+  display: inline-block;
+  width: 1px;
+  height: 15px;
+  background: #1a1a1a;
+  vertical-align: text-bottom;
+  animation: bk-caret-blink 1.06s steps(1) infinite;
+}
+
+@keyframes bk-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.bk-paint {
+  position: absolute;
+  display: block;
+  font-size: 11px;
+  line-height: 1.2;
+  color: #d0d0d0;
+  white-space: pre;
+  pointer-events: none;
+}
+
+.bk-paint-text {
+  transform: translateY(-100%);
+}
+
+.bk-paint-fillrect {
+  background: rgba(120, 180, 255, 0.18);
+}
+
+.bk-paint-rect {
+  border: 1px solid rgba(200, 200, 200, 0.6);
+  box-sizing: border-box;
+}
+
+.bk-guest-list {
+  border-top: 1px solid #2a2a2a;
+  max-height: 96px;
+  overflow: auto;
+  background: #161616;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  color: #9a9a9a;
+}
+
+.bk-guest-item {
+  display: flex;
+  gap: 12px;
+  padding: 3px 12px;
+  align-items: baseline;
+}
+
+.bk-guest-item:hover {
+  background: #1f1f1f;
+}
+
+.bk-guest-hwnd {
+  color: #6fc3ff;
+  flex: none;
+}
+
+.bk-guest-class {
+  color: #e0e0e0;
+  flex: none;
+}
+
+.bk-guest-proc {
+  color: #7f7f7f;
+  flex: none;
+}
+
+.bk-guest-text {
+  color: #9acd9a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Guest window hosted as a real desktop window (Layer 3) */
+.bk-gwin {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #f3f3f3;
+}
+
+.bk-gwin-menubar {
+  display: flex;
+  align-items: stretch;
+  background: #f3f3f3;
+  border-bottom: 1px solid #d9d9d9;
+  user-select: none;
+  flex: none;
+}
+
+.bk-gwin-menu {
+  position: relative;
+}
+
+.bk-gwin-menu-title {
+  display: block;
+  padding: 5px 11px;
+  font-size: 12px;
+  color: #1a1a1a;
+  cursor: default;
+}
+
+.bk-gwin-menu:hover .bk-gwin-menu-title,
+.bk-gwin-menu.open .bk-gwin-menu-title {
+  background: #e5f3ff;
+}
+
+.bk-gwin-menu-pop {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 170px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  z-index: 20;
+}
+
+.bk-gwin-menu:hover .bk-gwin-menu-pop,
+.bk-gwin-menu.open .bk-gwin-menu-pop {
+  display: block;
+}
+
+.bk-gwin-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: #1a1a1a;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.bk-gwin-menu-item:hover {
+  background: #e5f3ff;
+}
+
+.bk-gwin-edit {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  resize: none;
+  border: none;
+  background: #ffffff;
+  color: #1a1a1a;
+  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei', monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: auto;
+  outline: none;
+  cursor: text;
 }

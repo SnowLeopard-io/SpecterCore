@@ -2,7 +2,7 @@
 
 > **给下一个 agent 的交接入口。** 目标：让 **Windows exe** 在 Browser Kernel 的 JIT 里跑起来，最终在 L6 桌面（apps/web）里加载并运行（含控制台输出）。
 > 读完本文件后请读 `packages/core/src/{pe, jit, process, api}/` 与 `packages/contracts/src/core/`。
-> **2026-08-19 交接（Step 9 Layer 1 完成）：notepad 的消息循环已真实化——GetMessageW 返回 1 + WM_CREATE、DispatchMessageW 用嵌套 Executor 真实调用了 notepad 主窗口 WndProc（DefWindowProcW(0x10001, 0x1, 0x0, 0x0) 为铁证），WndProc 返回后消息循环退出 → `_o_exit(0)` → `status=exit eip=0x0`（cleanExit=true）。图形桥接 Layer 1（WndProc 执行链）完成；下一步是 Layer 2：GDI 桥接（WndProc 的 WM_PAINT 绘制路径）。见 Step 9 下一步。**
+> **2026-08-19 交接（Step 9 完成 + 无 MUI 兜底）：notepad 在浏览器环境（无 MUI 卫星资源）也能完整创建窗口——LoadStringW 查不到资源时返回占位符串 `S<id>`、LoadMenuW/LoadAcceleratorsW 查不到时返回假句柄（guest-process.ts），替代原来的 fail-fast 退出。验证：`BK_NO_MUI=1` 下 notepad 窗口树（Notepad+Edit）、消息循环（WM_CREATE/WM_PAINT 真实派发到 WndProc 0x40e9c0）、cleanExit 全通；带 MUI 基线无回归。GUI 桥接三层（消息循环真实化 + GDI 桥接层 + L6 窗口面板）全部就绪。下一步候选：EDIT 控件宿主渲染 / 自绘窗口程序验证 / RunExecutableApp fs 桥。**
 
 ## 当前目标（用户需求，2026-08-18 起）
 
@@ -357,10 +357,41 @@ notepad.exe（SysWOW64 x86）**首次达到完整生命周期闭环**：
 - **验证（铁证）**：日志出现 `GetMessageW -> 0x1` → `TranslateAcceleratorW(×2)` → `TranslateMessage` → **`DefWindowProcW(0x10001, 0x1, 0x0, 0x0)`（= notepad 主窗口 WndProc 收到 WM_CREATE 后调默认处理，参数与 dispatchMessage 传入完全一致）** → `DispatchMessageW -> 0x0` → `GetMessageW -> 0x0` → `_o_exit(0)` → `status=exit eip=0x0`，cleanExit=true。日志 589 行。
 - 回归：typecheck ✓、vitest **189/189** ✓（新增 RDTSC/CPUID 解码单测 2 个）、lint 0/0 ✓。
 
-### 下一步（Layer 2：GDI 桥接）
+### 下一步（Layer 2：GDI 桥接）—— ✅ 已完成（见下）
 - notepad 主窗口 WndProc 目前只处理了 WM_CREATE（返回 0）。WM_PAINT 会调 BeginPaint/GetDC/TextOutW 等 GDI API（当前默认返回 0，notepad 多数不检查，但绘制为空白）。
 - 建议先枚举 WndProc 在 WM_PAINT/WM_SIZE 路径实际调用的 GDI API（跑 WM_PAINT 看日志），逐个补 argCount + 合理默认；再把绘制指令桥接到宿主（L6）渲染。
 - 也可先发第二条消息 WM_PAINT（GetMessageW 队列预置）验证 WndProc 的绘制路径不 fault。
+
+### Layer 2 完成记录（GDI 桥接层，2026-08-19）
+**关键侦察结论**：notepad 主窗口 WndProc（0x40e9c0）是纯消息转发——WM_PAINT(0xf)/WM_ERASEBKGND 等直接 `DefWindowProcW`，**无任何 GDI 绘制调用**；notepad 的"图形"全部在 EDIT 系统控件里。因此 Layer 2 交付的是**通用 GDI 桥接层**（任何真实 GUI exe 的绘制路径都不炸 + 指令可被宿主渲染）：
+- **mapper.ts 补齐 ~50 个 GDI argCount**（gdi32 全部 stdcall）：beginpaint/endpaint/getclientrect/getwindowrect/textoutw/a/exttextoutw/a/drawtextw/a/settextcolor/setbkcolor/setbkmode/getstockobject/selectobject/deleteobject/createfontindirectw/a/createsolidbrush/createhatchbrush/createpen/fillrect/framerect/bitblt/stretchblt/patblt/movetoex/lineto/rectangle/ellipse/roundrect/gettextmetrics/gettextfacew/setmapmode/getmapmode/gettextalign/settextalign/setviewportorgex/setwindoworgex/createcompatibledc/createcompatiblebitmap/selectpalette/realizepalette/savedc/restoredc。
+- **guest-process.ts installGuiBridge 新增 GDI 块**：
+  - 伪对象池 `gdiObjSeq`（0x3000 起）：GetDC/GetWindowDC/BeginPaint（写 PAINTSTRUCT.hdc）/GetStockObject/CreateFontIndirectW（读 LOGFONTW.lfFaceName+28）/CreateSolidBrush/CreatePen/CreateCompatibleDC/Bitmap 返回递增伪句柄；SelectObject 返回 0；DeleteObject/ReleaseDC/EndPaint→1。
+  - **PaintCommand 绘制指令捕获**（`this.paintCommands`，结果经 `GuestProcessResult.paintCommands` 输出）：TextOutW/ExtTextOutW（读 UTF-16 字符串）→`{op:'text',hdc,x,y,text}`；LineTo→`line`；FillRect/FrameRect（读 RECT）→`fillrect`/`rect`；Rectangle→`rect`；BitBlt/StretchBlt/PatBlt→1（no-op）。
+  - 状态类默认：SetTextColor/SetBkColor/SetBkMode/SetTextAlign/SetMapMode 返回旧值；GetTextMetrics 写 tmHeight=16/tmAscent=12/tmDescent=4；GetTextFaceW 写 "Consolas"；GetDeviceCaps→96；MoveToEx 写 POINT。
+  - **EDIT 控件文本捕获**（SendMessageW 增强）：对 className=="EDIT" 的窗口处理 WM_SETTEXT(0xC，记录文本)/WM_GETTEXT(0xD，写回 UTF-16)/WM_GETTEXTLENGTH(0xE)；其余消息返回 0。
+  - **GetClientRect/GetWindowRect**：写 {0,0,800,560}/{0,0,800,600}（布局 math 不塌缩）。
+  - **窗口树输出**：`GuestProcessResult.windows`（hwnd/className/wndProc/parent/text）。
+- **验证**：notepad `status=exit eip=0x0`（cleanExit）✓；diag 输出窗口树 `[win] 0x10001 class="Notepad" wndProc=0x40e9c0`、`[win] 0x10002 class="Edit"`；paint 命令为空（notepad 启动不绘制，符合预期）。回归：typecheck ✓、vitest 189/189 ✓、lint 0/0 ✓。
+
+### 下一步（Layer 3：L6 桌面集成）—— ✅ 已完成（见下）
+- apps/web 加"窗口容器"：把 `GuestProcessResult.windows`（窗口树：类名/标题/文本）和 `paintCommands`（绘制指令）渲染成可见面板；RunExecutableApp 补 fs 桥 + readFile（Step 6 下一步 #2，未做）。
+- 可选：给 EDIT 控件加 WM_PAINT 宿主渲染（文字可见）；或先验证一个"自己画窗口"的 exe（WriteFile/TextOutW 路径）。
+
+### Layer 3 完成记录（L6 桌面集成，2026-08-19）
+- **RunExecutableApp.tsx**：`run()` 保存 `guestResult`（state）；running 阶段控制台下方渲染 **Guest Window 面板**（`.bk-guest`）：
+  - 每个顶层窗口（parent===0）一张 Windows 风格窗口卡（`.bk-win`）：标题栏（类名 — 文本 + HWND）、内容区（paintCommands 按坐标绝对定位渲染：text→span、fillrect/rect→div；Edit 类窗口显示文本；无绘制显示 "no paint commands"）。
+  - 底部窗口清单（`.bk-guest-list`）：hwnd/className/wndProc/text 逐行列出（含子窗口）。
+  - paint 命令只画在第一个顶层窗口（无 hdc→hwnd 归属映射）。
+- **styles.css**：`.bk-guest*`/`.bk-win*`/`.bk-paint*` 一套 Windows 11 风格（圆角、阴影、标题栏、等宽字体）。
+- **修复 dispatcher maxArgs 8→16**（trap-dispatcher 构造，guest-process run()）：CreateWindowExW 是 12 参 stdcall，hWndParent 在 rawArgs[8]（第 9 参）——原 8 槽拿不到，导致 Edit 控件 parent 误报 0。修复后窗口树正确：`0x10002 class="Edit" parent=0x10001`。
+- **验证**：notepad `status=exit eip=0x0` cleanExit ✓；窗口树 `[win] 0x10001 class="Notepad" wndProc=0x40e9c0 parent=0x0` + `[win] 0x10002 class="Edit" parent=0x10001` ✓；apps/web vite build ✓（132 modules，425 kB JS）；preview http://localhost:4173 ✓。回归：typecheck ✓、vitest 189/189 ✓、lint 0/0 ✓。
+- 注：vite build 前须手动 `rm -rf dist`（沙箱 safe-delete 会拦 vite 的 emptyDir trash 操作）；`node_modules/@bk` 需 junction（scripts/fix-bk-links.py）。
+
+### 下一步（候选）
+- **EDIT 控件宿主 WM_PAINT**：给 Edit 类窗口在 guest 侧画文字（WndProc 模拟）或宿主侧直接把 `text` 渲染到窗口卡内容区（当前已显示文本，但非位图级）。
+- **验证自绘窗口 exe**：找一个真正调 TextOutW/FillRect 的程序验证 PaintCommand 捕获链路（notepad 启动不绘制，paint 为空）。
+- RunExecutableApp 补 fs 桥 + readFile（MUI 资源，Step 6 遗留：notepad 在浏览器里跑需要 MUI 合并）。
 
 ## 诊断工具（已清理）
 

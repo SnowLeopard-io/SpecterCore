@@ -18,13 +18,21 @@ import {
   appForFile,
   installPackage as installPkg,
   listInstalledApps as listRegistryApps,
+  toStorePath,
   uninstallPackage as uninstallPkg,
 } from '@bk/shared';
+import {
+  GuestProcessRunner,
+  JitEngineImpl,
+  WasmRuntimeImpl,
+} from '@bk/core';
 import { createRoot } from 'react-dom/client';
 import { probeCapabilities } from '@bk/host';
 import { UiContext } from './context';
 import { Desktop } from './components/Desktop';
 import { DEFAULT_APPS } from './apps';
+import { ensureBuiltinWinFiles } from './builtin-win';
+import { GuestWindowView } from './apps/RunExecutableApp';
 import { InstalledAppView } from './apps/InstalledAppView';
 import type { AppDefinition, UiController } from './types';
 
@@ -100,6 +108,16 @@ export class DesktopControllerImpl implements DesktopController {
 
     const app = this.apps.find((a) => a.appId === appId);
     if (!app) throw new Error(`Unknown app: ${appId}`);
+    // Built-in Windows tools run as REAL guest windows — no application shell
+    // window around them (the notepad window itself is the app).
+    if (app.appId === 'windows-notepad') {
+      await this.launchGuestWindow({
+        storePath: 'Windows/SysWOW64/notepad.exe',
+        modulePath: 'C:/Windows/SysWOW64/notepad.exe',
+        name: 'Notepad',
+      });
+      return;
+    }
     // 带参数（open 动词：用某文件/目录打开）时始终新建窗口 —— 记事本已开着
     // 再双击 txt 必须新开一个窗口加载文件，而不是聚焦旧窗口丢掉参数。
     if (!args) {
@@ -244,6 +262,143 @@ export class DesktopControllerImpl implements DesktopController {
     return this.kernel.container.has(tokens.hostFileStore)
       ? this.kernel.container.resolve(tokens.hostFileStore)
       : null;
+  }
+
+  async wipeStorage(): Promise<void> {
+    const fs = this.getFileSystem();
+    if (!fs) return;
+    await fs.format();
+    this.installed.clear();
+    this.notifyAppsChanged();
+    // Reload so the desktop/start menu rebuild against the empty disk.
+    if (typeof window !== 'undefined') window.location.reload();
+  }
+
+  /**
+   * Runs a bundled Windows exe (with its MUI resources on the virtual disk)
+   * and hosts each guest top-level window as a REAL desktop window — no
+   * application-shell window in between. Used by built-in apps (notepad).
+   */
+  private async launchGuestWindow(source: { storePath: string; modulePath: string; name: string }): Promise<void> {
+    const fs = this.getFileSystem();
+    if (!fs) {
+      await this.showGuestError(source.name, 'No virtual disk available');
+      return;
+    }
+    // Lazy provision: make sure the bundled exe + MUI exist on the disk even
+    // if the startup provisioning failed or storage was wiped.
+    try {
+      await ensureBuiltinWinFiles(fs);
+    } catch (err) {
+      await this.showGuestError(source.name, `Provisioning bundled tools failed: ${String(err)}`);
+      return;
+    }
+    let stat = null;
+    try {
+      stat = await fs.stat(source.storePath);
+    } catch (err) {
+      await this.showGuestError(source.name, `Cannot read ${source.storePath}: ${String(err)}`);
+      return;
+    }
+    if (!stat || stat.kind !== 'file' || stat.size === 0) {
+      await this.showGuestError(
+        source.name,
+        `Bundled tool missing on the virtual disk (${source.storePath}, size=${stat?.size ?? '?'}) — reload the page to provision it.`,
+      );
+      return;
+    }
+    let file;
+    try {
+      file = await fs.openFile(source.storePath, 'read');
+    } catch (err) {
+      await this.showGuestError(source.name, `Virtual disk has no ${source.storePath} — reload the page to provision the bundled tools. (${String(err)})`);
+      return;
+    }
+    let image: Uint8Array;
+    try {
+      const size = await file.size();
+      image = await file.read(0, size);
+    } finally {
+      await file.close();
+    }
+
+    const runtime = this.kernel.container.resolve(tokens.coreWasmRuntime) as WasmRuntimeImpl;
+    const jit = this.kernel.container.resolve(tokens.coreJit);
+    const loader = this.kernel.container.resolve(tokens.corePe);
+    const interceptor = this.kernel.container.resolve(tokens.coreApi);
+    const runner = new GuestProcessRunner(runtime, jit, loader, interceptor);
+    const guestWinIds = new Map<number, string>();
+    try {
+      await runner.run(image, {
+        createEngine: (mode) => new JitEngineImpl(runtime, mode),
+        modulePath: source.modulePath,
+        readFile: async (p) => {
+          const sp = toStorePath(p);
+          try {
+            const f = await fs.openFile(sp, 'read');
+            try {
+              const size = await f.size();
+              return await f.read(0, size);
+            } finally {
+              await f.close();
+            }
+          } catch {
+            return null;
+          }
+        },
+        interactive: true,
+        onMessageWait: () => {
+          const wins = runner.getWindows();
+          for (const w of wins) {
+            if (w.parent !== 0 || guestWinIds.has(w.hwnd)) continue;
+            const edit = wins.find((c) => c.parent === w.hwnd && c.className.toLowerCase() === 'edit');
+            void this.windowManager
+              .createWindow({
+                title: `${w.className}${w.text ? ` — ${w.text}` : ''}`,
+                width: 680,
+                height: 500,
+                icon: '📝',
+                resizable: true,
+                appId: 'guest-window',
+                content: reactContent(
+                  <GuestWindowView
+                    runner={runner}
+                    hwnd={w.hwnd}
+                    editHwnd={edit ? edit.hwnd : null}
+                    menu={w.menu}
+                  />,
+                ),
+              })
+              .then((h) => guestWinIds.set(w.hwnd, h.id));
+          }
+        },
+      });
+    } catch (err) {
+      console.error(`[desktop] guest ${source.name} failed:`, err);
+      await this.showGuestError(source.name, String(err));
+    }
+  }
+
+  /** Shows a small error window when a bundled guest app cannot start. */
+  private async showGuestError(name: string, message: string): Promise<void> {
+    try {
+      await this.windowManager.createWindow({
+        title: `${name} — failed to start`,
+        width: 440,
+        height: 220,
+        resizable: false,
+        content: reactContent(
+          <div className="bk-run-stage">
+            <div className="bk-run-title">Cannot start {name}</div>
+            <pre className="bk-run-note center" style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>
+              {message}
+            </pre>
+          </div>,
+        ),
+      });
+    } catch (err) {
+      console.error('[desktop] showGuestError failed:', err);
+    }
   }
 
   async getSystemInfo(): Promise<SystemInfo> {

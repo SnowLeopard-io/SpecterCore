@@ -243,6 +243,7 @@ export function Desktop({ controller }: DesktopProps) {
           onRefresh={refreshDesktop}
           onNewFolder={createFolder}
           onOpenExplorer={() => void controller.launch('file-explorer')}
+          onWipe={() => void controller.wipeStorage()}
           onClose={() => setMenu(null)}
         />
       )}
