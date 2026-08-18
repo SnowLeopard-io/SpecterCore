@@ -1,0 +1,1581 @@
+/* Browser Kernel - L6 desktop shell styles (Windows 11 / Fluent inspired) */
+
+:root {
+  --bk-accent: #0067c0;
+  --bk-accent-hover: #1f8cf0;
+  --bk-accent-soft: rgba(0, 103, 192, 0.1);
+  --bk-selection: rgba(0, 103, 192, 0.22);
+  --bk-win-bg: #ffffff;
+  --bk-surface: #ffffff;
+  --bk-titlebar: #fafafa;
+  --bk-titlebar-inactive: #f1f1f1;
+  --bk-border: rgba(0, 0, 0, 0.09);
+  --bk-text: #1b1b1b;
+  --bk-text-dim: #5b5b5b;
+  --bk-taskbar-bg: rgba(243, 243, 243, 0.82);
+  --bk-panel-bg: rgba(244, 244, 244, 0.88);
+  --bk-hover: rgba(0, 0, 0, 0.055);
+  --bk-hover-strong: rgba(0, 0, 0, 0.09);
+}
+
+.bk-desktop {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  color: #1b1b1b;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+
+  --bk-accent: #0067c0;
+  --bk-accent-hover: #1f8cf0;
+  --bk-accent-soft: rgba(0, 103, 192, 0.1);
+  --bk-selection: rgba(0, 103, 192, 0.22);
+  --bk-win-bg: #ffffff;
+  --bk-surface: #ffffff;
+  --bk-titlebar: #fafafa;
+  --bk-titlebar-inactive: #f1f1f1;
+  --bk-border: rgba(0, 0, 0, 0.09);
+  --bk-text: #1b1b1b;
+  --bk-text-dim: #5b5b5b;
+  --bk-taskbar-bg: rgba(243, 243, 243, 0.82);
+  --bk-panel-bg: rgba(244, 244, 244, 0.88);
+  --bk-hover: rgba(0, 0, 0, 0.055);
+  --bk-hover-strong: rgba(0, 0, 0, 0.09);
+}
+
+/* ---------- Wallpaper (Windows 11 "Bloom" approximation) ---------- */
+.bk-wallpaper {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(58% 78% at 72% 26%, rgba(126, 186, 255, 0.55), rgba(126, 186, 255, 0) 62%),
+    radial-gradient(90% 120% at 30% 90%, rgba(8, 28, 70, 0.9), rgba(8, 28, 70, 0) 60%),
+    linear-gradient(135deg, #0b1e3f 0%, #123a7a 42%, #1f63b8 78%, #2e7fd6 100%);
+}
+
+/* ---------- Desktop icons ---------- */
+.bk-desktop-icons {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-height: calc(100% - 120px);
+  align-content: flex-start;
+}
+
+.bk-desktop-icon {
+  width: 88px;
+  height: 88px;
+  padding: 8px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+
+.bk-desktop-icon:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.bk-desktop-icon.selected {
+  background: rgba(255, 255, 255, 0.22);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.bk-desktop-icon-img {
+  font-size: 34px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+}
+
+.bk-desktop-icon-label {
+  max-width: 100%;
+  text-align: center;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.2;
+}
+
+/* ---------- Windows ---------- */
+.bk-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--bk-border);
+  border-radius: 9px;
+  box-shadow:
+    0 14px 38px rgba(0, 0, 0, 0.22),
+    0 2px 6px rgba(0, 0, 0, 0.12);
+  background: var(--bk-win-bg);
+  min-width: 220px;
+  min-height: 140px;
+  overflow: hidden;
+}
+
+.bk-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 4px 0 12px;
+  background: var(--bk-titlebar);
+  color: var(--bk-text);
+  cursor: default;
+  flex: 0 0 auto;
+}
+
+.bk-window:not(.focused) .bk-titlebar {
+  background: var(--bk-titlebar-inactive);
+  color: var(--bk-text-dim);
+}
+
+.bk-title-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.bk-title {
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bk-title-controls {
+  display: flex;
+  height: 100%;
+}
+
+.bk-caption-btn {
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--bk-text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 0;
+  transition: background-color 0.12s ease;
+}
+
+.bk-caption-btn svg {
+  width: 11px;
+  height: 11px;
+  display: block;
+}
+
+.bk-caption-btn:hover {
+  background: var(--bk-hover-strong);
+}
+
+.bk-caption-btn.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.bk-window-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bk-win-bg);
+  min-height: 0;
+}
+
+.bk-window.maximized {
+  border-radius: 0;
+  border: none;
+}
+
+.bk-resizer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+/* ---------- Taskbar (Windows 11, centered) ---------- */
+.bk-taskbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 8px;
+  background: var(--bk-taskbar-bg);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border-top: 1px solid rgba(255, 255, 255, 0.4);
+  z-index: 1000;
+}
+
+.bk-taskbar-cluster {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bk-task-btn {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bk-text);
+  cursor: pointer;
+  font-size: 18px;
+  position: relative;
+  transition: background-color 0.12s ease;
+}
+
+.bk-task-btn:hover {
+  background: var(--bk-hover-strong);
+}
+
+.bk-task-btn.active::after {
+  content: '';
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.bk-task-btn.start {
+  color: var(--bk-text);
+}
+
+.bk-task-btn.start.open {
+  background: var(--bk-hover-strong);
+}
+
+.bk-task-sep {
+  width: 1px;
+  height: 26px;
+  background: rgba(0, 0, 0, 0.12);
+  margin: 0 4px;
+}
+
+.bk-tray {
+  position: absolute;
+  right: 8px;
+  top: 0;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--bk-text);
+}
+
+.bk-tray-icon {
+  display: flex;
+  align-items: center;
+  opacity: 0.85;
+}
+
+.bk-tray-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.bk-tray-clock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: 11.5px;
+  line-height: 1.25;
+  color: var(--bk-text);
+}
+
+/* ---------- Start menu (Windows 11, centered acrylic panel) ---------- */
+.bk-start-menu {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 56px;
+  width: min(640px, calc(100% - 32px));
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.32);
+  background: var(--bk-panel-bg);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  z-index: 1001;
+  padding: 24px 24px 0;
+  overflow: hidden;
+}
+
+.bk-start-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  color: var(--bk-text-dim);
+  font-size: 13px;
+  margin-bottom: 18px;
+}
+
+.bk-start-search svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.bk-start-section-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--bk-text);
+  margin: 0 0 12px;
+}
+
+.bk-start-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+  overflow-y: auto;
+  padding-bottom: 18px;
+}
+
+.bk-start-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--bk-text);
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.bk-start-tile:hover {
+  background: var(--bk-hover);
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+.bk-start-tile-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: 22px;
+  background: linear-gradient(135deg, rgba(0, 103, 192, 0.16), rgba(0, 103, 192, 0.06));
+}
+
+.bk-start-tile-label {
+  max-width: 100%;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.2;
+}
+
+.bk-start-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+  margin: 0 -24px;
+  padding: 0 8px;
+  background: rgba(0, 0, 0, 0.04);
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.bk-start-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--bk-text);
+}
+
+.bk-start-user:hover {
+  background: var(--bk-hover);
+}
+
+.bk-start-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #0067c0, #38b6ff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.bk-start-power {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bk-text);
+  cursor: pointer;
+}
+
+.bk-start-power:hover {
+  background: var(--bk-hover);
+}
+
+.bk-start-power svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ---------- Context menu (Windows 11) ---------- */
+.bk-context-menu {
+  position: absolute;
+  min-width: 200px;
+  background: rgba(249, 249, 249, 0.92);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+  padding: 6px;
+  z-index: 2000;
+}
+
+.bk-context-menu button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--bk-text);
+  font-size: 13px;
+}
+
+.bk-context-menu button:hover {
+  background: var(--bk-accent);
+  color: #fff;
+}
+
+.bk-context-menu hr {
+  margin: 4px 6px;
+  border: none;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.bk-context-menu .bk-context-icon {
+  font-size: 14px;
+  width: 16px;
+  text-align: center;
+}
+
+/* ---- app contents ---- */
+.bk-app-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 14px;
+  font-family: inherit;
+  color: var(--bk-text);
+  background: var(--bk-win-bg);
+}
+
+/* Notepad menubar (Windows 11 style) */
+.bk-nt {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+}
+
+.bk-nt-menubar {
+  display: flex;
+  align-items: stretch;
+  padding: 2px 6px;
+  background: var(--bk-win-bg);
+  border-bottom: 1px solid var(--bk-border);
+  font-size: 12.5px;
+  user-select: none;
+}
+
+.bk-nt-menu {
+  position: relative;
+}
+
+.bk-nt-menu-title {
+  border: none;
+  background: transparent;
+  color: var(--bk-text);
+  font: inherit;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bk-nt-menu-title:hover,
+.bk-nt-menu-title.open {
+  background: var(--bk-accent-soft);
+}
+
+.bk-nt-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 200px;
+  background: var(--bk-surface);
+  border: 1px solid var(--bk-border);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+  padding: 6px;
+  z-index: 50;
+}
+
+.bk-nt-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--bk-text);
+  font: inherit;
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.bk-nt-item:hover:not(:disabled) {
+  background: var(--bk-accent-soft);
+}
+
+.bk-nt-item:disabled {
+  color: var(--bk-text-dim);
+  cursor: default;
+}
+
+.bk-nt-item-shortcut {
+  color: var(--bk-text-dim);
+  font-size: 11px;
+}
+
+.bk-nt-error {
+  margin: 0;
+  padding: 6px 12px;
+  background: #fde7e9;
+  color: #c42b1c;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bk-notepad {
+  flex: 1;
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 12px 14px;
+  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei', 'SimHei', 'Noto Sans Mono CJK SC', monospace;
+  font-size: 13px;
+  color: #1b1b1b;
+  background: #ffffff;
+  caret-color: #1b1b1b;
+  min-height: 0;
+}
+
+.bk-nt-statusbar {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  padding: 4px 12px;
+  background: var(--bk-win-bg);
+  border-top: 1px solid var(--bk-border);
+  color: var(--bk-text-dim);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.bk-nt-statusbar > span:last-child {
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Notepad open/save dialog */
+.bk-nt-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 80;
+}
+
+.bk-nt-modal {
+  width: 360px;
+  background: var(--bk-surface);
+  border: 1px solid var(--bk-border);
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+  padding: 18px;
+}
+
+.bk-nt-modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.bk-nt-modal-hint {
+  font-size: 12px;
+  color: var(--bk-text-dim);
+  margin-bottom: 10px;
+}
+
+.bk-nt-modal-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--bk-border);
+  border-radius: 8px;
+  background: var(--bk-win-bg);
+  color: var(--bk-text);
+  font: inherit;
+  outline: none;
+}
+
+.bk-nt-modal-input:focus {
+  border-color: var(--bk-accent);
+}
+
+.bk-nt-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.bk-nt-btn {
+  border: 1px solid var(--bk-border);
+  background: var(--bk-win-bg);
+  color: var(--bk-text);
+  font: inherit;
+  padding: 6px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.bk-nt-btn:hover {
+  background: var(--bk-accent-soft);
+}
+
+.bk-nt-btn.primary {
+  background: var(--bk-accent);
+  border-color: var(--bk-accent);
+  color: #fff;
+}
+
+.bk-nt-btn.primary:hover {
+  filter: brightness(1.05);
+}
+
+.bk-sysinfo h3 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 4px 0 12px;
+  color: var(--bk-text);
+}
+
+.bk-sysinfo h3:not(:first-child) {
+  margin-top: 22px;
+}
+
+.bk-sysinfo dl {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.bk-sysinfo dt {
+  font-weight: 600;
+  color: var(--bk-text-dim);
+}
+
+.bk-sysinfo dd {
+  margin: 0;
+  color: var(--bk-text);
+}
+
+.bk-sysinfo-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12.5px;
+  color: var(--bk-text);
+}
+
+.bk-sysinfo-list li {
+  margin-bottom: 4px;
+}
+
+.bk-mines {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #f3f3f3;
+}
+
+.bk-mines-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.bk-mines-header button {
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  background: #fff;
+  border-radius: 6px;
+  padding: 5px 14px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--bk-text);
+}
+
+.bk-mines-header button:hover {
+  background: #f0f0f0;
+}
+
+.bk-mines-grid {
+  display: grid;
+  gap: 3px;
+  background: #c8c8c8;
+  padding: 4px;
+  border-radius: 4px;
+  width: fit-content;
+}
+
+.bk-mines-cell {
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 2px;
+  background: #e8e8e8;
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.08);
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+  color: #1b1b1b;
+}
+
+.bk-mines-cell.revealed {
+  background: #f6f6f6;
+  box-shadow: none;
+}
+
+.bk-mines-cell.mine {
+  background: #e81123;
+  color: #fff;
+}
+
+.bk-window-empty {
+  padding: 24px;
+  color: var(--bk-text-dim);
+}
+
+/* ---------- File Explorer ---------- */
+.bk-explorer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bk-win-bg);
+  color: var(--bk-text);
+}
+
+.bk-explorer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: #fafafa;
+  border-bottom: 1px solid #e6e6e6;
+}
+
+.bk-explorer-btn {
+  min-width: 32px;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bk-text);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.bk-explorer-btn:hover:not(:disabled) {
+  background: var(--bk-hover);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.bk-explorer-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.bk-explorer-address {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 32px;
+  padding: 0 12px;
+  margin-left: 4px;
+  border: 1px solid #dcdcdc;
+  border-radius: 6px;
+  background: #fff;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.bk-explorer-crumb {
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.bk-explorer-crumb:hover {
+  background: var(--bk-hover);
+  color: var(--bk-accent);
+}
+
+.bk-explorer-sep {
+  color: var(--bk-text-dim);
+  margin: 0 2px;
+}
+
+.bk-explorer-error {
+  padding: 8px 12px;
+  background: #fde7e9;
+  color: #b00020;
+  font-size: 12.5px;
+  border-bottom: 1px solid #f3c9cd;
+}
+
+.bk-explorer-list {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+}
+
+.bk-explorer-empty {
+  padding: 28px 16px;
+  color: var(--bk-text-dim);
+  font-size: 13px;
+}
+
+.bk-explorer-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 96px 70px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.bk-explorer-row.selected {
+  background: var(--bk-selection);
+}
+
+.bk-explorer-row:hover {
+  background: var(--bk-hover);
+}
+
+.bk-explorer-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.bk-explorer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bk-explorer-size,
+.bk-explorer-type {
+  color: var(--bk-text-dim);
+  font-size: 12px;
+  text-align: right;
+}
+
+.bk-explorer-type {
+  text-align: left;
+}
+
+.bk-explorer-preview {
+  height: 40%;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #e6e6e6;
+  background: #fbfbfb;
+}
+
+.bk-explorer-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border-bottom: 1px solid #eee;
+}
+
+.bk-explorer-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.bk-explorer-preview-body {
+  flex: 1;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei', 'SimHei', 'Noto Sans Mono CJK SC', monospace;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #1b1b1b;
+}
+
+/* Command Prompt (cmd.exe) terminal */
+.bk-cmd {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #0c0c0c;
+  color: #cccccc;
+  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei', 'SimHei', 'Noto Sans Mono CJK SC', monospace;
+  font-size: 13px;
+  cursor: text;
+}
+
+.bk-cmd-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bk-cmd-line {
+  line-height: 1.45;
+}
+
+.bk-cmd-line.input {
+  color: #ffffff;
+}
+
+.bk-cmd-line.error {
+  color: #f48771;
+}
+
+.bk-cmd-line.system {
+  color: #9aa0a6;
+}
+
+.bk-cmd-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 10px;
+}
+
+.bk-cmd-prompt {
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.bk-cmd-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #ffffff;
+  font: inherit;
+  caret-color: #ffffff;
+}
+
+/* ---- Installer (Win11 wizard) ---- */
+.bk-installer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 24px;
+  color: var(--bk-text);
+}
+
+.bk-installer-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.bk-installer-icon {
+  font-size: 40px;
+  line-height: 1;
+}
+
+.bk-installer-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.bk-installer-version {
+  font-size: 12px;
+  color: var(--bk-text-dim);
+}
+
+.bk-installer-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--bk-text-secondary, var(--bk-text-dim));
+  line-height: 1.6;
+}
+
+.bk-installer-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 12.5px;
+}
+
+.bk-installer-value {
+  font-family: Consolas, 'Cascadia Code', monospace;
+  color: var(--bk-text);
+}
+
+.bk-installer-warn {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 200, 0, 0.14);
+  border: 1px solid rgba(255, 200, 0, 0.35);
+  color: #c9a227;
+  font-size: 12px;
+}
+
+.bk-installer-error {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 80, 80, 0.14);
+  border: 1px solid rgba(255, 80, 80, 0.35);
+  color: #e5534b;
+  font-size: 12px;
+}
+
+.bk-installer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.bk-installer-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 28px 8px;
+  color: var(--bk-text-dim);
+  font-size: 13px;
+}
+
+.bk-installer-spinner {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 3px solid rgba(0, 120, 215, 0.25);
+  border-top-color: #0078d7;
+  animation: bk-spin 0.9s linear infinite;
+}
+
+@keyframes bk-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.bk-installer-done-icon {
+  width: 52px;
+  height: 52px;
+  margin: 6px auto 2px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(46, 160, 67, 0.18);
+  color: #2ea043;
+  font-size: 26px;
+}
+
+.bk-installer-empty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--bk-text-dim);
+  font-size: 13px;
+}
+
+/* ---- Installed app entry view ---- */
+.bk-installed {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 24px;
+  color: var(--bk-text);
+}
+
+.bk-installed-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.bk-installed-icon {
+  font-size: 38px;
+  line-height: 1;
+}
+
+.bk-installed-exe-icon {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  image-rendering: auto;
+}
+
+.bk-installed-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.bk-installed-version {
+  font-size: 12px;
+  color: var(--bk-text-dim);
+}
+
+.bk-installed-desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--bk-text-secondary, var(--bk-text-dim));
+  line-height: 1.6;
+}
+
+.bk-installed-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.bk-installed-meta-label {
+  color: var(--bk-text-dim);
+  margin-right: 10px;
+}
+
+.bk-installed-meta-value {
+  font-family: Consolas, 'Cascadia Code', monospace;
+}
+
+.bk-installed-readme {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  font-family: Consolas, 'Cascadia Code', monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--bk-text);
+  max-height: 130px;
+  overflow: auto;
+}
+
+.bk-installed-readme-title {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: var(--bk-text-dim);
+}
+
+.bk-installed-hint {
+  margin-top: auto;
+  font-size: 11.5px;
+  color: var(--bk-text-dim);
+}
+
+.bk-installed-pe {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 103, 192, 0.08);
+  border: 1px solid rgba(0, 103, 192, 0.25);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.bk-installed-pe-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--bk-text);
+}
+
+.bk-installed-pe p {
+  margin: 0;
+  color: var(--bk-text-secondary, var(--bk-text-dim));
+}
+
+/* ---- Drag & drop import overlay ---- */
+.bk-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 103, 192, 0.14);
+  border: 3px dashed rgba(0, 103, 192, 0.65);
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.bk-drop-overlay-inner {
+  padding: 22px 34px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f4c81;
+}
+
+.bk-explorer-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 103, 192, 0.1);
+  border: 2px dashed rgba(0, 103, 192, 0.6);
+  box-sizing: border-box;
+  pointer-events: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f4c81;
+}
+
+/* ---- Image Viewer (Photos style) ---- */
+.bk-image-viewer {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #171717;
+  color: #e8e8e8;
+}
+
+.bk-image-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 13px;
+}
+
+.bk-image-nav {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #e8e8e8;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.bk-image-nav:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.bk-image-nav:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.bk-image-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bk-image-counter {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.bk-image-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.bk-image-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  user-select: none;
+}
+
+.bk-image-error {
+  color: #f28b82;
+  font-size: 13px;
+  padding: 12px;
+}
+
+.bk-image-empty {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+}
+
+/* ---- Run Executable (security-warning dialog + execution container) ---- */
+.bk-run {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px 26px;
+  color: var(--bk-text);
+  min-height: 0;
+  overflow: auto;
+}
+
+.bk-run-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.bk-run-icon {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  font-size: 30px;
+  border-radius: 10px;
+  background: rgba(127, 127, 127, 0.1);
+}
+
+.bk-run-icon img {
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+
+.bk-run-icon.large {
+  width: 64px;
+  height: 64px;
+  font-size: 40px;
+}
+
+.bk-run-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.bk-run-subtitle {
+  font-size: 12.5px;
+  color: var(--bk-text-dim);
+  margin-top: 2px;
+}
+
+.bk-run-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 13px;
+}
+
+.bk-run-name {
+  font-weight: 600;
+  font-family: Consolas, 'Cascadia Code', monospace;
+}
+
+.bk-run-meta {
+  font-size: 12px;
+  color: var(--bk-text-dim);
+}
+
+.bk-run-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--bk-text-secondary, var(--bk-text-dim));
+}
+
+.bk-run-note.center {
+  text-align: center;
+}
+
+.bk-run-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+.bk-run-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  min-height: 0;
+}
+
+/* Run Executable console (real JIT output) */
+.bk-console {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: #0c0c0c;
+  color: #cccccc;
+  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei', 'SimHei', 'Noto Sans Mono CJK SC', monospace;
+  font-size: 13px;
+}
+
+.bk-console-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2a2a2a;
+  color: #e0e0e0;
+  user-select: none;
+}
+
+.bk-console-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #4caf50;
+  flex: none;
+}
+
+.bk-console-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bk-console-body {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bk-console-empty {
+  color: #666;
+  font-style: italic;
+}
+
+.bk-console-pre {
+  margin: 0;
+  font: inherit;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

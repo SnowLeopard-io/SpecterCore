@@ -1,0 +1,93 @@
+import type { DesktopAppInfo } from '@bk/contracts';
+import { NotepadApp } from './apps/NotepadApp';
+import { SystemInfoApp } from './apps/SystemInfoApp';
+import { MinesweeperApp } from './apps/MinesweeperApp';
+import { FileExplorerApp } from './apps/FileExplorerApp';
+import { CommandPromptApp } from './apps/CommandPromptApp';
+import { InstallerApp } from './apps/InstallerApp';
+import { ImageViewerApp } from './apps/ImageViewerApp';
+import { RunExecutableApp } from './apps/RunExecutableApp';
+import type { AppDefinition } from './types';
+
+/**
+ * Demo application registry. Adding a desktop app is: implement a component,
+ * add an AppDefinition here. Real PE-launched apps appear via core:process:created
+ * and bind their windows in the P3 milestone.
+ */
+export const DEFAULT_APPS: AppDefinition[] = [
+  {
+    appId: 'notepad',
+    name: 'Notepad',
+    icon: '📝',
+    description: 'Simple text editor',
+    group: 'Accessories',
+    render: (args) => <NotepadApp initialFile={args?.path} />,
+  },
+  {
+    appId: 'minesweeper',
+    name: 'Minesweeper',
+    icon: '💣',
+    description: 'Classic minesweeper',
+    group: 'Games',
+    render: () => <MinesweeperApp />,
+  },
+  {
+    appId: 'system-info',
+    name: 'System Information',
+    icon: '🖥',
+    description: 'Kernel, processes and disk status',
+    group: 'System',
+    render: () => <SystemInfoApp />,
+  },
+  {
+    appId: 'file-explorer',
+    name: 'File Explorer',
+    icon: '📂',
+    description: 'Browse the virtual disk',
+    group: 'System',
+    render: (args) => <FileExplorerApp initialPath={args?.path} />,
+  },
+  {
+    appId: 'command-prompt',
+    name: 'Command Prompt',
+    icon: '🖥',
+    description: 'Command-line shell over the virtual disk',
+    group: 'System',
+    render: () => <CommandPromptApp />,
+  },
+  {
+    appId: 'installer',
+    name: 'Installer',
+    icon: '📦',
+    description: 'Install applications (.bkapp) onto the virtual disk',
+    group: 'System',
+    render: (args) => <InstallerApp initialPackagePath={args?.path} />,
+  },
+  {
+    appId: 'image-viewer',
+    name: 'Photos',
+    icon: '🖼️',
+    description: 'View images from the virtual disk',
+    group: 'Accessories',
+    render: (args) => <ImageViewerApp initialFile={args?.path} />,
+  },
+  {
+    appId: 'exe-runner',
+    name: 'Run Executable',
+    icon: '⚙️',
+    description: 'Run a Windows executable from the virtual disk',
+    group: 'System',
+    render: (args) => <RunExecutableApp initialFile={args?.path} />,
+  },
+];
+
+export function toDesktopApp(app: AppDefinition): DesktopAppInfo {
+  return {
+    appId: app.appId,
+    name: app.name,
+    icon: app.icon,
+    description: app.description,
+    group: app.group,
+    launch: () => Promise.resolve(),
+  };
+}

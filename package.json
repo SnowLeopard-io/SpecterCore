@@ -1,0 +1,47 @@
+{
+  "name": "browser-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser Kernel - run Windows x86 applications in the browser via WASM + HLE",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "dev": "pnpm --filter @bk/app-web dev",
+    "build": "pnpm --filter @bk/app-web build",
+    "preview": "pnpm --filter @bk/app-web preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "run:exe": "esbuild scripts/run-exe.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/run-exe.mjs && node node_modules/.cache/run-exe.mjs",
+    "build:sample-exe": "esbuild scripts/build-sample-exe.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/build-sample-exe.mjs && node node_modules/.cache/build-sample-exe.mjs",
+    "build:x64-exe": "esbuild scripts/build-x64-exe.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/build-x64-exe.mjs && node node_modules/.cache/build-x64-exe.mjs",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.24.0",
+    "@types/node": "^24.0.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "@vitest/coverage-v8": "^3.1.4",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.24.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "jsdom": "^26.1.0",
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.29.0",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4"
+  }
+}
