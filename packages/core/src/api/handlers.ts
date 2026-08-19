@@ -922,6 +922,26 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       const size = await host.fs.getFileSize(numArg(ctx, 'handle', raw(ctx, 0)));
       return ok(size);
     },
+    // GetFileAttributesW/A: cmd.exe's dir handler calls this to decide whether
+    // the target is a directory (FILE_ATTRIBUTE_DIRECTORY=0x10) or a file/
+    // wildcard. Without a handler the interceptor returns 0 (not -1), so cmd's
+    // `cmp eax,-1` falls through and `test al,0x10` sees no directory bit — it
+    // then treats the whole path as a wildcard, strips the last component via
+    // wcsrchr, and the header prints "C:\" instead of "C:\Windows".
+    GetFileAttributesW: async (ctx, host) => {
+      const path = memWStr(host, raw(ctx, 0));
+      if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
+      const res = await host.fs.getFileAttributes(path);
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      return ok(res.attributes);
+    },
+    GetFileAttributesA: async (ctx, host) => {
+      const path = memCStr(host, raw(ctx, 0));
+      if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
+      const res = await host.fs.getFileAttributes(path);
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      return ok(res.attributes);
+    },
     GetCommandLineA: () => ok(0),
     GetCommandLineW: () => ok(0),
     GetSystemInfo: (ctx, host) => {

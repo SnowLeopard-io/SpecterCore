@@ -239,8 +239,15 @@ class LoggingInterceptor extends ApiInterceptorImpl {
         const s = readW(v, 64);
         vaDump.push(`[va+${i * 4}]=0x${v.toString(16)}${s ? ' ' + JSON.stringify(s) : ''}`);
       }
+      // dump raw bytes of the first va arg when it points at a stack buffer
+      const va0 = rd32(va) >>> 0;
+      let rawDump = '';
+      if (va0 >= 0x7fe0000 && va0 < 0x8000000) {
+        const rb = this.memHost.memory.read(va0, 32);
+        rawDump = ` raw=${[...rb].map((x) => x.toString(16).padStart(2, '0')).join(' ')}`;
+      }
       console.error(
-        `[api]   ${ctx.proc} buf=0x${buf.toString(16)} count=${count} fmt=0x${fmt.toString(16)} ${JSON.stringify(readW(fmt))} va=0x${va.toString(16)} ${vaDump.join(' ')}`,
+        `[api]   ${ctx.proc} buf=0x${buf.toString(16)} count=${count} fmt=0x${fmt.toString(16)} ${JSON.stringify(readW(fmt))} va=0x${va.toString(16)} ${vaDump.join(' ')}${rawDump}`,
       );
     }
     if (ctx.proc.toLowerCase() === 'formatmessagew') {
@@ -357,8 +364,17 @@ function buildExeFs(exePath: string, exeBytes: Uint8Array): FileSystemBridge {
     async deleteFile() {
       return denied;
     },
-    async getFileAttributes() {
-      return { attributes: 0x20, error: ok0 };
+    async getFileAttributes(path) {
+      // Distinguish directories from files so cmd.exe's dir handler takes the
+      // directory-enumeration path (GetFileAttributesW returns DIRECTORY=0x10)
+      // rather than the wildcard path (strips the last component via wcsrchr).
+      const p = norm(path);
+      if (p === self) return { attributes: 0x20, error: ok0 }; // archive file
+      // Root drives and any non-wildcard path are treated as directories: the
+      // virtual fs has no real directory tree, but findFirstFile always serves
+      // the exe, so enumeration of "C:\Windows\*" works regardless.
+      if (/[*?]/.test(path)) return { attributes: 0, error: notFound };
+      return { attributes: 0x10, error: ok0 }; // FILE_ATTRIBUTE_DIRECTORY
     },
     async setFileAttributes() {
       return denied;
@@ -626,6 +642,16 @@ async function main(): Promise<void> {
         0x41090a, // call 0x410960 (read next token)
         0x410c28, // tokenizer: after setjmp3, reads [0x4406d4]
         0x410c5f, // tokenizer main loop start
+        0x41d755, // grouped-number formatter entry (ecx=obj, edx=fmt, [esp+4]=val)
+        0x41d7a6, // after vswprintf call inside 0x41d755 (dump result buffer)
+        0x41d730, // real grouped formatter: esi=[ecx+0x34] (digit-group list head)
+        0x4317b4, // 64-bit number formatter loop condition (dump eax=quotient lo, edx=hi)
+        0x4317e0, // after div: dump remainder(ecx) and quotient(eax, edx)
+        0x43179d, // read 64-bit number: eax=[edx], edx=[edx+4] (dump initial dividend)
+        0x4317f2, // write digit char to buffer: [ebx]=ax (dump char and position)
+        0x43177f, // wcslen loop start: dump [esi] and [ebp-0xd4]
+        0x431793, // after sar esi,1: dump final length
+        0x431767, // before wcslen loop: dump initial state
       ];
       if (TK.includes(eip)) {
         const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
@@ -1296,6 +1322,138 @@ async function main(): Promise<void> {
         const a0 = rd32m(ebp + 8) >>> 0;
         const a4 = rd32m(a0 + 4) >>> 0;
         extra = ` ebp=0x${ebp.toString(16)} [ebp+8]=0x${a0.toString(16)} [a0+0]=0x${(rd32m(a0) >>> 0).toString(16)} ${JSON.stringify(readW(rd32m(a0)))} [a0+4]=0x${a4.toString(16)} ${JSON.stringify(readW(a4))} [a0+c]=0x${(rd32m(a0 + 0xc) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x41d755) {
+        // grouped-number formatter entry: ecx=obj, edx=fmt string, [esp+4]=value ptr
+        const esp = rt.getReg('esp') >>> 0;
+        const valPtr = rd32(esp + 4) >>> 0;
+        const readW = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 128);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        };
+        // dump the 64-bit value at valPtr (lo, hi) and the fmt string
+        const valLo = valPtr ? rd32(valPtr) : 0;
+        const valHi = valPtr ? rd32(valPtr + 4) : 0;
+        const fmtStr = readW(rt.getReg('edx') >>> 0);
+        // dump obj fields
+        const obj = rt.getReg('ecx') >>> 0;
+        const o8 = obj ? rd32(obj + 8) : 0;
+        const oC = obj ? rd32(obj + 0xc) : 0;
+        const o10 = obj ? rd32(obj + 0x10) : 0;
+        const retAddr = rd32(rt.getReg('esp') >>> 0) >>> 0;
+        // Short format: ret addr first, then key values
+        extra = ` RET=0x${retAddr.toString(16)} vp=0x${valPtr.toString(16)} v=${JSON.stringify(readW(valPtr))}`;
+      }
+      if (eip === 0x41d7a6) {
+        // after vswprintf inside 0x41d755: esi = result buffer, dump it
+        const esi = rt.getReg('esi') >>> 0;
+        const readW = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 256);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        };
+        extra = ` result(esi)=0x${esi.toString(16)} ${JSON.stringify(readW(esi))}`;
+      }
+      if (eip === 0x41d730) {
+        // real grouped formatter: ecx=obj, edx=output buf, [esp+4]=input.
+        // esi=[ecx+0x34] = digit-group list head. Walk the list and dump each
+        // node: [+0]=digit(lo16), [+4]=suffix str, [+c]=flag, [+10]=val, [+14]=next.
+        const obj = rt.getReg('ecx') >>> 0;
+        const head = obj ? rd32(obj + 0x34) >>> 0 : 0;
+        const readW = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 64);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        };
+        const nodes: string[] = [];
+        let cur = head;
+        for (let i = 0; i < 8 && cur; i++) {
+          const digit = cur ? rd32(cur) & 0xffff : 0;
+          const suffix = cur ? rd32(cur + 4) >>> 0 : 0;
+          const flag = cur ? rd32(cur + 0xc) >>> 0 : 0;
+          const val10 = cur ? rd32(cur + 0x10) >>> 0 : 0;
+          const next = cur ? rd32(cur + 0x14) >>> 0 : 0;
+          nodes.push(`{digit=${digit} suffix=0x${suffix.toString(16)}${suffix ? ' ' + JSON.stringify(readW(suffix)) : ''} flag=0x${flag.toString(16)} +10=0x${val10.toString(16)} next=0x${next.toString(16)}}`);
+          cur = next;
+        }
+        extra = ` obj=0x${obj.toString(16)} listHead([obj+34])=0x${head.toString(16)} nodes=[${nodes.join(', ')}]`;
+      }
+      if (eip === 0x43179d) {
+        // Read 64-bit number: eax=[edx] (lo), edx=[edx+4] (hi). Dump the
+        // initial dividend passed to the formatter.
+        const edx = rt.getReg('edx') >>> 0;
+        const lo = edx ? rd32(edx) : 0;
+        const hi = edx ? rd32(edx + 4) : 0;
+        extra = ` READ64: ptr=0x${edx.toString(16)} lo=0x${(lo >>> 0).toString(16)}(${lo}) hi=0x${(hi >>> 0).toString(16)} value=${(hi * 0x100000000 + (lo >>> 0)).toString()}`;
+      }
+      if (eip === 0x431767) {
+        // before wcslen loop: dump [ebp-0xd4] and 0x446ad0 content
+        const ebp = rt.getReg('ebp') >>> 0;
+        const d4 = rd32(ebp - 0xd4) >>> 0;
+        // dump 16 bytes at 0x446ad0
+        const raw = rt.readBytes(0x446ad0, 16);
+        let hex = '';
+        for (let i = 0; i < raw.byteLength; i++) hex += raw[i].toString(16).padStart(2, '0') + ' ';
+        extra = ` PRE d4=${d4.toString(16)} sep=${hex}`;
+      }
+      if (eip === 0x43177f) {
+        // wcslen loop: dump d4 only
+        const ebp = rt.getReg('ebp') >>> 0;
+        const d4 = rd32(ebp - 0xd4) >>> 0;
+        extra = ` d4=${d4.toString(16)}`;
+      }
+      if (eip === 0x431793) {
+        // after sar esi,1: dump final wcslen result
+        const esi = rt.getReg('esi') >>> 0;
+        extra = ` WLEN=${esi}`;
+      }
+      if (eip === 0x4317f2) {
+        // Write digit char to buffer: [ebx]=ax (ax = remainder + '0').
+        // Dump the character being written and the buffer position.
+        const ax = rt.getReg('eax') & 0xffff;
+        const ebx = rt.getReg('ebx') >>> 0;
+        const edi = rt.getReg('edi') >>> 0;
+        const ch = String.fromCharCode(ax);
+        extra = ` WRITE_CHAR: ch='${ch}'(0x${ax.toString(16)}) pos=0x${ebx.toString(16)} digit_count=${edi}`;
+      }
+      if (eip === 0x4317b4) {
+        // HACK: force separator length to 1 to verify the bug
+        const ebp = rt.getReg('ebp') >>> 0;
+        const addr = ebp - 0xd8;
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, 1, true);
+        rt.writeBytes(addr, b);
+        const eax = rt.getReg('eax') >>> 0;
+        const edi = rt.getReg('edi') >>> 0;
+        extra = ` FORCE_SEPLEN=1 cnt=${edi} q=${eax}`;
+      }
+      if (eip === 0x4317e0) {
+        // After 0x424be0 div: eax=quotient_lo, edx=quotient_hi, ecx=remainder_lo.
+        // Also [ebp-0xd4] will be set to eax, [ebp-0xe4] to edx.
+        const eax = rt.getReg('eax') >>> 0;
+        const edx = rt.getReg('edx') >>> 0;
+        const ecx = rt.getReg('ecx') >>> 0;
+        const ebx = rt.getReg('ebx') >>> 0;
+        extra = ` DIV_RESULT: quot_lo=0x${eax.toString(16)}(${eax}) quot_hi=0x${edx.toString(16)} rem_lo=0x${ecx.toString(16)}(${ecx}) rem_hi=0x${ebx.toString(16)}`;
       }
       console.error(
         `[tk] eip=0x${eip.toString(16)} eax=${r('eax')} ecx=${r('ecx')} edx=${r('edx')} esi=${r('esi')} edi=${r('edi')} ebx=${r('ebx')}${extra}`,
