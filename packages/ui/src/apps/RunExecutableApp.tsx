@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { CanvasGdiBridge } from '@specter-core/bridges';
 import { extractPeIcon, parsePe, toStorePath } from '@specter-core/shared';
 import { tokens } from '@specter-core/contracts';
 import {
@@ -12,6 +13,7 @@ import {
 } from '@specter-core/core';
 import { useUi } from '../context';
 import { setGuestText, useGuestText } from '../guest-text';
+import { setGuestGdiBridge, guestGdiBridgeProvider } from '../gdi-bridge-registry';
 
 interface RunExecutableProps {
   /** 要运行的 .exe（store 路径），来自 open 动词或桌面拖入。 */
@@ -85,14 +87,62 @@ interface GuestWindowViewProps {
   menu: GuestMenuSection[];
 }
 /** Content of a guest window hosted as a real L6 desktop window (Layer 3).
- * Renders the menu bar + the EDIT control; typing goes straight into the
- * guest via runner.postText, and closing the window posts WM_CLOSE so the
- * guest process terminates. */
+ * Renders the menu bar + a GDI canvas for pixel output, with the EDIT control
+ * textarea overlaid on top (transparent background) so typing goes straight
+ * into the guest via runner.postText. Closing the window posts WM_CLOSE so
+ * the guest process terminates. */
 export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowViewProps) {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Live text of the guest EDIT control: notepad's own WM_SETTEXT (New,
   // paste, ...) flows back through onTextChanged -> setGuestText.
   const text = useGuestText(editHwnd);
+
+  // Register a CanvasGdiBridge for this window so guest GDI calls
+  // (BeginPaint/TextOut/FillRect/...) render pixels to our canvas.
+  // Post WM_PAINT afterwards so the guest repaints through the new bridge.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const bridge = new CanvasGdiBridge(canvas);
+    setGuestGdiBridge(hwnd, bridge);
+    // Trigger a repaint through the pixel path.
+    runner.postMessage({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 });
+    return () => {
+      setGuestGdiBridge(hwnd, null);
+    };
+  }, [hwnd, runner]);
+
+  // Resize: when the desktop window (and thus the canvas CSS box) changes
+  // size, sync the canvas pixel buffer to match and notify the guest with
+  // WM_SIZE so it repaints into the new client area. MAKELONG(cx, cy):
+  // low 16 = cx, high 16 = cy. Setting canvas.width/height clears the
+  // surface, so we coalesce into a rAF and always follow with WM_SIZE.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === 'undefined') return;
+    let raf = 0;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const w = Math.max(1, Math.round(entry.contentRect.width));
+      const h = Math.max(1, Math.round(entry.contentRect.height));
+      if (canvas.width === w && canvas.height === h) return;
+      canvas.width = w;
+      canvas.height = h;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const lParam = ((h & 0xffff) << 16) | (w & 0xffff);
+        runner.postMessage({ hwnd, msg: 0x0005 /* WM_SIZE */, wParam: 0 /* SIZE_RESTORED */, lParam });
+      });
+    });
+    ro.observe(canvas);
+    return () => {
+      ro.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, [hwnd, runner]);
+
   useEffect(() => {
     // Window closed (unmounted) -> tell the guest to close too.
     return () => {
@@ -139,18 +189,23 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
         ))}
         </div>
       )}
-      <textarea
-        className="sc-gwin-edit"
-        value={text}
-        onChange={(e) => {
-          const t = e.target.value;
-          if (editHwnd) {
-            runner.postText(editHwnd, t);
-            setGuestText(editHwnd, t);
-          }
-        }}
-        spellCheck={false}
-      />
+      <div className="sc-gwin-canvas-container">
+        <canvas ref={canvasRef} width={800} height={560} className="sc-gwin-canvas" />
+        {editHwnd && (
+          <textarea
+            className="sc-gwin-edit-overlay"
+            value={text}
+            onChange={(e) => {
+              const t = e.target.value;
+              if (editHwnd) {
+                runner.postText(editHwnd, t);
+                setGuestText(editHwnd, t);
+              }
+            }}
+            spellCheck={false}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -315,6 +370,7 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
         // Interactive: the message loop blocks at GetMessageW instead of
         // exiting, so the window panel below is a live, typeable notepad.
         interactive: true,
+        gdiBridge: (hwnd) => guestGdiBridgeProvider(hwnd),
         onMessageWait: () => {
           const wins = runner.getWindows();
           setLiveWindows(wins);

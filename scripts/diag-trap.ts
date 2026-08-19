@@ -362,6 +362,45 @@ async function main(): Promise<void> {
         }
         console.error(`[gs] stack: ${frames.join(' ') || '(none)'}`);
       }
+      // ---- GS cookie scan (failing fn @ 0x4158d7, FPO frame) ----
+      // onStep is BLOCK-level, so only block-start eips fire. 0x415943 is the start of
+      // the block that does: mov ecx,[esp+0x27c]; pop edi/esi/ebx; xor ecx,esp; call 0x41dea0.
+      // esp here is PRE-pop (= E_store - 12); esp_at_check = esp + 12.
+      // The correct cookie value at the slot must equal global XOR esp_at_check.
+      if (eip >= 0x4158d0 && eip <= 0x415980) {
+        const esp = rt.getReg('esp') >>> 0;
+        const ebp = rt.getReg('ebp') >>> 0;
+        const rd32 = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const gv = new DataView(rt.readBytes(0x4340c0, 4).buffer, 0, 4).getUint32(0, true);
+        console.error(
+          `[gspro] eip=0x${eip.toString(16)} esp=0x${esp.toString(16)} ebp=0x${ebp.toString(16)} global=0x${gv.toString(16)} ` +
+          `[esp+0x270]=0x${rd32(esp + 0x270).toString(16)} [esp+0x27c]=0x${rd32(esp + 0x27c).toString(16)} [ebp-4]=0x${rd32(ebp - 4).toString(16)} [ebp]=0x${rd32(ebp).toString(16)}`,
+        );
+      }
+      if (eip === 0x415943) {
+        const esp = rt.getReg('esp') >>> 0;
+        const ebp = rt.getReg('ebp') >>> 0;
+        const rd32 = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const gv = new DataView(rt.readBytes(0x4340c0, 4).buffer, 0, 4).getUint32(0, true);
+        const espAtCheck = (esp + 12) >>> 0;
+        const needVal = (gv ^ espAtCheck) >>> 0;
+        const cand: string[] = [];
+        for (let off = -0x40; off < 0x300; off += 4) {
+          const a = (esp + off) >>> 0;
+          const v = rd32(a);
+          if (((v ^ espAtCheck) >>> 0) === gv) cand.push(`[esp+0x${off.toString(16)}]=0x${v.toString(16)}`);
+        }
+        console.error(
+          `[gscookie] eip=0x415943 esp=0x${esp.toString(16)} ebp=0x${ebp.toString(16)} espAtCheck=0x${espAtCheck.toString(16)} global=0x${gv.toString(16)} needVal=0x${needVal.toString(16)}`,
+        );
+        console.error(`[gscookie]   slotHoldingCookie=${cand.length ? cand.join(' ') : '(NONE)'} ; probes [esp+0x270]=0x${rd32(esp + 0x270).toString(16)} [esp+0x27c]=0x${rd32(esp + 0x27c).toString(16)} [ebp-4]=0x${rd32(ebp - 4).toString(16)} [ebp]=0x${rd32(ebp).toString(16)}`);
+      }
       const TK = [
         0x40dfc5, // call 0x411c10 (heap alloc init)
         0x40dfce, // test eax,eax after init -> je 0x426cce

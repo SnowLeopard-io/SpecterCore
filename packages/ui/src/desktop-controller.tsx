@@ -33,6 +33,7 @@ import { Desktop } from './components/Desktop';
 import { DEFAULT_APPS } from './apps';
 import { ensureBuiltinWinFiles } from './builtin-win';
 import { setGuestText } from './guest-text';
+import { guestGdiBridgeProvider } from './gdi-bridge-registry';
 import { GuestWindowView } from './apps/RunExecutableApp';
 import { InstalledAppView } from './apps/InstalledAppView';
 import type { AppDefinition, UiController } from './types';
@@ -348,6 +349,7 @@ export class DesktopControllerImpl implements DesktopController {
           }
         },
         interactive: true,
+        gdiBridge: (hwnd) => guestGdiBridgeProvider(hwnd),
         onMessageWait: () => {
           const wins = runner.getWindows();
           for (const w of wins) {

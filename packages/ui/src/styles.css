@@ -1895,6 +1895,42 @@
   background: #e5f3ff;
 }
 
+.sc-gwin-canvas-container {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.sc-gwin-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #ffffff;
+}
+
+.sc-gwin-edit-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: #1a1a1a;
+  font-family: Consolas, 'Cascadia Code', 'Microsoft YaHei', monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: auto;
+  outline: none;
+  cursor: text;
+}
+
 .sc-gwin-edit {
   flex: 1;
   min-height: 0;

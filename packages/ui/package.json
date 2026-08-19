@@ -11,6 +11,7 @@
     "./styles.css": "./src/styles.css"
   },
   "dependencies": {
+    "@specter-core/bridges": "workspace:*",
     "@specter-core/contracts": "workspace:*",
     "@specter-core/core": "workspace:*",
     "@specter-core/host": "workspace:*",
