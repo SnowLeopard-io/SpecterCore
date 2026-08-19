@@ -479,6 +479,14 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       const c = raw(ctx, 0) & 0xffff;
       return ok(c >= 0x61 && c <= 0x7a ? c - 0x20 : c);
     },
+    _o_towlower: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok(c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
+    },
+    towlower: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok(c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
+    },
     _o_iswalpha: (ctx) => {
       const c = raw(ctx, 0) & 0xffff;
       return ok((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) ? 1 : 0);

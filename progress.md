@@ -200,3 +200,80 @@ $env:BK_ARGS='cmd /c dir C:\Windows'; $env:BK_TRACE='api'; node node_modules/.ca
 ```
 
 成功标准：日志中不再出现 `ReadConsoleW` 作为首次命令输入路径，出现 `FindFirstFileW`/`FindNextFileW` 或 `WriteFile` 输出轨迹，并且最终不再因 `[0x4406dc]==0` 走 `longjmp(2)`。
+
+---
+
+## Session continuation (2026-08-19)
+
+### Root cause found and FIXED: missing `_o_towlower`
+
+- The command-line tokenizer at `0x40df9d` finds the first `/` in the line, then calls
+  `[0x4503dc]` on the char after it. Decoding the PE import table shows **`0x4503dc` →
+  `_o_towlower`** (hint 1114). The return value is compared *directly* against literal
+  switch chars: `0x63='c'`, `0x71='q'`, `0x3f='?'`, `0x6b='k'`, `0x72='r'`, `0x75='u'`,
+  `0x61='a'`, `0x78='x'`, `0x79='y'`, `0x65='e'`, `0x64='d'`.
+- `handlers.ts` only had `_o_towupper`/`towupper` (added last session). **`_o_towlower`/
+  `towlower` were missing**, so the call returned the default `0`. Then
+  `0x40e002 test cx,cx; je 0x42704c` took the failure/merge path, the third slot (command
+  tail → `[0x4406dc]`) was never written, and cmd fell into interactive mode →
+  `ReadConsoleW` → `longjmp(2)` → `_o_exit(0)`.
+- **Fix:** added `_o_towlower` and `towlower` (A-Z → a-z) to `handlers.ts`. Verified via the
+  `[tk]` tracer: the tokenizer now reaches the `c`-case at `0x40e088` with `ecx=0x63`, the
+  parser returns at `0x40b8de`, and `FindFirstFileW` is reached.
+
+### Handover success criteria are now MET
+
+- `ReadConsoleW` is no longer the first command-input path (0 occurrences in `cmd-latest.log`).
+- `FindFirstFileW` is now present in the trace — cmd reaches `dir C:\Windows` enumeration.
+- No more `longjmp(2)` from `[0x4406dc]==0`.
+- `pnpm typecheck` (via managed node + local tsc) passes; `packages/core/src/api/` tests pass (7/7).
+
+### Remaining blocker #1: GS cookie fail-fast (`0xc0000409`)
+
+- After `FindFirstFileW`/`FindClose`, a function's epilogue trips `__report_gsfailure`
+  (`0x41e1e4`): it writes `ExceptionCode = 0xc0000409` and does `int 0x29` fastfail →
+  `UnhandledExceptionFilter(0x401000)` → `TerminateProcess(0xffffffff, 0xc0000409)`.
+  Because `TerminateProcess` is a no-op in the emulator, cmd's SEH catches the exception,
+  unwinds, **re-runs the tokenizer**, and finally `_o_exit(0)` — **without emitting any dir
+  output**.
+- This same `0xc0000409` appeared in fix5 on the interactive path (handover §6, "疑点 #2"),
+  so it is a **pre-existing, systemic** issue, not introduced by this change.
+- Hypothesis (handover §6 #2): a wrong Esp restore in `_setjmp3`/`longjmp`, or a stub writing
+  past a stack buffer, corrupts the GS security cookie (`_security_cookie` at `0x4340c0`;
+  per-function cookie at `[ebp-4]`).
+- A tried-and-reverted change to `writeFindData` (592 → 566 bytes, skipping
+  `cAlternateFileName`) did **not** fix it, so the WIN32_FIND_DATAW write is not the culprit;
+  the failure points back to SEH / `_setjmp3`/`longjmp` Esp semantics.
+
+### Remaining blocker #2: MUI resources empty
+
+- Log line: `MUI: found C:/Windows/System32/en-US/cmd.exe.mui but merged 0 resources`.
+  cmd's `dir` format strings (`Directory of`, volume label, etc.) live in the message table of
+  cmd.exe.mui; with 0 resources merged, cmd cannot format the output.
+
+### Files changed this session
+
+- `packages/core/src/api/handlers.ts`: added `_o_towlower`, `towlower`.
+- `scripts/diag-trap.ts`: added focused tokenizer breakpoints and a `[tk]` tracer
+  (`0x40dfc5/ce/e4/e9/dff7/dfff/e002/e020/e088/e1bd/426f7a/42704c/40b8de/415d6a`) — kept for
+  the GS investigation.
+
+### How to re-run
+
+```powershell
+node node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/bin/esbuild --bundle scripts/diag-trap.ts --outfile=node_modules/.cache/diag-trap.cjs --platform=node --format=cjs --target=es2020 --external:typescript
+BK_ARGS='cmd /c dir C:\Windows' BK_TRACE='api' node node_modules/.cache/diag-trap.cjs "C:/Windows/SysWOW64/cmd.exe" > node_modules/.cache/cmd-latest.log 2>&1
+```
+
+### Next steps
+
+1. **(Task #5)** Investigate the GS fail-fast. Hook `__report_gsfailure` / the `int 0x29`
+   fastfail to capture the faulting EIP and the failing function's frame, and re-verify the
+   `_setjmp3`/`longjmp` Esp semantics in `guest-process.ts` (~2149 / ~2107). The
+   `esp = espAtTrap + 4` assumption depends on exactly how the trap-dispatcher delivers a
+   `call` trap.
+2. **(Task #6)** Make the emulator parse and merge cmd.exe.mui message-table resources so
+   `dir` can format its output.
+
+Until #5 is resolved, `cmd /c dir C:\Windows` will reach file enumeration but abort before
+printing, because the GS fail-fast unwinds the command.

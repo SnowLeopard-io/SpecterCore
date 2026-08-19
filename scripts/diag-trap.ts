@@ -290,15 +290,41 @@ async function main(): Promise<void> {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
-      if ([0x40b9f9, 0x40b9fc, 0x40ba01, 0x40ba06, 0x40ba11, 0x40ba21, 0x40ba2b, 0x40ba4f, 0x40ba52, 0x40ba59, 0x40ba5d, 0x40ba63, 0x40baa6, 0x40a1c7, 0x40a1eb, 0x40a1f5, 0x42d3cd, 0x42d3d2, 0x42d3d8, 0x42d47a, 0x42d47f].includes(eip)) {
+      const TK = [
+        0x40dfc5, // call 0x411c10 (heap alloc init)
+        0x40dfce, // test eax,eax after init -> je 0x426cce
+        0x40dfe4, // call 0x40e37e (find '/')
+        0x40dfe9, // mov esi, eax (slash search result)
+        0x40dff7, // call [0x4503dc] = _o_towlower(char after '/')
+        0x40dfff, // movzx ecx, ax (classify result)
+        0x40e002, // test cx,cx -> je 0x42704c
+        0x40e020, // cmp ecx,0x63 ('c') -> je 0x40e088
+        0x40e088, // 'c' case entry
+        0x40e1bd, // mov [eax+8], esi  SUCCESS: write 3rd slot
+        0x426f7a, // failure merge (0x40e210 jne)
+        0x42704c, // no-slash / char0 path
+        0x40b8de, // parser return (slots set?)
+        0x415d6a, // main reads 3 slots
+      ];
+      if (TK.includes(eip)) {
         const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
         const rd32 = (a: number) => {
           const b = rt.readBytes(a >>> 0, 4);
           return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
         };
-        const e60 = rt.getReg('ebp') - 0x60;
+        const wchar = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 2);
+          return b.byteLength < 2 ? NaN : new DataView(b.buffer, b.byteOffset, 2).getUint16(0, true);
+        };
+        let extra = '';
+        if (eip === 0x40dfe9) extra = ` [esi+2]=0x${wchar(rt.getReg('esi') + 2).toString(16)}`;
+        if (eip === 0x40dff7) extra = ` charAfterSlash=0x${(rt.getReg('eax') & 0xffff).toString(16)}`;
+        if (eip === 0x40dfff) extra = ` towlower(ax)=0x${(rt.getReg('eax') & 0xffff).toString(16)}`;
+        if (eip === 0x40e1bd) extra = ` slotBase(eax)=${r('eax')} val(esi)=${r('esi')}`;
+        if (eip === 0x40b8de) extra = ` [ebp-0x60]=${r('ebp')} slots@${r('esi')}`;
+        if (eip === 0x415d6a) extra = ` slot0=0x${rd32(rt.getReg('ebp') - 0x14).toString(16)} slot1=0x${rd32(rt.getReg('ebp') - 0x10).toString(16)} slot2=0x${rd32(rt.getReg('ebp') - 0xc).toString(16)}`;
         console.error(
-          `[bp] eip=0x${eip.toString(16)} edi=${r('edi')} esi=${r('esi')} ebx=${r('ebx')} ebp=${r('ebp')} esp=${r('esp')} [ebp-0x60]=0x${(rd32(e60) >>> 0).toString(16)} [edi]=0x${(rd32(rt.getReg('edi')) >>> 0).toString(16)} [edi+8]=0x${(rd32(rt.getReg('edi') + 8) >>> 0).toString(16)}`,
+          `[tk] eip=0x${eip.toString(16)} eax=${r('eax')} ecx=${r('ecx')} edx=${r('edx')} esi=${r('esi')} edi=${r('edi')} ebx=${r('ebx')}${extra}`,
         );
       }
     },

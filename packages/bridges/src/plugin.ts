@@ -1,7 +1,7 @@
-import type { Plugin, PluginContext } from '@specter-core/contracts';
+import type { AudioHostAdapter, Plugin, PluginContext } from '@specter-core/contracts';
 import { tokens } from '@specter-core/contracts';
 import { FileSystemBridgeImpl } from './fs';
-import { NullAudioBridge } from './audio';
+import { WaveOutAudioBridge } from './audio';
 import { NullGdiBridge } from './graphics';
 import { WasmUsbHostBridge } from './usb';
 
@@ -28,7 +28,14 @@ export const BridgeLayerPlugin: Plugin = {
     logger.info('file system bridge ready (backend=%s)', store.name);
 
     container.registerInstance(tokens.bridgeGdi, new NullGdiBridge());
-    container.registerInstance(tokens.bridgeAudio, new NullAudioBridge());
+
+    // 音频桥接：优先绑定宿主音频适配器（AudioWorklet 混音），
+    // 宿主不可用时退回静默成功实现（Node/无 AudioContext 环境）。
+    let hostAudio: AudioHostAdapter | null = null;
+    if (container.has(tokens.hostAudio)) {
+      hostAudio = container.resolve(tokens.hostAudio) as AudioHostAdapter;
+    }
+    container.registerInstance(tokens.bridgeAudio, new WaveOutAudioBridge(hostAudio));
 
     const usbAdapter = container.resolve(tokens.hostUsb);
     container.registerInstance(tokens.bridgeUsb, new WasmUsbHostBridge(usbAdapter));

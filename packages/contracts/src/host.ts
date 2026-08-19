@@ -182,13 +182,33 @@ export interface AudioPcm {
   channels: number;
 }
 
+/**
+ * 一条可重复写入的音频流（对应 waveOut 设备或 DirectSound 辅助缓冲）。
+ * 流的 PCM 数据进入混音器，由音频线程（AudioWorklet）混合输出到扬声器。
+ */
+export interface AudioStream {
+  readonly id: number;
+  readonly channels: number;
+  /** 推送一段交错 PCM 样本到混音器（非阻塞，由音频线程消费） */
+  write(samples: Float32Array): void;
+  /** 设置本流独立音量（0..1），作用于主音量之上 */
+  setVolume(volume: number): void;
+  /** 关闭流并从混音器中移除 */
+  close(): void;
+}
+
 export interface AudioHostAdapter {
   readonly available: boolean;
   readonly sampleRate: number;
+  /** 端到端音频延迟（毫秒），含 AudioWorklet 缓冲区 */
   readonly outputLatencyMs: number;
   init(config?: AudioHostConfig): Promise<void>;
+  /** 打开一段可重复写入的音频流（低延迟混音），channels ∈ {1, 2} */
+  openStream(channels: number): AudioStream;
+  /** 一次性播放（兼容旧用法，经混音器播出） */
   play(buffer: AudioPcm): Promise<void>;
-  setVolume(channel: string | null, volume: number): void;
+  /** 主音量（0..1），作用于所有流 */
+  setMasterVolume(volume: number): void;
   destroy(): Promise<void>;
 }
 
