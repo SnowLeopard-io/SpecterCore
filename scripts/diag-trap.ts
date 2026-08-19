@@ -28,9 +28,11 @@ import { normalizeApiSetModule } from '@specter-core/core';
 /** Logs every API trap so we can see what the guest queried before the fault. */
 class LoggingInterceptor extends ApiInterceptorImpl {
   private readonly memHost: ApiHost;
-  constructor(host: ApiHost) {
+  private readonly rt: typeof runtime;
+  constructor(host: ApiHost, rt: typeof runtime) {
     super(host);
     this.memHost = host;
+    this.rt = rt;
   }
   override async dispatch(ctx: ApiCallContext): Promise<ApiResult> {
     if (ctx.proc.toLowerCase().includes('command_line') || ctx.proc.toLowerCase() === 'charnextw') {
@@ -46,6 +48,44 @@ class LoggingInterceptor extends ApiInterceptorImpl {
       const b = this.memHost.memory.read(addr, 24);
       const h = [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
       console.error(`[api]   OSVERSIONINFOEXW @0x${addr.toString(16)}: ${h}`);
+    }
+    if (ctx.proc.toLowerCase() === 'isprocessorfeaturepresent') {
+      const feat = ctx.rawArgs[0] ?? 0;
+      if (feat === 0x17) {
+        // This IsProcessorFeaturePresent(0x17) is cmd's OWN call (slot 0x452440),
+        // the last API before the GS failure. At this point esp -> return address
+        // into the FAILING function (right after `call IsProcessorFeaturePresent`).
+        const espVal = this.rt.getReg('esp') >>> 0;
+        const rd32 = (a: number) => {
+          const b = this.memHost.memory.read(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        // __report_gsfailure prologue: push ebp; mov ebp,esp; sub esp,0x324;
+        //   push 0x17; call IsProcFeat. At the call trap (IsProcFeat entry) esp has
+        //   been decremented by push ebp(4) + sub 0x324 + push 0x17(4) + call(4)
+        //   = 0x330 from the pre-prologue esp. gsEbp was set by `mov ebp,esp`
+        //   right after `push ebp`, i.e. 4 less than pre-prologue esp.
+        //   => gsEbp = esp + 0x330 - 4 = esp + 0x32c.
+        //   [gsEbp] = saved ebp = FAILING FN ebp;
+        //   [gsEbp+4] = ret into failing fn (just after `call __report_gsfailure`).
+        const retIntoGs = rd32(espVal);                 // [esp] = ret into __report_gsfailure
+        const gsEbp = espVal + 0x32c;                   // __report_gsfailure.ebp (computed)
+        const failingEbp = rd32(gsEbp);                // failing fn ebp
+        const retIntoFailing = rd32(gsEbp + 4);        // ret into failing fn
+        const callerEbp = rd32(failingEbp);
+        const retIntoCaller = rd32(failingEbp + 4);
+        const stackDump: string[] = [];
+        for (let i = 0; i <= 0x300; i += 4) {
+          const v = rd32(espVal + i);
+          if (v >= 0x400000 && v < 0x440000 && (v & 0x3) === 0) stackDump.push(`[esp+0x${i.toString(16)}]=0x${v.toString(16)}`);
+        }
+        console.error(`[gs2] IsProcessorFeaturePresent(0x17) inside __report_gsfailure; esp=0x${espVal.toString(16)}`);
+        console.error(`[gs2] [esp]=0x${retIntoGs.toString(16)}  gsEbp=0x${gsEbp.toString(16)}`);
+        console.error(`[gs2] FAILING_FN ebp=0x${failingEbp.toString(16)} retIntoFailingFn=0x${retIntoFailing.toString(16)}`);
+        console.error(`[gs2] caller ebp=0x${callerEbp.toString(16)} retIntoCaller=0x${retIntoCaller.toString(16)}`);
+        console.error(`[gs2] cookie@0x4340c0=0x${rd32(0x4340c0).toString(16)}  cookieSlot[failingEbp-4]=0x${rd32(failingEbp - 4).toString(16)}`);
+        console.error(`[gs2] stack(.text): ${stackDump.join(' ')}`);
+      }
     }
     if (ctx.proc.toLowerCase() === 'createfilew') {
       const addr = ctx.rawArgs[0] ?? 0;
@@ -219,7 +259,7 @@ async function main(): Promise<void> {
     fs: buildExeFs(modulePath, image),
   } as unknown as ApiHost;
 
-  const interceptor = new LoggingInterceptor(host);
+  const interceptor = new LoggingInterceptor(host, runtime);
   const trace: number[] = [];
   const loader = new PeLoaderImpl();
   const decoder = new X86Decoder(is64 ? 'x64' : 'x86');
@@ -290,6 +330,38 @@ async function main(): Promise<void> {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
+      // ---- GS cookie fail-fast capture ----
+      // 0x41e1e4 = cmd's __report_gsfailure. Its body calls IsProcessorFeaturePresent(0x17)
+      // at 0x41e1f7. At that call site __report_gsfailure's frame is established, so
+      // ebp points at its frame: [ebp]=caller(failing fn) ebp, [ebp+4]=ret into failing fn.
+      if (eip === 0x41e1e4 || eip === 0x41e1f7) {
+        const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
+        const rd32 = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const esp = rt.getReg('esp') >>> 0;
+        const ebp = rt.getReg('ebp') >>> 0;
+        console.error(`[gs] __report_gsfailure ctx eip=0x${eip.toString(16)}`);
+        console.error(
+          `[gs] eax=${r('eax')} ecx=${r('ecx')} edx=${r('edx')} ebx=${r('ebx')} esi=${r('esi')} edi=${r('edi')} ebp=${r('ebp')} esp=${r('esp')}`,
+        );
+        // __report_gsfailure frame: [ebp]=failingFn ebp, [ebp+4]=ret into failingFn
+        const failingFnEbp = rd32(ebp);
+        const retIntoFailingFn = rd32(ebp + 4);
+        const failingFnCallerEbp = rd32(failingFnEbp);
+        const retIntoCaller = rd32(failingFnEbp + 4);
+        console.error(`[gs] failingFn: ebp=0x${failingFnEbp.toString(16)} retIntoFailingFn=0x${retIntoFailingFn.toString(16)}`);
+        console.error(`[gs] failingFn's caller: ebp=0x${failingFnCallerEbp.toString(16)} retIntoCaller=0x${retIntoCaller.toString(16)}`);
+        console.error(`[gs] failingFn saved-ebp=[ebp]=0x${rd32(failingFnEbp).toString(16)} cookieSlot=[ebp-4]=0x${rd32(failingFnEbp - 4).toString(16)} _security_cookie@0x4340c0=0x${rd32(0x4340c0).toString(16)}`);
+        // stack walk
+        const frames: string[] = [];
+        for (let i = 0; i + 4 <= 0x300; i += 4) {
+          const v = rd32(esp + i);
+          if (v >= 0x400000 && v < 0x500000 && (v & 0xf) === 0) frames.push(`[esp+0x${i.toString(16)}]=0x${v.toString(16)}`);
+        }
+        console.error(`[gs] stack: ${frames.join(' ') || '(none)'}`);
+      }
       const TK = [
         0x40dfc5, // call 0x411c10 (heap alloc init)
         0x40dfce, // test eax,eax after init -> je 0x426cce
