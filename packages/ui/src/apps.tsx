@@ -3,7 +3,6 @@ import { NotepadApp } from './apps/NotepadApp';
 import { SystemInfoApp } from './apps/SystemInfoApp';
 import { MinesweeperApp } from './apps/MinesweeperApp';
 import { FileExplorerApp } from './apps/FileExplorerApp';
-import { CommandPromptApp } from './apps/CommandPromptApp';
 import { InstallerApp } from './apps/InstallerApp';
 import { ImageViewerApp } from './apps/ImageViewerApp';
 import { RunExecutableApp } from './apps/RunExecutableApp';
@@ -51,9 +50,12 @@ export const DEFAULT_APPS: AppDefinition[] = [
     appId: 'command-prompt',
     name: 'Command Prompt',
     icon: '🖥',
-    description: 'Command-line shell over the virtual disk',
+    description: 'Run the bundled Windows cmd.exe (real x86 PE) over the virtual disk',
     group: 'System',
-    render: () => <CommandPromptApp />,
+    // Launch is special-cased in DesktopController: it runs the bundled
+    // cmd.exe as a real guest process with a console terminal (stdin/stdout),
+    // replacing the old JS interpreter shell.
+    render: () => null,
   },
   {
     appId: 'installer',

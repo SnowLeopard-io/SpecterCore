@@ -11,6 +11,11 @@ export const BUILTIN_WIN_FILES: Array<{ url: string; storePath: string }> = [
   { url: '/win/notepad.exe', storePath: 'Windows/SysWOW64/notepad.exe' },
   { url: '/win/en-US/notepad.exe.mui', storePath: 'Windows/SysWOW64/en-US/notepad.exe.mui' },
   { url: '/win/zh-CN/notepad.exe.mui', storePath: 'Windows/SysWOW64/zh-CN/notepad.exe.mui' },
+  // Real cmd.exe (+ MUI) so the desktop "Command Prompt" app runs the actual
+  // guest binary instead of a JS reimplementation (see launchGuestConsole).
+  { url: '/win/cmd.exe', storePath: 'Windows/SysWOW64/cmd.exe' },
+  { url: '/win/en-US/cmd.exe.mui', storePath: 'Windows/SysWOW64/en-US/cmd.exe.mui' },
+  { url: '/win/zh-CN/cmd.exe.mui', storePath: 'Windows/SysWOW64/zh-CN/cmd.exe.mui' },
   // Real files copied from the host C: drive so the virtual disk (and the
   // file explorer / notepad open dialog) has genuine content by default.
   { url: '/win/win.ini', storePath: 'Windows/win.ini' },

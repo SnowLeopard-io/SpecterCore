@@ -454,6 +454,16 @@ async function main(): Promise<void> {
     interceptor,
   );
 
+  // TEMP: scripted interactive input to reproduce the browser pipeline.
+  setTimeout(() => {
+    console.error('[feed] dir');
+    runner.postInput('dir\r\n');
+    setTimeout(() => {
+      console.error('[feed] exit');
+      runner.postInput('exit\r\n');
+    }, 2000);
+  }, 2000);
+
   // Section info for mapping an address back to a PE section name.
   const pe = await loader.load(image);
   const sectionOf = (address: number): string => {
@@ -471,6 +481,7 @@ async function main(): Promise<void> {
     createEngine: (mode) => new JitEngineImpl(runtime, mode),
     modulePath,
     commandLine: process.env.BK_ARGS ?? '',
+    interactive: true,
     readFile: async (p) => {
       if (process.env.BK_NO_MUI === '1') return null; // mimic browser env
       try {

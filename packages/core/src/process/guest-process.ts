@@ -26,6 +26,7 @@ import type {
 } from '@specter-core/contracts';
 import { WinError as E } from '@specter-core/contracts';
 import { STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE } from '../api/handlers';
+import type { ApiHost } from '../api/handlers';
 import { ApiTrapDispatcher } from '../jit/trap-dispatcher';
 import { Executor, type TrapHandler } from '../jit/executor';
 import { mapPeImage, X86_API_ARG_COUNT, type ApiStub, type MappedImage } from '../pe/mapper';
@@ -252,6 +253,15 @@ export class GuestProcessRunner {
   private quitRequested = false;
   /** Resolver for the GetMessageW block in interactive mode. */
   private pendingMessageResolve: (() => void) | null = null;
+  /**
+   * Console input buffer (UTF-16 code units as a JS string). Fed by the host
+   * via postInput (e.g. a terminal line + CRLF). ReadConsoleW/ReadConsoleA
+   * drain it; in interactive mode an empty buffer blocks the read until the
+   * host posts more input (mirrors the GetMessageW suspend/resume pattern).
+   */
+  private stdinBuffer = '';
+  /** Resolver for a blocked ReadConsoleW/A in interactive mode. */
+  private pendingInputResolve: (() => void) | null = null;
   /** Host callback for EDIT text changes (see GuestProcessOptions.onTextChanged). */
   private onTextChanged?: (hwnd: number, text: string) => void;
   /** Host callback when GetMessageW blocks (see GuestProcessOptions.onMessageWait). */
@@ -300,6 +310,8 @@ export class GuestProcessRunner {
     this.interactive = options.interactive ?? false;
     this.quitRequested = false;
     this.pendingMessageResolve = null;
+    this.stdinBuffer = '';
+    this.pendingInputResolve = null;
     this.onTextChanged = options.onTextChanged;
     this.onMessageWait = options.onMessageWait;
     this.muiLoaded = false;
@@ -3272,35 +3284,50 @@ export class GuestProcessRunner {
    * default handler).
    */
   private installConsoleWriteFile(): void {
+    this.installConsoleRead();
+
+    // WriteFile on the console pseudo-handles (STD_OUTPUT / STD_ERROR) is
+    // captured into the output stream; other handles fall through to the
+    // pre-existing file I/O handler (handlers.ts) if one is registered.
+    const prevWriteFile = this.interceptor.getHandler('kernel32.dll', 'WriteFile');
     this.interceptor.hook('kernel32.dll', 'WriteFile', (ctx, host) => {
-      const handle = ctx.rawArgs[0] ?? 0;
+      const handle = (ctx.rawArgs[0] ?? 0) | 0; // normalize to int32 (handles may arrive as 0xFFFFFFF2+)
       const buffer = ctx.rawArgs[1] ?? 0;
       const bytes = host.memory.read(buffer, ctx.rawArgs[2] ?? 0);
-      if (
-        handle === STD_OUTPUT_HANDLE ||
-        handle === STD_ERROR_HANDLE ||
-        handle === STD_INPUT_HANDLE
-      ) {
-        if (handle !== STD_INPUT_HANDLE) this.capture(handle === STD_ERROR_HANDLE, bytes);
+      if (handle === STD_OUTPUT_HANDLE || handle === STD_ERROR_HANDLE || handle === STD_INPUT_HANDLE) {
+        if (handle !== STD_INPUT_HANDLE) {
+          // A Unicode cmd.exe writes UTF-16LE to its console handle (WriteFile
+          // and WriteConsole are aliased on a console handle). Decode UTF-16,
+          // dropping trailing NUL padding, then re-encode as UTF-8 for capture.
+          const raw = host.memory.read(buffer, bytes.byteLength);
+          const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < raw.byteLength; i += 2) {
+            const c = view.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          this.capture(handle === STD_ERROR_HANDLE, new TextEncoder().encode(s));
+        }
         return { returnValue: bytes.byteLength, errorCode: E.NO_ERROR };
       }
-      return host.fs
-        .writeFile(handle, bytes)
-        .then((result) =>
-          result.error === E.NO_ERROR
-            ? { returnValue: result.bytesWritten, errorCode: E.NO_ERROR }
-            : { returnValue: 0, errorCode: result.error },
-        );
+      if (prevWriteFile) return prevWriteFile(ctx, host);
+      // Fallback if no file WriteFile handler is registered yet: mirror
+      // handlers.ts WriteFile via the fs bridge directly.
+      return host.fs.writeFile(handle, bytes).then((r) =>
+        r.error === E.NO_ERROR
+          ? { returnValue: r.bytesWritten, errorCode: E.NO_ERROR }
+          : { returnValue: 0, errorCode: r.error },
+      );
     });
 
-    // WriteConsoleW(console, buf, nChars, *written, reserved): cmd writes its
-    // whole `dir` listing through this (console handles are UTF-16). Convert
-    // to UTF-8 before capturing so the CLI/web output is readable; WriteFile
-    // on the same pseudo-handles stays raw (ANSI/CP437 from the CRT).
+    // WriteConsoleW/A(console, buf, nChars, *written, reserved): cmd writes its
+    // listings through these (console handles are UTF-16). Convert to UTF-8 so
+    // the host output is readable; NUL padding past nChars is dropped.
     const installWriteConsole = (wide: boolean): void => {
       const name = wide ? 'WriteConsoleW' : 'WriteConsoleA';
       this.interceptor.hook('kernel32.dll', name, (ctx, host) => {
-        const handle = ctx.rawArgs[0] ?? 0;
+        const handle = (ctx.rawArgs[0] ?? 0) | 0; // normalize to int32
         const buffer = ctx.rawArgs[1] ?? 0;
         const nChars = ctx.rawArgs[2] ?? 0;
         const written = ctx.rawArgs[3] ?? 0;
@@ -3309,9 +3336,6 @@ export class GuestProcessRunner {
         if (wide) {
           const raw = host.memory.read(buffer, nChars * 2);
           const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-          // cmd.exe passes the full line-buffer capacity as nChars (e.g. 0x220
-          // chars for a 34-char header line), so the tail is NUL padding.
-          // Stop at the first NUL so stdout has no stray \0 bytes.
           let s = '';
           for (let i = 0; i + 1 < raw.byteLength; i += 2) {
             const c = view.getUint16(i, true);
@@ -3334,6 +3358,90 @@ export class GuestProcessRunner {
     };
     installWriteConsole(true);
     installWriteConsole(false);
+  }
+
+  /**
+   * Console STD_INPUT reader (see installConsoleWriteFile for the writer).
+   * Adds a host-feedable stdin buffer plus ReadConsoleW/A and ReadFile on the
+   * STD_INPUT pseudo-handle. In interactive mode an empty buffer BLOCKS the
+   * read (await) until the host posts input via postInput — the same
+   * suspend/resume pattern used by GetMessageW, so the executor stays alive
+   * while cmd waits for the next command line. Non-interactive runs (e.g.
+   * `cmd /c dir`) get an immediate EOF (0 bytes) and never block.
+   */
+  private installConsoleRead(): void {
+    // Preserve any pre-existing ReadFile handler (file I/O) and only intercept
+    // the STD_INPUT pseudo-handle; everything else delegates to the original.
+    const prevReadFile = this.interceptor.getHandler('kernel32.dll', 'ReadFile');
+    this.interceptor.hook('kernel32.dll', 'ReadFile', async (ctx, host) => {
+      const handle = (ctx.rawArgs[0] ?? 0) | 0; // normalize to int32
+      if (handle === STD_INPUT_HANDLE) return this.consoleRead(ctx, host, false);
+      return prevReadFile ? prevReadFile(ctx, host) : { returnValue: 0, errorCode: E.ERROR_NOT_IMPLEMENTED };
+    });
+
+    this.interceptor.hook('kernel32.dll', 'ReadConsoleW', (ctx, host) => this.consoleRead(ctx, host, true));
+    this.interceptor.hook('kernel32.dll', 'ReadConsoleA', (ctx, host) => this.consoleRead(ctx, host, false));
+  }
+
+  /**
+   * Drains the host-fed stdin buffer. `wide` true = ReadConsoleW (UTF-16LE,
+   * `count` is CHARACTERS); false = ReadConsoleA / ReadFile(STD_INPUT) (bytes,
+   * `count` is BYTES, ASCII-only for v1). Blocks in interactive mode until at
+   * least one character is available.
+   */
+  private async consoleRead(
+    ctx: ApiCallContext,
+    host: ApiHost,
+    wide: boolean,
+  ): Promise<ApiResult> {
+    const buffer = ctx.rawArgs[1] ?? 0;
+    const count = ctx.rawArgs[2] ?? 0;
+    const pCount = ctx.rawArgs[3] ?? 0;
+    if (this.stdinBuffer.length === 0 && this.interactive) {
+      await new Promise<void>((resolve) => {
+        this.pendingInputResolve = resolve;
+      });
+    }
+    if (this.stdinBuffer.length === 0) {
+      // EOF: no input and not interactive (or host closed the stream).
+      if (pCount) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 0, true);
+        host.memory.write(pCount, w);
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    }
+    const take = Math.min(count, this.stdinBuffer.length);
+    const chunk = this.stdinBuffer.slice(0, take);
+    this.stdinBuffer = this.stdinBuffer.slice(take);
+    if (wide) {
+      const bytes = new Uint8Array(take * 2);
+      const view = new DataView(bytes.buffer);
+      for (let i = 0; i < take; i++) view.setUint16(i * 2, chunk.charCodeAt(i), true);
+      host.memory.write(buffer, bytes);
+    } else {
+      const bytes = new Uint8Array(take);
+      for (let i = 0; i < take; i++) bytes[i] = chunk.charCodeAt(i) & 0xff;
+      host.memory.write(buffer, bytes);
+    }
+    if (pCount) {
+      const w = new Uint8Array(4);
+      new DataView(w.buffer).setUint32(0, take, true);
+      host.memory.write(pCount, w);
+    }
+    return { returnValue: 1, errorCode: E.NO_ERROR };
+  }
+
+  /** Host → guest console input. Appends `text` (caller supplies the line
+   * terminator, e.g. "dir\r\n") and wakes any ReadConsoleW/A blocked in
+   * interactive mode. */
+  postInput(text: string): void {
+    this.stdinBuffer += text;
+    if (this.pendingInputResolve) {
+      const r = this.pendingInputResolve;
+      this.pendingInputResolve = null;
+      r();
+    }
   }
 
   private capture(stderr: boolean, bytes: Uint8Array): void {

@@ -35,6 +35,8 @@ import { ensureBuiltinWinFiles } from './builtin-win';
 import { setGuestText } from './guest-text';
 import { guestGdiBridgeProvider } from './gdi-bridge-registry';
 import { GuestWindowView } from './apps/RunExecutableApp';
+import { CmdGuestTerminal } from './apps/CmdGuestTerminal';
+import { CmdConsoleChannel } from './console-channel';
 import { InstalledAppView } from './apps/InstalledAppView';
 import type { AppDefinition, UiController } from './types';
 
@@ -117,6 +119,14 @@ export class DesktopControllerImpl implements DesktopController {
         storePath: 'Windows/SysWOW64/notepad.exe',
         modulePath: 'C:/Windows/SysWOW64/notepad.exe',
         name: 'Notepad',
+      });
+      return;
+    }
+    if (app.appId === 'command-prompt') {
+      await this.launchGuestConsole({
+        storePath: 'Windows/SysWOW64/cmd.exe',
+        modulePath: 'C:/Windows/SysWOW64/cmd.exe',
+        name: 'Command Prompt',
       });
       return;
     }
@@ -390,6 +400,115 @@ export class DesktopControllerImpl implements DesktopController {
       console.error(`[desktop] guest ${source.name} failed:`, err);
       await this.showGuestError(source.name, String(err));
     }
+  }
+
+  /**
+   * Runs the bundled cmd.exe as a REAL guest process with an interactive
+   * console terminal. Unlike launchGuestWindow (which hosts a GDI GUI app),
+   * cmd is a console program: its stdout streams through GuestProcessRunner's
+   * onOutput into a terminal <pre>, and keystrokes posted from the terminal
+   * feed its stdin via postInput (see guest-process consoleRead).
+   */
+  private async launchGuestConsole(source: { storePath: string; modulePath: string; name: string }): Promise<void> {
+    const fs = this.getFileSystem();
+    if (!fs) {
+      await this.showGuestError(source.name, 'No virtual disk available');
+      return;
+    }
+    // Lazy provision so cmd.exe + MUI exist even if startup provision failed.
+    try {
+      await ensureBuiltinWinFiles(fs);
+    } catch (err) {
+      await this.showGuestError(source.name, `Provisioning bundled tools failed: ${String(err)}`);
+      return;
+    }
+    let stat = null;
+    try {
+      stat = await fs.stat(source.storePath);
+    } catch (err) {
+      await this.showGuestError(source.name, `Cannot read ${source.storePath}: ${String(err)}`);
+      return;
+    }
+    if (!stat || stat.kind !== 'file' || stat.size === 0) {
+      await this.showGuestError(
+        source.name,
+        `Bundled cmd.exe missing on the virtual disk (${source.storePath}, size=${stat?.size ?? '?'}) — reload the page to provision it.`,
+      );
+      return;
+    }
+    let file;
+    try {
+      file = await fs.openFile(source.storePath, 'read');
+    } catch (err) {
+      await this.showGuestError(source.name, `Virtual disk has no ${source.storePath} — reload the page to provision the bundled tools. (${String(err)})`);
+      return;
+    }
+    let image: Uint8Array;
+    try {
+      const size = await file.size();
+      image = await file.read(0, size);
+    } finally {
+      await file.close();
+    }
+
+    const runtime = this.kernel.container.resolve(tokens.coreWasmRuntime) as WasmRuntimeImpl;
+    const jit = this.kernel.container.resolve(tokens.coreJit);
+    const loader = this.kernel.container.resolve(tokens.corePe);
+    const interceptor = this.kernel.container.resolve(tokens.coreApi);
+    const runner = new GuestProcessRunner(runtime, jit, loader, interceptor);
+    const channel = new CmdConsoleChannel();
+
+    // Open the terminal window first so React can mount and attach to the
+    // channel before we start the (possibly-blocking) run.
+    const handle = await this.windowManager.createWindow({
+      title: source.name,
+      width: 680,
+      height: 420,
+      icon: '🖥',
+      resizable: true,
+      appId: 'guest-console',
+      content: reactContent(
+        <CmdGuestTerminal
+          runner={runner}
+          channel={channel}
+          onClose={() => {
+            this.windowManager.closeWindow(handle.id).catch(() => undefined);
+          }}
+        />,
+      ),
+    });
+
+    let exitCode = 0;
+    let errorMessage: string | null = null;
+    try {
+      const result = await runner.run(image, {
+        createEngine: (mode) => new JitEngineImpl(runtime, mode),
+        modulePath: source.modulePath,
+        commandLine: 'cmd.exe',
+        interactive: true,
+        readFile: async (p) => {
+          const sp = toStorePath(p);
+          try {
+            const f = await fs.openFile(sp, 'read');
+            try {
+              const size = await f.size();
+              return await f.read(0, size);
+            } finally {
+              await f.close();
+            }
+          } catch {
+            return null;
+          }
+        },
+        onOutput: (bytes, stderr) => channel.push(bytes, stderr),
+      });
+      exitCode = result.exitCode;
+    } catch (err) {
+      console.error(`[desktop] guest ${source.name} failed:`, err);
+      errorMessage = String(err);
+    }
+    // Surface the outcome in the terminal and let the user close the window.
+    channel.markExited(errorMessage ? -1 : exitCode, errorMessage);
   }
 
   /** Shows a small error window when a bundled guest app cannot start. */

@@ -1065,9 +1065,10 @@
   padding: 6px 12px 10px;
 }
 
-.sc-cmd-prompt {
+.sc-cmd-caret {
   color: #ffffff;
   white-space: nowrap;
+  font-weight: 700;
 }
 
 .sc-cmd-input {
@@ -1078,6 +1079,37 @@
   color: #ffffff;
   font: inherit;
   caret-color: #ffffff;
+}
+
+.sc-cmd-exit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: #1a1a1a;
+  border-left: 3px solid #f0a020;
+  color: #e8c070;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sc-cmd-close {
+  flex: none;
+  border: 1px solid #555;
+  background: #2a2a2a;
+  color: #ddd;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.sc-cmd-close:hover {
+  background: #383838;
+  border-color: #777;
 }
 
 /* ---- Installer (Win11 wizard) ---- */
