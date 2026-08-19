@@ -105,13 +105,18 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
     const canvas = canvasRef.current;
     if (!canvas) return;
     const bridge = new CanvasGdiBridge(canvas);
+    // Register bridge for both the main window and the EDIT child window,
+    // so the guest's GDI text rendering reaches the canvas pixel path.
     setGuestGdiBridge(hwnd, bridge);
+    if (editHwnd !== null) setGuestGdiBridge(editHwnd, bridge);
+    console.log('[GDI] bridge registered for hwnd=0x%s editHwnd=%s', hwnd.toString(16), editHwnd !== null ? `0x${editHwnd.toString(16)}` : 'null');
     // Trigger a repaint through the pixel path.
     runner.postMessage({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 });
     return () => {
       setGuestGdiBridge(hwnd, null);
+      if (editHwnd !== null) setGuestGdiBridge(editHwnd, null);
     };
-  }, [hwnd, runner]);
+  }, [hwnd, editHwnd, runner]);
 
   // Resize: when the desktop window (and thus the canvas CSS box) changes
   // size, sync the canvas pixel buffer to match and notify the guest with

@@ -39,10 +39,25 @@ class LoggingInterceptor extends ApiInterceptorImpl {
       console.error(`[dbg] ${ctx.module}!${ctx.proc} normalized=${normalizeApiSetModule(ctx.module)} handler=${this.getHandler(normalizeApiSetModule(ctx.module), ctx.proc) ? 'YES' : 'NO'}`);
     }
     const args = ctx.rawArgs.slice(0, 12).map((a) => `0x${(a >>> 0).toString(16)}`);
+    const espNow = this.rt.getReg('esp') >>> 0;
     const result = await super.dispatch(ctx);
     console.error(
-      `[api] ${ctx.module}!${ctx.proc}(${args.join(', ')}) -> 0x${(result.returnValue >>> 0).toString(16)}${result.returnValueHigh !== undefined ? `:0x${(result.returnValueHigh >>> 0).toString(16)}` : ''}`,
+      `[api] esp=0x${espNow.toString(16)} ${ctx.module}!${ctx.proc}(${args.join(', ')}) -> 0x${(result.returnValue >>> 0).toString(16)}${result.returnValueHigh !== undefined ? `:0x${(result.returnValueHigh >>> 0).toString(16)}` : ''}`,
     );
+    // Dump the wide string at a GetCommandLineW return address to verify the
+    // guest actually received the intended command line (not an empty string).
+    if (ctx.proc.toLowerCase() === 'getcommandlinew') {
+      const p = result.returnValue >>> 0;
+      const raw = this.memHost.memory.read(p, 128);
+      const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+      let s = '';
+      for (let i = 0; i + 1 < raw.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      console.error(`[dbg]   GetCommandLineW => @0x${p.toString(16)} ${JSON.stringify(s)}`);
+    }
     if (ctx.proc.toLowerCase() === 'verifyversioninfow') {
       const addr = ctx.rawArgs[0] ?? 0;
       const b = this.memHost.memory.read(addr, 24);
@@ -98,6 +113,18 @@ class LoggingInterceptor extends ApiInterceptorImpl {
         s += String.fromCharCode(c);
       }
       console.error(`[api]   CreateFileW path: ${JSON.stringify(s)}`);
+    }
+    if (ctx.proc.toLowerCase() === 'findfirstfilew' || ctx.proc.toLowerCase() === 'findfirstfileexw') {
+      const addr = ctx.rawArgs[0] ?? 0;
+      const raw = this.memHost.memory.read(addr, 512);
+      const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+      let s = '';
+      for (let i = 0; i + 1 < raw.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      console.error(`[api]   ${ctx.proc} path: ${JSON.stringify(s)}`);
     }
     if (ctx.proc.toLowerCase() === 'messageboxw') {
       const text = ctx.rawArgs[1] ?? 0;
@@ -408,14 +435,35 @@ async function main(): Promise<void> {
         0x40dfe9, // mov esi, eax (slash search result)
         0x40dff7, // call [0x4503dc] = _o_towlower(char after '/')
         0x40dfff, // movzx ecx, ax (classify result)
-        0x40e002, // test cx,cx -> je 0x42704c
         0x40e020, // cmp ecx,0x63 ('c') -> je 0x40e088
         0x40e088, // 'c' case entry
-        0x40e1bd, // mov [eax+8], esi  SUCCESS: write 3rd slot
-        0x426f7a, // failure merge (0x40e210 jne)
-        0x42704c, // no-slash / char0 path
+        0x40e155, // quote-skip entry (block start; jne targets 0x40e155/0x40e19c)
+        0x40e19c, // common tail: wcslen cmd + write slot[2] (block start)
+        0x40e1bd, // mov [eax+8], esi  SUCCESS: write 3rd slot (block middle - trace miss)
+        0x40b743, // parser entry (block start from call 0x415cfd)
+        0x40b760, // prologue done (block start)
+        0x40b768, // first API call (InitializeCriticalSection)
+        0x40b795, // SetConsoleCtrlHandler call
+        0x40b7c4, // call 0x4124d0
+        0x40df9d, // real parser entry (called from 0x40b8d9)
         0x40b8de, // parser return (slots set?)
-        0x415d6a, // main reads 3 slots
+        0x40bac2, // epilogue start (block start?)
+        0x415d02, // main resumes after parser call (block start)
+        0x415d66, // main slot loop entry (block start; reads [ebp-0x14..-0x8])
+        0x415d6a, // main reads 3 slots (block middle - trace miss)
+        0x411d24, // heap-string helper: mov [0x44089c],edi (fault region)
+        0x411d30, // heap-string helper: ret (should pop 0x41005f)
+        0x41005f, // caller resume after 0x411cd0 (expected ret target)
+        0x40c138, // dir path builder: append "\*" to target ([esi])
+        0x40bfe0, // dir: find-last-backslash branch
+        0x40c024, // dir: normal path (GetFullPathNameW)
+        0x40c119, // dir: GetFullPathNameW ok -> store
+        0x40c091, // dir: jump target after fail
+        0x40bfd7, // dir: cmp bx,ax (first char vs '\')
+        0x40bfda, // dir: je 0x40c138 (taken for relative path)
+        0x40bf53, // dir handler entry (ecx = command object)
+        0x410c28, // tokenizer: after setjmp3, reads [0x4406d4]
+        0x410c5f, // tokenizer main loop start
       ];
       if (TK.includes(eip)) {
         const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
@@ -433,7 +481,78 @@ async function main(): Promise<void> {
         if (eip === 0x40dfff) extra = ` towlower(ax)=0x${(rt.getReg('eax') & 0xffff).toString(16)}`;
         if (eip === 0x40e1bd) extra = ` slotBase(eax)=${r('eax')} val(esi)=${r('esi')}`;
         if (eip === 0x40b8de) extra = ` [ebp-0x60]=${r('ebp')} slots@${r('esi')}`;
+        if (eip === 0x40e19c) {
+          // 0x40df9d's frame: [esp+0x10] = slot array ptr (edi saved). cmd is in esi.
+          const slotBase = rd32(rt.getReg('esp') + 0x10);
+          const s0 = rd32(slotBase), s1 = rd32(slotBase + 4), s2 = rd32(slotBase + 8);
+          const s0c = rd32(s0), s1c = rd32(s1), s2c = rd32(s2);
+          extra = ` slotBase=0x${slotBase.toString(16)} s0=0x${s0.toString(16)}(*0x${s0c.toString(16)}) s1=0x${s1.toString(16)}(*0x${s1c.toString(16)}) s2=0x${s2.toString(16)}(*0x${s2c.toString(16)})`;
+          const cmdPtr = rt.getReg('esi') >>> 0;
+          const b = rt.readBytes(cmdPtr, 64);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let cs = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            cs += String.fromCharCode(c);
+          }
+          extra += ` cmdStr=${JSON.stringify(cs)}`;
+        }
+        if (eip === 0x40e155) {
+          // just before quote-skip; dump the /c command string esi points at
+          const esi = rt.getReg('esi') >>> 0;
+          const b = rt.readBytes(esi, 64);
+          const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = view.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          extra = ` cmdStr=0x${esi.toString(16)} ${JSON.stringify(s)}`;
+        }
+        if (eip === 0x415d66) {
+          const ebp = rt.getReg('ebp') >>> 0;
+          const s0 = rd32(ebp - 0x14), s1 = rd32(ebp - 0x10), s2 = rd32(ebp - 0xc);
+          extra = ` slot0=0x${s0.toString(16)} slot1=0x${s1.toString(16)} slot2=0x${s2.toString(16)}`;
+        }
         if (eip === 0x415d6a) extra = ` slot0=0x${rd32(rt.getReg('ebp') - 0x14).toString(16)} slot1=0x${rd32(rt.getReg('ebp') - 0x10).toString(16)} slot2=0x${rd32(rt.getReg('ebp') - 0xc).toString(16)}`;
+        if (eip === 0x40b743 || eip === 0x415d02) {
+          extra = ` esp=${r('esp')} ebx=${r('ebx')} esi=${r('esi')} edi=${r('edi')}`;
+        }
+        if (eip === 0x40b760 || eip === 0x40b8de || eip === 0x40bac2 || eip === 0x40df9d || eip === 0x40b768 || eip === 0x40b795 || eip === 0x40b7c4 || eip === 0x411d24 || eip === 0x411d30 || eip === 0x41005f) {
+          extra = ` esp=${r('esp')} ebp=${r('ebp')} ebx=${r('ebx')}`;
+          if (eip === 0x411d24 || eip === 0x411d30) {
+            const esp = rt.getReg('esp') >>> 0;
+            extra += ` [esp]=0x${rd32(esp).toString(16)} [esp+4]=0x${rd32(esp + 4).toString(16)} edi=${r('edi')}`;
+          }
+        }
+        if (eip === 0x40bf53) {
+          const obj = rt.getReg('ecx') >>> 0;
+          const tgt = rd32(obj) >>> 0;
+          const b = rt.readBytes(tgt, 64);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          extra = ` obj=0x${obj.toString(16)} target=0x${tgt.toString(16)} ${JSON.stringify(s)} esp=${r('esp')}`;
+        }
+        if (eip === 0x410c28 || eip === 0x410c5f) {
+          const rd32g = (a: number) => rd32(a);
+          const p = rd32g(0x4406d4) >>> 0;
+          const b = rt.readBytes(p, 128);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          extra = ` cmd@0x${p.toString(16)} ${JSON.stringify(s)} [4406d0]=0x${(rd32g(0x4406d0) >>> 0).toString(16)} [4406d4]=0x${(rd32g(0x4406d4) >>> 0).toString(16)}`;
+        }
         console.error(
           `[tk] eip=0x${eip.toString(16)} eax=${r('eax')} ecx=${r('ecx')} edx=${r('edx')} esi=${r('esi')} edi=${r('edi')} ebx=${r('ebx')}${extra}`,
         );

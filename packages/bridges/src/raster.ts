@@ -129,8 +129,8 @@ export class GdiSurface {
     this.width = width;
     this.height = height;
     this.pixels = new Uint32Array(width * height);
-    // 初始化为不透明黑（GDI 内存 DC 的确定性初值；getPixel 越界仍返回 null）
-    this.pixels.fill(0xff000000);
+    // 初始化为不透明白（匹配 Windows 默认窗口背景色 COLOR_WINDOW）
+    this.pixels.fill(0xffffffff);
   }
 
   // -------------------------------------------------------------------------

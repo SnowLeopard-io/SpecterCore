@@ -214,6 +214,7 @@ export class CanvasGdiBridge implements GdiBridge {
       saveStack: [],
       canvas: null,
     });
+    console.log('[GDI-bridge] createDC name=%s → handle=%d surface=%dx%d canvas=%sx%s', name, handle, w, h, this.display?.width ?? '?', this.display?.height ?? '?');
     void name;
     return handle;
   }
@@ -288,6 +289,7 @@ export class CanvasGdiBridge implements GdiBridge {
     sctx.fillText(text, 0, 0);
     const image = sctx.getImageData(0, 0, width, height);
     blitRgbaIntoSurface(surface, x, y, image.data, width, height, ROP_INDEX_COPY);
+    console.log('[GDI-bridge] textOut dc=%d x=%d y=%d text="%s" font=%s', dc, x, y, text.slice(0, 40), f?.name ?? 'default');
     this.notify(dc, { x, y, width, height });
     return E.NO_ERROR;
   }
@@ -317,6 +319,7 @@ export class CanvasGdiBridge implements GdiBridge {
   async fillRect(dc: number, rect: Rect, color: Color, rop?: number): Promise<WinError> {
     const { surface } = this.requireDc(dc);
     surface.fillRect(rect, color, rop ?? ROP_INDEX_PATCOPY);
+    console.log('[GDI-bridge] fillRect dc=%d rect=(%d,%d,%d,%d) color=(%d,%d,%d)', dc, rect.x, rect.y, rect.width, rect.height, color.r, color.g, color.b);
     this.notify(dc, rect);
     return E.NO_ERROR;
   }
@@ -475,6 +478,7 @@ export class CanvasGdiBridge implements GdiBridge {
       image.data.set(surface.toRgba());
       this.textCtx.putImageData(image, 0, 0);
     }
+    console.log('[GDI-bridge] flush dc=%d surface=%dx%d textCtx=%s', dc, surface.width, surface.height, this.textCtx ? 'Y' : 'N');
     this.notify(dc, this.fullRect(dc));
   }
 

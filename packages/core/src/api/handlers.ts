@@ -73,6 +73,140 @@ function writeFindData(host: ApiHost, address: number, data: { attributes: numbe
   host.memory.write(address, w);
 }
 
+/** Reads an 8-word SYSTEMTIME structure at `address`. */
+function readSysTime(host: ApiHost, address: number): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
+  const b = host.memory.read(address, 16);
+  const v = new DataView(b.buffer, b.byteOffset, 16);
+  return {
+    y: v.getUint16(0, true),
+    mo: v.getUint16(2, true),
+    d: v.getUint16(6, true),
+    h: v.getUint16(8, true),
+    mi: v.getUint16(10, true),
+    s: v.getUint16(12, true),
+  };
+}
+
+/** Writes a UTF-16 result string; returns chars INCLUDING the NUL (like the API). */
+function writeDateStr(host: ApiHost, out: number, cch: number, s: string): ApiResult {
+  const n = Math.min(s.length, Math.max(0, cch - 1));
+  const w = new Uint8Array(n * 2 + 2);
+  for (let i = 0; i < n; i++) {
+    w[i * 2] = s.charCodeAt(i) & 0xff;
+    w[i * 2 + 1] = (s.charCodeAt(i) >> 8) & 0xff;
+  }
+  host.memory.write(out, w);
+  return ok(n + 1);
+}
+
+const DAYS_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const DAYS_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS_FULL = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+const MONTHS_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** Minimal GetDateFormatW/GetTimeFormatW format engine (M/d/yyyy, h:mm:ss tt...). */
+function formatDateTime(st: { y: number; mo: number; d: number; h: number; mi: number; s: number }, fmt: string, isTime: boolean): string {
+  const dow = new Date(Date.UTC(st.y, st.mo - 1, st.d)).getUTCDay();
+  const h12 = st.h % 12 === 0 ? 12 : st.h % 12;
+  const ampm = st.h < 12 ? 'AM' : 'PM';
+  const pad2 = (n: number): string => (n < 10 ? `0${n}` : `${n}`);
+  let out = '';
+  let i = 0;
+  while (i < fmt.length) {
+    const c = fmt[i];
+    if (c === "'") {
+      // literal run
+      i += 1;
+      let lit = '';
+      while (i < fmt.length && fmt[i] !== "'") {
+        if (fmt[i] === '\\' && i + 1 < fmt.length) {
+          lit += fmt[i + 1];
+          i += 2;
+        } else {
+          lit += fmt[i];
+          i += 1;
+        }
+      }
+      if (i < fmt.length) i += 1; // closing quote
+      out += lit;
+      continue;
+    }
+    // count run of the same token char
+    let j = i;
+    while (j < fmt.length && fmt[j] === c) j += 1;
+    const run = j - i;
+    const token = fmt.slice(i, j);
+    i = j;
+    if (isTime) {
+      if (c === 'h') out += run >= 2 ? pad2(h12) : `${h12}`;
+      else if (c === 'H') out += run >= 2 ? pad2(st.h) : `${st.h}`;
+      else if (c === 'm') out += run >= 2 ? pad2(st.mi) : `${st.mi}`;
+      else if (c === 's') out += run >= 2 ? pad2(st.s) : `${st.s}`;
+      else if (c === 't') out += run >= 2 ? ampm : ampm[0];
+      else out += token;
+    } else {
+      if (c === 'd') {
+        if (run >= 4) out += DAYS_FULL[dow];
+        else if (run === 3) out += DAYS_ABBR[dow];
+        else if (run === 2) out += pad2(st.d);
+        else out += `${st.d}`;
+      } else if (c === 'M') {
+        if (run >= 4) out += MONTHS_FULL[st.mo - 1];
+        else if (run === 3) out += MONTHS_ABBR[st.mo - 1];
+        else if (run === 2) out += pad2(st.mo);
+        else out += `${st.mo}`;
+      } else if (c === 'y') {
+        if (run >= 4) out += `${st.y}`;
+        else if (run === 2) out += pad2(st.y % 100);
+        else out += `${st.y % 100}`;
+      } else if (c === 'g') {
+        out += run >= 2 ? 'A.D.' : 'AD';
+      } else {
+        out += token;
+      }
+    }
+  }
+  return out;
+}
+
+/** en-US locale strings keyed by LCType (winnt.h); only what cmd/notepad read. */
+const LOCALE_STRINGS: Record<number, string> = {
+  0x1: '0409', // ILANGUAGE
+  0x2: 'English (United States)', // SLANGUAGE
+  0x3: 'ENU', // SABBREVLANGNAME
+  0x4: 'English', // SNATIVELANGNAME
+  0x5: '1', // ICOUNTRY
+  0x6: 'United States', // SCOUNTRY
+  0x7: '$', // SINTLSYMBOL
+  0x8: '2', // SINTLFRACDIGITS
+  0xd: '$', // SCURRENCY
+  0xe: '.', // SMONDECIMALSEP
+  0xf: ',', // SMONTHOUSANDSEP
+  0x10: '3;0', // SMONGROUPING
+  0x11: '0', // IMEASURE
+  0x12: '.', // SDECIMALSEP
+  0x13: ',', // STHOUSANDSEP
+  0x14: '3;0', // IGROUPING
+  0x15: '1', // IZERO
+  0x19: '0123456789', // SNATIVEDIGITS
+  0x1d: '/', // SDATE
+  0x1f: 'M/d/yyyy', // SSHORTDATE
+  0x20: 'dddd, MMMM dd, yyyy', // SLONGDATE
+  0x21: '0', // ILDATE (MDY)
+  0x23: ':', // STIME
+  0x24: '0', // ITIME (24h)
+  0x25: '0', // ITLZERO
+  0x28: 'AM', // S1159
+  0x29: 'PM', // S2359
+  0x2a: 'AM', // SS1159 (sounds)
+  0x2b: 'PM', // SS2359
+  0x31: 'h:mm tt', // SSHORTTIME
+  0x1003: 'h:mm:ss tt', // STIMEFORMAT
+};
+
 /**
  * Default kernel32/user32/gdi32 handlers (design doc 4.2.x).
  *
@@ -174,6 +308,248 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     },
     GetThreadLocale: () => ok(0x409),
     GetUserDefaultLCID: () => ok(0x409),
+    // FILETIME <-> SYSTEMTIME: cmd formats `dir` row dates/times from the
+    // WIN32_FIND_DATAW times. Unhandled, these return 0 + ERROR_NOT_IMPLEMENTED
+    // and cmd aborts the dir command before printing rows.
+    FileTimeToSystemTime: (ctx, host) => {
+      const ft = raw(ctx, 0);
+      const st = raw(ctx, 1);
+      if (!ft || !st) return ok(0);
+      const b = host.memory.read(ft, 8);
+      const t = new DataView(b.buffer, b.byteOffset, 8).getBigUint64(0, true);
+      const ms = Number((t - 116444736000000000n) / 10000n);
+      const d = new Date(ms);
+      const w = new Uint8Array(16);
+      const v = new DataView(w.buffer);
+      v.setUint16(0, d.getUTCFullYear(), true);
+      v.setUint16(2, d.getUTCMonth() + 1, true);
+      v.setUint16(4, d.getUTCDay(), true);
+      v.setUint16(6, d.getUTCDate(), true);
+      v.setUint16(8, d.getUTCHours(), true);
+      v.setUint16(10, d.getUTCMinutes(), true);
+      v.setUint16(12, d.getUTCSeconds(), true);
+      v.setUint16(14, d.getUTCMilliseconds(), true);
+      host.memory.write(st, w);
+      return ok(1);
+    },
+    SystemTimeToFileTime: (ctx, host) => {
+      const st = raw(ctx, 0);
+      const ft = raw(ctx, 1);
+      if (!st || !ft) return ok(0);
+      const b = host.memory.read(st, 16);
+      const v = new DataView(b.buffer, b.byteOffset, 16);
+      const year = v.getUint16(0, true);
+      const month = v.getUint16(2, true);
+      const day = v.getUint16(6, true);
+      const hour = v.getUint16(8, true);
+      const minute = v.getUint16(10, true);
+      const second = v.getUint16(12, true);
+      const ms = v.getUint16(14, true);
+      const d = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+      const t = BigInt(d) * 10000n + 116444736000000000n;
+      const w = new Uint8Array(8);
+      new DataView(w.buffer).setBigUint64(0, t, true);
+      host.memory.write(ft, w);
+      return ok(1);
+    },
+    FileTimeToLocalFileTime: (ctx, host) => {
+      // The emulated clock is UTC-based; keep the value (cmd only cares that
+      // the conversion succeeds and stays monotonic).
+      const ft = raw(ctx, 0);
+      const out = raw(ctx, 1);
+      if (!ft || !out) return ok(0);
+      host.memory.write(out, host.memory.read(ft, 8));
+      return ok(1);
+    },
+    // GetLocaleInfoW/A: cmd reads LOCALE_SSHORTDATE / LOCALE_STIME / SDATE /
+    // S1159 / S2359 etc. to build the dir row date column. A 0 return is
+    // tolerated by cmd for most types but the date/time format strings must
+    // resolve or the row formatting fails.
+    GetLocaleInfoW: (ctx, host) => {
+      const lcType = raw(ctx, 1) >>> 0;
+      const buf = raw(ctx, 2);
+      const cch = raw(ctx, 3);
+      const s = LOCALE_STRINGS[lcType];
+      if (s === undefined || !buf || !cch) return ok(0);
+      const n = Math.min(s.length, cch - 1);
+      const w = new Uint8Array(n * 2 + 2);
+      for (let i = 0; i < n; i++) {
+        w[i * 2] = s.charCodeAt(i) & 0xff;
+        w[i * 2 + 1] = (s.charCodeAt(i) >> 8) & 0xff;
+      }
+      host.memory.write(buf, w);
+      return ok(n + 1); // count INCLUDING the NUL
+    },
+    GetLocaleInfoA: (ctx, host) => {
+      const lcType = raw(ctx, 1) >>> 0;
+      const buf = raw(ctx, 2);
+      const cch = raw(ctx, 3);
+      const s = LOCALE_STRINGS[lcType];
+      if (s === undefined || !buf || !cch) return ok(0);
+      const n = Math.min(s.length, cch - 1);
+      const w = new Uint8Array(n + 1);
+      for (let i = 0; i < n; i++) w[i] = s.charCodeAt(i) & 0xff;
+      host.memory.write(buf, w);
+      return ok(n + 1);
+    },
+    GetDateFormatW: (ctx, host) => {
+      const lpDate = raw(ctx, 2);
+      const lpFormat = raw(ctx, 3);
+      const out = raw(ctx, 4);
+      const cch = raw(ctx, 5);
+      if (!lpDate) return ok(0);
+      const st = readSysTime(host, lpDate);
+      const fmt = lpFormat ? memWStr(host, lpFormat) : 'M/d/yyyy';
+      const s = formatDateTime(st, fmt, false);
+      // Size query (cchDate==0 or NULL buffer): return required chars incl NUL.
+      if (!out || !cch) return ok(s.length + 1);
+      return writeDateStr(host, out, cch, s);
+    },
+    GetDateFormatA: (ctx, host) => {
+      const lpDate = raw(ctx, 2);
+      const lpFormat = raw(ctx, 3);
+      const out = raw(ctx, 4);
+      const cch = raw(ctx, 5);
+      if (!lpDate) return ok(0);
+      const st = readSysTime(host, lpDate);
+      const fmt = lpFormat ? memCStr(host, lpFormat) : 'M/d/yyyy';
+      const s = formatDateTime(st, fmt, false);
+      if (!out || !cch) return ok(s.length + 1);
+      const n = Math.min(s.length, cch - 1);
+      const w = new Uint8Array(n + 1);
+      for (let i = 0; i < n; i++) w[i] = s.charCodeAt(i) & 0xff;
+      host.memory.write(out, w);
+      return ok(n + 1);
+    },
+    GetTimeFormatW: (ctx, host) => {
+      const lpTime = raw(ctx, 2);
+      const lpFormat = raw(ctx, 3);
+      const out = raw(ctx, 4);
+      const cch = raw(ctx, 5);
+      if (!lpTime) return ok(0);
+      const st = readSysTime(host, lpTime);
+      const fmt = lpFormat ? memWStr(host, lpFormat) : 'h:mm:ss tt';
+      const s = formatDateTime(st, fmt, true);
+      if (!out || !cch) return ok(s.length + 1);
+      return writeDateStr(host, out, cch, s);
+    },
+    GetTimeFormatA: (ctx, host) => {
+      const lpTime = raw(ctx, 2);
+      const lpFormat = raw(ctx, 3);
+      const out = raw(ctx, 4);
+      const cch = raw(ctx, 5);
+      if (!lpTime) return ok(0);
+      const st = readSysTime(host, lpTime);
+      const fmt = lpFormat ? memCStr(host, lpFormat) : 'h:mm:ss tt';
+      const s = formatDateTime(st, fmt, true);
+      if (!out || !cch) return ok(s.length + 1);
+      const n = Math.min(s.length, cch - 1);
+      const w = new Uint8Array(n + 1);
+      for (let i = 0; i < n; i++) w[i] = s.charCodeAt(i) & 0xff;
+      host.memory.write(out, w);
+      return ok(n + 1);
+    },
+    // GetConsoleScreenBufferInfo(HANDLE, PCONSOLE_SCREEN_BUFFER_INFO): cmd
+    // queries the buffer size to lay out `dir` columns and to decide between
+    // WriteConsoleW vs WriteFile. Return a plausible 80x300 console so it
+    // proceeds with the columnar layout instead of failing console init.
+    GetConsoleScreenBufferInfo: (ctx, host) => {
+      const out = raw(ctx, 1);
+      if (out) {
+        // CONSOLE_SCREEN_BUFFER_INFO: dwSize(COORD=4), dwCursorPosition(4),
+        // wAttributes(2), srWindow(SMALL_RECT=8), dwMaximumWindowSize(4).
+        const w = new Uint8Array(22);
+        const view = new DataView(w.buffer);
+        view.setUint16(0, 80, true); // dwSize.X
+        view.setUint16(2, 300, true); // dwSize.Y
+        view.setUint16(8, 0x7, true); // wAttributes (FOREGROUND_* defaults)
+        view.setUint16(10, 0, true); // srWindow.Left
+        view.setUint16(12, 0, true); // srWindow.Top
+        view.setUint16(14, 79, true); // srWindow.Right
+        view.setUint16(16, 24, true); // srWindow.Bottom
+        view.setUint16(18, 80, true); // dwMaximumWindowSize.X
+        view.setUint16(20, 300, true); // dwMaximumWindowSize.Y
+        host.memory.write(out, w);
+      }
+      return ok(1);
+    },
+    // GetVolumeInformationW(lpRootPathName, lpVolumeNameBuffer,
+    //   nVolumeNameSize, lpVolumeSerialNumber, lpMaximumComponentLength,
+    //   lpFileSystemFlags, lpFileSystemNameBuffer, nFileSystemNameSize)
+    // cmd.exe `dir` prints " Volume in drive C has no label." from this; a
+    // 0 return (default handler) sets ERROR_CALL_NOT_IMPLEMENTED and cmd
+    // aborts the dir command with exit code 1 before printing anything.
+    GetVolumeInformationW: (ctx, host) => {
+      const nameBuf = raw(ctx, 1);
+      const nameCap = raw(ctx, 2);
+      const serialBuf = raw(ctx, 3);
+      const maxLenBuf = raw(ctx, 4);
+      const flagsBuf = raw(ctx, 5);
+      const fsBuf = raw(ctx, 6);
+      const fsCap = raw(ctx, 7);
+      const writeW = (addr: number, cap: number, s: string): void => {
+        if (!addr || cap < 2) return;
+        const n = Math.min(s.length, cap - 1);
+        const w = new Uint8Array(n * 2 + 2);
+        for (let i = 0; i < n; i++) {
+          w[i * 2] = s.charCodeAt(i) & 0xff;
+          w[i * 2 + 1] = (s.charCodeAt(i) >> 8) & 0xff;
+        }
+        host.memory.write(addr, w);
+      };
+      writeW(nameBuf, nameCap, ''); // empty label -> "has no label"
+      if (serialBuf) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 0x1234abcd, true);
+        host.memory.write(serialBuf, w);
+      }
+      if (maxLenBuf) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 255, true);
+        host.memory.write(maxLenBuf, w);
+      }
+      if (flagsBuf) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 0x000700ff, true); // NTFS-ish flags
+        host.memory.write(flagsBuf, w);
+      }
+      writeW(fsBuf, fsCap, 'NTFS');
+      return ok(1);
+    },
+    GetVolumeInformationA: (ctx, host) => {
+      const nameBuf = raw(ctx, 1);
+      const nameCap = raw(ctx, 2);
+      const serialBuf = raw(ctx, 3);
+      const maxLenBuf = raw(ctx, 4);
+      const flagsBuf = raw(ctx, 5);
+      const fsBuf = raw(ctx, 6);
+      const fsCap = raw(ctx, 7);
+      const writeA = (addr: number, cap: number, s: string): void => {
+        if (!addr || cap < 2) return;
+        const n = Math.min(s.length, cap - 1);
+        const w = new Uint8Array(n + 1);
+        for (let i = 0; i < n; i++) w[i] = s.charCodeAt(i) & 0xff;
+        host.memory.write(addr, w);
+      };
+      writeA(nameBuf, nameCap, '');
+      if (serialBuf) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 0x1234abcd, true);
+        host.memory.write(serialBuf, w);
+      }
+      if (maxLenBuf) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 255, true);
+        host.memory.write(maxLenBuf, w);
+      }
+      if (flagsBuf) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 0x000700ff, true);
+        host.memory.write(flagsBuf, w);
+      }
+      writeA(fsBuf, fsCap, 'NTFS');
+      return ok(1);
+    },
     // cmd.exe opens its own thread during console init; a NULL handle aborts.
     OpenThread: () => ok(0x5001),
     GetExitCodeThread: () => ok(0),
@@ -278,6 +654,30 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       if (res.error !== E.NO_ERROR) return fail(res.error);
       const first = res.entries[0];
       if (first) writeFindData(host, raw(ctx, 1), first);
+      return ok(res.searchHandle);
+    },
+    // FindFirstFileExW/A: cmd.exe `dir` enumerates via FindFirstFileExW with
+    // fInfoLevelId=1 (FindExInfoBasic) + fSearchOp=0 (FindExSearchNameMatch).
+    // FindExInfoBasic still uses the WIN32_FIND_DATAW layout (alternate name
+    // just left empty), so writeFindData works for both levels.
+    FindFirstFileExW: async (ctx, host) => {
+      const path = memWStr(host, raw(ctx, 0));
+      if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
+      const { dir, pattern } = splitFindPattern(path);
+      const res = await host.fs.findFirstFile(dir, pattern);
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      const first = res.entries[0];
+      if (first) writeFindData(host, raw(ctx, 2), first);
+      return ok(res.searchHandle);
+    },
+    FindFirstFileExA: async (ctx, host) => {
+      const path = memCStr(host, raw(ctx, 0));
+      if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
+      const { dir, pattern } = splitFindPattern(path);
+      const res = await host.fs.findFirstFile(dir, pattern);
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      const first = res.entries[0];
+      if (first) writeFindData(host, raw(ctx, 2), first);
       return ok(res.searchHandle);
     },
     FindNextFileW: async (ctx, host) => {

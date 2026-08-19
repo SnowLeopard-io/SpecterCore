@@ -579,7 +579,130 @@ export class GuestProcessRunner {
       return { returnValue: n, errorCode: E.NO_ERROR };
     });
 
-    // LoadMenuW/A + LoadAcceleratorsW: return the raw resource bytes (the
+    // FormatMessageW: cmd.exe pulls its dir header / file-row / error format
+    // strings from the RT_MESSAGETABLE (type 11) merged from cmd.exe.mui, and
+    // formats system errors via FORMAT_MESSAGE_FROM_SYSTEM. Without a handler
+    // both return 0 -> dir prints nothing and error paths print "unknown".
+    //
+    // RT_MESSAGETABLE layout (winnt.h):
+    //   MESSAGE_RESOURCE_DATA { DWORD NumberOfBlocks; MESSAGE_RESOURCE_BLOCK[] }
+    //   MESSAGE_RESOURCE_BLOCK { DWORD LowId; DWORD HighId;
+    //                            DWORD OffsetToEntries; }  // from DATA start
+    //   entries are sequential per block (entry k = id LowId+k):
+    //   MESSAGE_RESOURCE_ENTRY { WORD Length; WORD Flags; WCHAR Text[]; }
+    //   Length includes the 4-byte header; entries are DWORD-aligned.
+    const rd16 = (a: number): number => {
+      const b = this.runtime.readBytes(a >>> 0, 2);
+      return b.byteLength >= 2 ? new DataView(b.buffer, b.byteOffset, 2).getUint16(0, true) : 0;
+    };
+    const readMsgTable = (addr: number, size: number, msgId: number): string | null => {
+      const nb = this.runtime.readInt32(addr);
+      for (let b = 0; b < nb; b++) {
+        const bo = addr + 4 + b * 12;
+        const low = this.runtime.readInt32(bo) >>> 0;
+        const high = this.runtime.readInt32(bo + 4) >>> 0;
+        const off = this.runtime.readInt32(bo + 8) >>> 0;
+        if (msgId < low || msgId > high) continue;
+        let eo = addr + off;
+        const idx = msgId - low;
+        for (let i = 0; i < idx; i++) {
+          const len = rd16(eo);
+          if (len < 4) return null;
+          eo = (eo + len + 3) & ~3;
+        }
+        const len = rd16(eo);
+        if (len < 4) return null;
+        const flags = rd16(eo + 2);
+        const tlen = len - 4;
+        if (flags & 1) {
+          // Unicode entry: UTF-16LE text, strip trailing NUL/padding.
+          let s = '';
+          for (let i = 0; i + 1 < tlen; i += 2) {
+            const c = rd16(eo + 4 + i);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        }
+        // ANSI entry (rare in modern MUI): latin1 bytes.
+        let s = '';
+        for (let i = 0; i < tlen; i++) {
+          const c = rd16(eo + 4 + i) & 0xff;
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      }
+      return null;
+    };
+    const lookupMsgTable = (msgId: number): string | null => {
+      for (const [key, entry] of resourceTable) {
+        if ((key >>> 16) !== 11) continue;
+        const t = readMsgTable(entry.address, entry.size, msgId);
+        if (t !== null) return t;
+      }
+      return null;
+    };
+    // FORMAT_MESSAGE_FROM_SYSTEM fallback: a small map of the system error
+    // strings cmd prints on failure paths. Unknown ids -> ERROR_MR_MID_NOT_FOUND.
+    const SYSTEM_MESSAGE_TEXT: Record<number, string> = {
+      2: 'The system cannot find the file specified.',
+      3: 'The system cannot find the path specified.',
+      5: 'Access is denied.',
+      6: 'The handle is invalid.',
+      8: 'Not enough storage is available to process this command.',
+      87: 'The parameter is incorrect.',
+      120: 'This function is not supported on this system.',
+      123: 'The filename, directory name, or volume label syntax is incorrect.',
+      267: 'The directory name is invalid.',
+      317: 'The system cannot find message text for message number 0x%1 in the message file for %2.',
+    };
+    this.interceptor.hook('kernel32.dll', 'FormatMessageW', (ctx) => {
+      const flags = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const hModule = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const msgId = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const bufPtr = (ctx.rawArgs[4] ?? 0) >>> 0;
+      const nSize = (ctx.rawArgs[5] ?? 0) >>> 0;
+      const allocBuf = (flags & 0x100) !== 0;
+      const fromModule = (flags & 0x800) !== 0;
+      const fromSystem = (flags & 0x1000) !== 0;
+      let text: string | null = null;
+      if (fromModule && hModule === 0) text = lookupMsgTable(msgId);
+      if (text === null && fromSystem) text = SYSTEM_MESSAGE_TEXT[msgId] ?? null;
+      if (text === null) return { returnValue: 0, errorCode: 0x13d }; // ERROR_MR_MID_NOT_FOUND
+      // Minimal %N substitution from the Arguments array (va_list or array of
+      // LPCWSTR with FORMAT_MESSAGE_ARGUMENT_ARRAY). cmd's table strings use
+      // %s-style inserts with wide-string args; numbers are left as-is.
+      const argsPtr = (ctx.rawArgs[6] ?? 0) >>> 0;
+      const readArgW = (i: number): string => {
+        if (!argsPtr) return '';
+        const p = this.runtime.readInt32(argsPtr + i * 4) >>> 0;
+        if (!p) return '';
+        let s = '';
+        for (let j = 0; j < 512; j++) {
+          const c = rd16(p + j * 2);
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      };
+      if (argsPtr && !(flags & 0x200)) {
+        text = text.replace(/%([1-9])/g, (_m, d: string) => readArgW(Number(d) - 1));
+      }
+      const chars = text.length;
+      const outAddr = allocBuf ? bumpAlloc(chars * 2 + 8) : bufPtr;
+      if (allocBuf && bufPtr) this.runtime.writeInt32(bufPtr, outAddr);
+      const cap = allocBuf ? chars + 1 : Math.max(0, nSize);
+      const n = Math.min(chars, cap);
+      const w = new Uint8Array(n * 2 + 2);
+      for (let i = 0; i < n; i++) {
+        const c = text.charCodeAt(i);
+        w[i * 2] = c & 0xff;
+        w[i * 2 + 1] = (c >> 8) & 0xff;
+      }
+      this.runtime.writeBytes(outAddr, w);
+      return { returnValue: n, errorCode: E.NO_ERROR };
+    });
     // guest parses the RT_MENU / RT_ACCELERATOR structures itself). The
     // returned "handle" doubles as the resource address in guest memory, which
     // is what CreateWindowExW receives as hMenu — good enough to keep the UI
@@ -702,7 +825,7 @@ export class GuestProcessRunner {
     // get a fresh trap stub appended after the static ones, so `call` lands
     // in the dispatcher and the handler registry answers; unknown names
     // return NULL like a real lookup miss.
-    const allocDynamicStub = (procName: string): number => {
+    const allocDynamicStub = (procName: string, moduleName?: string): number => {
       let module = 'kernel32.dll';
       for (const key of this.interceptor.listHooks()) {
         const bang = key.indexOf('!');
@@ -711,7 +834,14 @@ export class GuestProcessRunner {
           break;
         }
       }
-      const argCount = X86_API_ARG_COUNT[procName.toLowerCase()] ?? 0;
+      // Module-qualified lookup first: delay-imports resolved by ordinal get
+      // procName "#N" which is meaningless alone (Wldp.dll#10 = 3 stdcall args,
+      // Wldp.dll#2 = 5). Without this the stub `ret 0` leaks 4*N bytes per call
+      // and drifts the guest stack (cmd parser 0x40b743 +12 -> ebx clobbered).
+      const argCount =
+        (moduleName ? X86_API_ARG_COUNT[`${moduleName.toLowerCase()}!${procName.toLowerCase()}`] : undefined) ??
+        X86_API_ARG_COUNT[procName.toLowerCase()] ??
+        0;
       const index = stubs.length;
       const stubAddress = dynCursor();
       const stubLen = argCount === 0 ? 8 : 10;
@@ -787,7 +917,7 @@ export class GuestProcessRunner {
         procName = readCStr(parentBase + nameVal + 2);
       }
       if (!procName) return { returnValue: 0, errorCode: E.NO_ERROR };
-      const stub = allocDynamicStub(procName);
+      const stub = allocDynamicStub(procName, dllName);
       if (!stub) return { returnValue: 0, errorCode: E.NO_ERROR };
       this.runtime.writeInt32(thunk, stub);
       if (dllName) this.runtime.writeInt32(thunk + 4, 0);
@@ -1223,8 +1353,11 @@ export class GuestProcessRunner {
       return { returnValue: next, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('kernel32.dll', 'HeapFree', () => this.ok1());
+    // HeapSize(hHeap, dwFlags, lpMem) = 3 args; lpMem is rawArgs[2]. The old
+    // code read rawArgs[1] (dwFlags=0) and always returned 0 — harmless only
+    // while callers ignored the result (cmd's 0x411cd0 helper).
     this.interceptor.hook('kernel32.dll', 'HeapSize', (ctx) => {
-      const p = ctx.rawArgs[1] ?? 0;
+      const p = ctx.rawArgs[2] ?? 0;
       return { returnValue: p ? Math.max(0, this.runtime.readInt32(p - 4) & ~7) : 0, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('kernel32.dll', 'LocalAlloc', (ctx) => {
@@ -1717,8 +1850,13 @@ export class GuestProcessRunner {
     let merged = 0;
     for (const [key, data] of entries) {
       const type = key >>> 16;
-      // Only merge resources the hooks can serve: strings/menus/accelerators.
-      if (type !== 6 && type !== 4 && type !== 9) continue;
+      // Merge resources the hooks can serve: strings (6), menus (4),
+      // accelerators (9), and RT_MESSAGETABLE (11). cmd.exe keeps its dir /
+      // error formatting strings in the message table and reads them via
+      // FormatMessage(FORMAT_MESSAGE_FROM_HMODULE), so without type 11 the
+      // merged table stays empty and dir emits nothing useful. The MUI
+      // internal type (232) and RT_VERSION (16) are intentionally skipped.
+      if (type !== 6 && type !== 4 && type !== 9 && type !== 11) continue;
       const addr = bumpAlloc(data.byteLength);
       this.runtime.writeBytes(addr, data);
       resourceTable.set(key, { size: data.byteLength, address: addr });
@@ -2414,7 +2552,10 @@ export class GuestProcessRunner {
     };
     const getMessage = async (ctx: ApiCallContext): Promise<ApiResult> => {
       const m = this.guiMessageQueue.shift();
-      if (m) return writeMsg(ctx, m);
+      if (m) {
+        console.log('[GDI-walk] GetMessageW → queue msg=0x' + m.msg.toString(16) + ' hwnd=0x' + m.hwnd.toString(16));
+        return writeMsg(ctx, m);
+      }
       if (this.quitRequested || !this.interactive) return { returnValue: 0, errorCode: E.NO_ERROR };
       // Interactive: block until the host posts a message.
       this.onMessageWait?.();
@@ -2422,6 +2563,7 @@ export class GuestProcessRunner {
         this.pendingMessageResolve = resolve;
       });
       const m2 = this.guiMessageQueue.shift();
+      console.log('[GDI-walk] GetMessageW ← blocked wait msg=' + (m2 ? 'Y' : 'N') + ' msgVal=0x' + (m2 ? m2.msg.toString(16) : '0'));
       if (!m2) return { returnValue: 0, errorCode: E.NO_ERROR };
       return writeMsg(ctx, m2);
     };
@@ -2432,7 +2574,22 @@ export class GuestProcessRunner {
     this.interceptor.hook('user32.dll', 'TranslateAcceleratorW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'IsDialogMessageW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'TranslateMessage', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('user32.dll', 'DefWindowProcW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('user32.dll', 'DefWindowProcW', async (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const msg = ctx.rawArgs[1] ?? 0;
+      console.log('[GDI-walk] DefWindowProcW hwnd=0x%s msg=0x%s wParam=%d lParam=%d', hwnd.toString(16), msg.toString(16), ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0);
+      if (msg === 0x000f /* WM_PAINT */) {
+        // Validate the window by creating a DC on the bridge and flushing.
+        const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
+        if (bridge) {
+          const hdc = await bridge.createDC('DISPLAY');
+          await safe(() => bridge.flush(hdc));
+          await safe(() => bridge.deleteDC(hdc));
+        }
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('user32.dll', 'PostQuitMessage', () => {
       this.guiMessageQueue.length = 0;
       this.quitRequested = true; // next GetMessageW returns 0 (WM_QUIT)
@@ -2456,6 +2613,7 @@ export class GuestProcessRunner {
         switch (msg) {
           case 0x000c: { // WM_SETTEXT
             rec.text = readWStr(lParam);
+            console.log('[GDI-walk] SendMessageW WM_SETTEXT hwnd=0x%s text="%s"', hwnd.toString(16), rec.text);
             this.onTextChanged?.(hwnd, rec.text);
             return { returnValue: 1, errorCode: E.NO_ERROR };
           }
@@ -2497,11 +2655,46 @@ export class GuestProcessRunner {
     };
     this.interceptor.hook('user32.dll', 'SendMessageW', sendMessage);
     this.interceptor.hook('user32.dll', 'SendMessageA', sendMessage);
-    this.interceptor.hook('user32.dll', 'PostMessageW', () => this.ok1());
-    this.interceptor.hook('user32.dll', 'PostMessageA', () => this.ok1());
+    this.interceptor.hook('user32.dll', 'PostMessageW', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const msg = ctx.rawArgs[1] ?? 0;
+      console.log('[GDI-walk] PostMessageW hwnd=0x%s msg=0x%s wParam=%d lParam=%d', hwnd.toString(16), msg.toString(16), ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0);
+      this.guiMessageQueue.push({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
+      if (this.pendingMessageResolve) {
+        const r = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        r();
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('user32.dll', 'PostMessageA', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const msg = ctx.rawArgs[1] ?? 0;
+      this.guiMessageQueue.push({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
+      if (this.pendingMessageResolve) {
+        const r = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        r();
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('user32.dll', 'GetWindowLongW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'SetWindowLongW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'DestroyWindow', () => this.ok1());
+    this.interceptor.hook('user32.dll', 'MoveWindow', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const bRepaint = ctx.rawArgs[5] ?? 0;
+      console.log('[GDI-walk] MoveWindow hwnd=0x%s x=%d y=%d w=%d h=%d repaint=%d', hwnd.toString(16), ctx.rawArgs[1] ?? 0, ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0, ctx.rawArgs[4] ?? 0, bRepaint);
+      if (bRepaint) {
+        this.guiMessageQueue.push({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 });
+        if (this.pendingMessageResolve) {
+          const r = this.pendingMessageResolve;
+          this.pendingMessageResolve = null;
+          r();
+        }
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
     // CreateStatusWindowW (comctl32): notepad's status bar — mint a unique
     // fake HWND from the same sequence as CreateWindowExW.
     this.interceptor.hook('comctl32.dll', 'CreateStatusWindowW', () => ({ returnValue: ++hwndSeq, errorCode: E.NO_ERROR }));
@@ -2653,8 +2846,9 @@ export class GuestProcessRunner {
       return ok1();
     });
     this.interceptor.hook('user32.dll', 'BeginPaint', async (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
       const lpPaint = ctx.rawArgs[1] ?? 0;
-      const bridge = this.gdiBridgeProvider?.(ctx.rawArgs[0] ?? 0) ?? null;
+      const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
       if (bridge) {
         const hdc = await bridge.createDC('DISPLAY');
         bridgeByHdc.set(hdc, bridge);
@@ -2662,18 +2856,21 @@ export class GuestProcessRunner {
           runtime.writeInt32(lpPaint + 0, hdc);
           runtime.writeInt32(lpPaint + 4, 0); // fErase
         }
+        console.log('[GDI-walk] BeginPaint hwnd=0x%s bridge=%s hdc=%d', hwnd.toString(16), 'Y', hdc);
         return { returnValue: hdc, errorCode: E.NO_ERROR };
       }
       if (lpPaint) {
         runtime.writeInt32(lpPaint + 0, this.gdiObjSeq + 1); // hdc
         runtime.writeInt32(lpPaint + 4, 0); // fErase
       }
+      console.log('[GDI-walk] BeginPaint hwnd=0x%s bridge=N (fallback gdiObj=%d)', hwnd.toString(16), this.gdiObjSeq + 1);
       return { returnValue: ++this.gdiObjSeq, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('user32.dll', 'EndPaint', async (ctx) => {
       const hdc = ctx.rawArgs[1] ? peek(ctx.rawArgs[1]) : 0;
       const bridge = bridgeFor(hdc);
       if (!bridge) return ok1();
+      console.log('[GDI-walk] EndPaint hdc=%d → flush', hdc);
       await safe(() => bridge.flush(hdc));
       bridgeByHdc.delete(hdc);
       return ok1();
@@ -2878,17 +3075,33 @@ export class GuestProcessRunner {
       const lpMsg = ctx.rawArgs[0] ?? 0;
       if (!lpMsg) return { returnValue: 0, errorCode: E.NO_ERROR };
       const hwnd = peek(lpMsg);
-      const wndProc = this.windowRecords.get(hwnd)?.wndProc ?? 0;
-      if (!wndProc || mode === 'x64' || sentinel === 0) {
-        return { returnValue: 0, errorCode: E.NO_ERROR };
-      }
+      const wndRec = this.windowRecords.get(hwnd);
+      const wndProc = wndRec?.wndProc ?? 0;
+      const sAddr = this.sehSentinelAddr;
+      console.log('[GDI-walk] DispatchMessageW hwnd=0x%s wndProc=0x%s sAddr=0x%s mode=%s', hwnd.toString(16), wndProc.toString(16), sAddr.toString(16), mode);
       const message = peek(lpMsg + 4);
       const wParam = peek(lpMsg + 8);
       const lParam = peek(lpMsg + 12);
+      // System classes (EDIT, BUTTON, STATIC, …) have no guest WndProc.
+      // Handle their messages directly here instead of dropping them.
+      if (!wndProc) {
+        if (wndRec && wndRec.className.toLowerCase() === 'edit' && message === 0x000f /* WM_PAINT */) {
+          const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
+          if (bridge) {
+            const hdc = await bridge.createDC('DISPLAY');
+            await safe(() => bridge.flush(hdc));
+            await safe(() => bridge.deleteDC(hdc));
+          }
+        }
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      if (mode === 'x64' || sAddr === 0) {
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
       const saved = snapshot();
       const esp = runtime.getReg('esp') >>> 0;
       const frame = (esp - 20) >>> 0; // 4 stdcall args + sentinel return addr
-      runtime.writeInt32(frame + 0, sentinel);
+      runtime.writeInt32(frame + 0, sAddr);
       runtime.writeInt32(frame + 4, hwnd);
       runtime.writeInt32(frame + 8, message);
       runtime.writeInt32(frame + 12, wParam);
@@ -2901,10 +3114,18 @@ export class GuestProcessRunner {
         {
           handle: async (vector) => {
             if (vector === SEH_SENTINEL_VECTOR) {
+              console.log('[GDI-walk] nested sentinel hit → WndProc returned');
               runtime.setEip(0);
               return;
             }
+            console.log('[GDI-walk] nested trap vector=%d', vector);
             await dispatcher.handle(vector);
+            const lastStub = dispatcher.lastCalled;
+            if (lastStub) {
+              console.log('[GDI-walk] nested trap → %s!%s idx=%d', lastStub.module, lastStub.proc, runtime.getReg('eax'));
+            } else {
+              console.log('[GDI-walk] nested trap → unknown stub (eax=%d)', runtime.getReg('eax'));
+            }
           },
         },
         { maxSteps: 500_000 },
@@ -3054,6 +3275,41 @@ export class GuestProcessRunner {
             : { returnValue: 0, errorCode: result.error },
         );
     });
+
+    // WriteConsoleW(console, buf, nChars, *written, reserved): cmd writes its
+    // whole `dir` listing through this (console handles are UTF-16). Convert
+    // to UTF-8 before capturing so the CLI/web output is readable; WriteFile
+    // on the same pseudo-handles stays raw (ANSI/CP437 from the CRT).
+    const installWriteConsole = (wide: boolean): void => {
+      const name = wide ? 'WriteConsoleW' : 'WriteConsoleA';
+      this.interceptor.hook('kernel32.dll', name, (ctx, host) => {
+        const handle = ctx.rawArgs[0] ?? 0;
+        const buffer = ctx.rawArgs[1] ?? 0;
+        const nChars = ctx.rawArgs[2] ?? 0;
+        const written = ctx.rawArgs[3] ?? 0;
+        if (handle === STD_INPUT_HANDLE) return { returnValue: 1, errorCode: E.NO_ERROR };
+        let out: Uint8Array;
+        if (wide) {
+          const raw = host.memory.read(buffer, nChars * 2);
+          const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < raw.byteLength; i += 2) s += String.fromCharCode(view.getUint16(i, true));
+          out = new TextEncoder().encode(s);
+        } else {
+          out = host.memory.read(buffer, nChars);
+        }
+        const stderr = handle === STD_ERROR_HANDLE;
+        this.capture(stderr, out);
+        if (written) {
+          const w = new Uint8Array(4);
+          new DataView(w.buffer).setUint32(0, nChars, true);
+          host.memory.write(written, w);
+        }
+        return { returnValue: 1, errorCode: E.NO_ERROR };
+      });
+    };
+    installWriteConsole(true);
+    installWriteConsole(false);
   }
 
   private capture(stderr: boolean, bytes: Uint8Array): void {

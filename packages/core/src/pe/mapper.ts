@@ -62,6 +62,16 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   // arg on the stack — the caller's `pop edi/esi/ebx` then read shifted slots
   // and edi ends up a pseudo-handle (0xfffffff4) -> OOB in cmd.exe.
   'brandingformatstring': 1,
+  // Wldp.dll delay-loads by ORDINAL (unnamed exports) — cmd.exe calls them
+  // via .didat thunks: [0x453004] = Wldp#10 (3 stdcall args: "WindowsCommand-
+  // Prompt", "LockBatchFilesWhenInUse", &out), [0x453000] = Wldp#2 (5 stdcall
+  // args). allocDynamicStub mints procName "#10"/"#2"; a name-only lookup
+  // misses and the stub `ret 0`, leaking 12/20 bytes per call — that +12 drift
+  // clobbered ebx in cmd's parser 0x40b743 epilogue (main's slot loop then
+  // skipped the `dir` command and cmd exited 0 silently). Keyed by module
+  // because ordinals are per-DLL (module-qualified lookup in allocDynamicStub).
+  'wldp.dll!#10': 3,
+  'wldp.dll!#2': 5,
   'exitprocess': 1,
   'createfilea': 7,
   'createfilew': 7,
@@ -203,6 +213,7 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getexitcodethread': 2,
   'exitthread': 1,
   'createthread': 6,
+  'openthread': 3,
   'suspendthread': 1,
   'resumethread': 1,
   'getthreadpriority': 1,
@@ -371,14 +382,31 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'lcmapstringw': 6,
   'comparestringa': 6,
   'comparestringw': 6,
-  'getdateformata': 8,
-  'getdateformatw': 8,
+  // GetDateFormatW/A and GetTimeFormatW/A are 6 stdcall args (Locale,
+  // dwFlags, lpDate/lpTime, lpFormat, lpBuffer, cchBuffer). The old 8
+  // over-cleaned 8 bytes/call and 0 (missing) under-popped 8 bytes/call;
+  // either drifts cmd's stack while it formats dir row dates.
+  'getdateformata': 6,
+  'getdateformatw': 6,
+  'gettimeformata': 6,
+  'gettimeformatw': 6,
+  // FILETIME <-> SYSTEMTIME conversions (cmd formats dir row dates/times):
+  // FileTimeToSystemTime(ft, st), SystemTimeToFileTime(st, ft),
+  // FileTimeToLocalFileTime(ft, out) — all 2-arg stdcall.
+  'filetimetosystemtime': 2,
+  'systemtimetofiletime': 2,
+  'filetimetolocalfiletime': 2,
   'enumcalendarinfow': 6,
   'tlsgetvalue': 1,
   'tlssetvalue': 2,
   'heapcreate': 3,
   'heapdestroy': 1,
-  'heapsize': 2,
+  // HeapSize(hHeap, dwFlags, lpMem) is 3 stdcall args. With 2 the stub ret 8
+  // under-pops 4 bytes/call; cmd's heap-string helper 0x411cd0 (called from
+  // the dir path) then pops its epilogue 4 bytes low — esi/ebx get the saved
+  // edi/esi, and `ret` pops the caller's saved ebx (a heap string pointer
+  // like 0x20612d0) as the return address -> the emulator executes data.
+  'heapsize': 3,
   'heaprealloc': 4,
   'localalloc': 2,
   'localfree': 1,
@@ -392,10 +420,21 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'setfilepointerex': 5,
   'setfileattributesa': 2,
   'setfileattributesw': 2,
-  'findfirstfilea': 3,
-  'findfirstfilew': 3,
-  'findnextfilea': 3,
-  'findnextfilew': 3,
+  // FindFirstFileW/A and FindNextFileW/A each take exactly 2 stdcall args
+  // (FindFirstFile: lpFileName, lpFindFileData; FindNextFile: hFindFile,
+  // lpFindFileData). The IAT trap stub is `mov eax,idx; int 0x2E; ret args*4`,
+  // so an over-count of 1 makes the stub pop 4 extra bytes and corrupt esp,
+  // which in turn desyncs the MSVC /GS cookie check and triggers 0xc0000409.
+  'findfirstfilea': 2,
+  'findfirstfilew': 2,
+  'findnextfilea': 2,
+  'findnextfilew': 2,
+  // FindFirstFileExW/A: (lpFileName, fInfoLevelId, lpFindFileData, fSearchOp,
+  // lpSearchFilter, dwAdditionalFlags) = 6 stdcall args. cmd.exe's `dir`
+  // enumerates with FindFirstFileExW(FindExInfoBasic); without the entry the
+  // stub ret 0 leaks 24 bytes/call and dir fails with ERROR_CALL_NOT_IMPLEMENTED.
+  'findfirstfileexa': 6,
+  'findfirstfileexw': 6,
   'findclose': 1,
   'createdirectorya': 2,
   'createdirectoryw': 2,
