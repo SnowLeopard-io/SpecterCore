@@ -43,11 +43,18 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getstartupinfow': 1,
   'getstartupinfoa': 1,
   'gettickcount': 0,
+  // Console/locale functions resolved dynamically (cmd.exe via GetProcAddress):
+  // a wrong argCount corrupts the stack (stub pops 0 bytes -> ret from garbage).
+  'setthreaduilanguage': 1,
+  'setfileuilanguage': 1,
+  'getconsolemode': 2,
+  'setconsolemode': 2,
+  'getfileinformationbyhandleex': 4,
+  'setfileinformationbyhandle': 4,
   'gettickcount64': 0,
   'getlasterror': 0,
   'setlasterror': 1,
   'getstdhandle': 1,
-  'getconsolemode': 2,
   'getconsoleoutputcp': 0,
   'setconsoleoutputcp': 1,
   'exitprocess': 1,
@@ -128,6 +135,12 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'heapalloc': 3,
   'heapfree': 3,
   'getprocessheap': 0,
+  // FreeEnvironmentStringsW/A: 1 param stdcall, ret 4. Missing -> stub ret 0
+  // -> 4 bytes leaked -> pop ebx/edi/esi pick up wrong slots -> ret pops a
+  // stack address as EIP (cmd.exe fault at eip=0x7ffff9c after its
+  // GetEnvironmentStringsW copy helper 0x40e707 returned).
+  'freeenvironmentstringsw': 1,
+  'freeenvironmentstringsa': 1,
   'virtualalloc': 4,
   'virtualfree': 3,
   'getfileattributesw': 1,
@@ -143,7 +156,12 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getacp': 0,
   'getoemcp': 0,
   'getcpex': 2,
-  'getcpinfo': 1,
+  // GetCPInfo(UINT CodePage, LPCPINFO) — 2 params stdcall, ret 8. Was 1 (ret 4)
+  // -> 4 bytes leaked per call -> pop ebx picked up the unpopped arg (0x1b5) ->
+  // bl!=0 misrouted to the DBCS lead-byte builder -> its ret popped garbage
+  // (CPINFO data address 0x446b10) -> executed as code -> eip=0 exit (cmd.exe
+  // "console init passed then internal exit", Step 11 stage 7).
+  'getcpinfo': 2,
   'getcpinfoexw': 2,
   'getversion': 0,
   'getversionexa': 1,
@@ -373,10 +391,11 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'multibytetowidechar': 6,
   'formatmessagea': 7,
   'formatmessagew': 7,
-  'setconsolemode': 2,
   'getconsolecp': 0,
   'lstrlenw': 1,
   'lstrlena': 1,
+  'rtldllshutdowninprogress': 0,
+  'rtldisownmoduleheapallocation': 2,
   'lstrcpyw': 2,
   'lstrcpya': 2,
   'writeprocessmemory': 5,

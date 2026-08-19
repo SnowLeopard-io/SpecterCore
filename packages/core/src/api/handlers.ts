@@ -38,6 +38,41 @@ function strArg(ctx: ApiCallContext, key: string): string {
   return typeof value === 'string' ? value : '';
 }
 
+/** NUL-terminated UTF-16 string at `address` in the guest linear memory. */
+function memWStr(host: ApiHost, address: number, maxChars = 2048): string {
+  if (!address) return '';
+  const bytes = host.memory.read(address, maxChars * 2);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let s = '';
+  for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+    const c = view.getUint16(i, true);
+    if (c === 0) break;
+    s += String.fromCharCode(c);
+  }
+  return s;
+}
+
+/** Splits 'C:\\Windows\\*.txt' into { dir: 'C:\\Windows', pattern: '*.txt' }. */
+function splitFindPattern(path: string): { dir: string; pattern: string } {
+  const idx = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+  if (idx === -1) return { dir: '', pattern: path };
+  return { dir: path.slice(0, idx), pattern: path.slice(idx + 1) };
+}
+
+/** Writes a WIN32_FIND_DATAW record (592 bytes) from a bridge FindData. */
+function writeFindData(host: ApiHost, address: number, data: { attributes: number; size: number; name: string }): void {
+  if (!address) return;
+  const w = new Uint8Array(592);
+  const view = new DataView(w.buffer);
+  view.setUint32(0, data.attributes ?? 0, true); // dwFileAttributes
+  view.setUint32(32, data.size >>> 0, true); // nFileSizeLow
+  const name = data.name ?? '';
+  for (let i = 0; i < name.length && i < 259; i++) {
+    view.setUint16(44 + i * 2, name.charCodeAt(i), true); // cFileName
+  }
+  host.memory.write(address, w);
+}
+
 /**
  * Default kernel32/user32/gdi32 handlers (design doc 4.2.x).
  *
@@ -101,6 +136,66 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     GetConsoleMode: () => ok(1),
     GetConsoleOutputCP: () => ok(437),
     SetConsoleOutputCP: () => ok(1),
+    GetCPInfo: (ctx, host) => {
+      // CPINFO: UINT MaxCharSize(+0), BYTE DefaultChar[2](+4), BYTE LeadByte[12](+6)
+      // Success is non-zero; cmd.exe aborts console init when this returns 0.
+      const out = raw(ctx, 1);
+      if (out) {
+        const w = new Uint8Array(18);
+        const view = new DataView(w.buffer);
+        view.setUint32(0, 2, true); // MaxCharSize (UTF-16)
+        host.memory.write(out, w);
+      }
+      return ok(1);
+    },
+    GetThreadLocale: () => ok(0x409),
+    GetUserDefaultLCID: () => ok(0x409),
+    // cmd.exe opens its own thread during console init; a NULL handle aborts.
+    OpenThread: () => ok(0x5001),
+    GetExitCodeThread: () => ok(0),
+    GetThreadTimes: (ctx, host) => {
+      const out = raw(ctx, 1);
+      if (out) host.memory.write(out, new Uint8Array(32));
+      return ok(1);
+    },
+    // Registry: cmd.exe reads console/config values during init. Report
+    // success, write a pseudo key handle and zero values so the guest sees
+    // a well-defined (disabled) configuration instead of stack garbage.
+    RegOpenKeyExW: (ctx, host) => {
+      const out = raw(ctx, 4);
+      if (out) host.memory.write(out, new Uint8Array([0x00, 0xa0, 0x41, 0x00]));
+      return ok(0); // ERROR_SUCCESS
+    },
+    RegOpenKeyExA: (ctx, host) => {
+      const out = raw(ctx, 4);
+      if (out) host.memory.write(out, new Uint8Array([0x00, 0xa0, 0x41, 0x00]));
+      return ok(0);
+    },
+    RegQueryValueExW: (ctx, host) => {
+      const data = raw(ctx, 4);
+      const cb = raw(ctx, 5);
+      if (data) host.memory.write(data, new Uint8Array(4));
+      if (cb) host.memory.write(cb, new Uint8Array([0x04, 0, 0, 0]));
+      return ok(0);
+    },
+    RegQueryValueExA: (ctx, host) => {
+      const data = raw(ctx, 4);
+      const cb = raw(ctx, 5);
+      if (data) host.memory.write(data, new Uint8Array(4));
+      if (cb) host.memory.write(cb, new Uint8Array([0x04, 0, 0, 0]));
+      return ok(0);
+    },
+    RegCloseKey: () => ok(0),
+    RegEnumValueW: (ctx, host) => {
+      const data = raw(ctx, 5);
+      if (data) host.memory.write(data, new Uint8Array(2));
+      return fail(259); // ERROR_NO_MORE_ITEMS
+    },
+    RegEnumValueA: (ctx, host) => {
+      const data = raw(ctx, 5);
+      if (data) host.memory.write(data, new Uint8Array(2));
+      return fail(259); // ERROR_NO_MORE_ITEMS
+    },
     ExitProcess: (ctx) => ok(raw(ctx, 0)),
     CreateFileA: async (ctx, host) => {
       const path = strArg(ctx, 'path') || memCStr(host, raw(ctx, 0));
@@ -139,6 +234,46 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     CloseHandle: async (ctx, host) => {
       const error = await host.fs.closeHandle(numArg(ctx, 'handle', raw(ctx, 0)));
       return error === E.NO_ERROR ? ok(1) : fail(error);
+    },
+    FindFirstFileW: async (ctx, host) => {
+      const path = memWStr(host, raw(ctx, 0));
+      if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
+      const { dir, pattern } = splitFindPattern(path);
+      const res = await host.fs.findFirstFile(dir, pattern);
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      const first = res.entries[0];
+      if (first) writeFindData(host, raw(ctx, 1), first);
+      return ok(res.searchHandle);
+    },
+    FindFirstFileA: async (ctx, host) => {
+      const path = memCStr(host, raw(ctx, 0));
+      if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
+      const { dir, pattern } = splitFindPattern(path);
+      const res = await host.fs.findFirstFile(dir, pattern);
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      const first = res.entries[0];
+      if (first) writeFindData(host, raw(ctx, 1), first);
+      return ok(res.searchHandle);
+    },
+    FindNextFileW: async (ctx, host) => {
+      const res = await host.fs.findNextFile(raw(ctx, 0));
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      const next = res.entries[0];
+      if (!next) return fail(E.ERROR_NO_MORE_FILES);
+      writeFindData(host, raw(ctx, 1), next);
+      return ok(1);
+    },
+    FindNextFileA: async (ctx, host) => {
+      const res = await host.fs.findNextFile(raw(ctx, 0));
+      if (res.error !== E.NO_ERROR) return fail(res.error);
+      const next = res.entries[0];
+      if (!next) return fail(E.ERROR_NO_MORE_FILES);
+      writeFindData(host, raw(ctx, 1), next);
+      return ok(1);
+    },
+    FindClose: async (ctx, host) => {
+      await host.fs.findClose(raw(ctx, 0));
+      return ok(1);
     },
     GetFileSize: async (ctx, host) => {
       const size = await host.fs.getFileSize(numArg(ctx, 'handle', raw(ctx, 0)));

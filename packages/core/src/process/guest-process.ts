@@ -182,6 +182,11 @@ export interface GuestProcessOptions {
   onMessageWait?: () => void;
   /** Called when a guest EDIT control's text changes (host syncs the UI). */
   onTextChanged?: (hwnd: number, text: string) => void;
+  /**
+   * Command line reported by GetCommandLineW/A (e.g. 'cmd.exe /c dir').
+   * Empty by default; cmd.exe needs it to decide interactive vs /c mode.
+   */
+  commandLine?: string;
 }
 
 export class GuestProcessRunner {
@@ -238,6 +243,14 @@ export class GuestProcessRunner {
   private muiLoaded = false;
   /** Path of the .mui file that was merged (diagnostics). */
   private muiSource = '';
+  /** Current working directory (Get/SetCurrentDirectory), per run. */
+  private cwd = 'C:\\';
+  /** Command line reported by GetCommandLineW/A (see GuestProcessOptions). */
+  private commandLine = '';
+  /** Wide environment block pointer (GetEnvironmentStringsW). */
+  private wideEnvBlock = 0;
+  /** Narrow environment block pointer (GetEnvironmentStringsA). */
+  private narrowEnvBlock = 0;
 
   constructor(
     private readonly runtime: WasmRuntimeImpl,
@@ -272,6 +285,8 @@ export class GuestProcessRunner {
     this.onMessageWait = options.onMessageWait;
     this.muiLoaded = false;
     this.muiSource = '';
+    this.cwd = 'C:\\';
+    this.commandLine = options.commandLine ?? '';
 
     this.runtime.resetCpu();
 
@@ -639,10 +654,27 @@ export class GuestProcessRunner {
       return { returnValue: 0, errorCode: E.NO_ERROR };
     });
 
-    const moduleHandle = (ctx: ApiCallContext): ApiResult => ({
-      returnValue: ctx.rawArgs[0] === 0 ? base : 0,
-      errorCode: E.NO_ERROR,
-    });
+    const moduleHandle = (ctx: ApiCallContext): ApiResult => {
+      const name = ctx.rawArgs[0] ?? 0;
+      if (name === 0) return { returnValue: base, errorCode: E.NO_ERROR };
+      // cmd.exe checks GetModuleHandleW(L"KERNEL32.DLL") during init and
+      // aborts when it fails; treat the core system DLLs as loaded. Return a
+      // PSEUDO base (non-zero, but NOT the exe's image base): notepad queries
+      // ntdll exports during CRT shutdown via
+      //   GetProcAddress(GetModuleHandleW("ntdll.dll"), "RtlDisownModuleHeapAllocation")
+      // If this returned the exe base, GetProcAddress would treat it as the
+      // image and mint a dynamic stub; with a pseudo base the mod!==base
+      // branch in GetProcAddress resolves to NULL and the guest skips the
+      // call — matching the pre-Step-11 behavior that clean-exited.
+      const s = readWStr(name).toLowerCase();
+      if (
+        s &&
+        /^(kernel32|kernelbase|ntdll|ucrtbase|user32|gdi32|advapi32|shell32|comdlg32|ole32|comctl32|shlwapi|msvcrt|version|winmm|oleaut32|setupapi|api-ms-win-)/.test(s)
+      ) {
+        return { returnValue: 0x70000000, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
     this.interceptor.hook('kernel32.dll', 'GetModuleHandleW', moduleHandle);
     this.interceptor.hook('kernel32.dll', 'GetModuleHandleA', moduleHandle);
 
@@ -869,13 +901,45 @@ export class GuestProcessRunner {
     this.sehCtxAddr = bumpAlloc(X86_CONTEXT_SIZE);
     this.runtime.writeBytes(this.sehSentinelAddr, new Uint8Array([0xcd, SEH_SENTINEL_VECTOR]));
 
-    // GetCommandLineW/A: return pointers to a valid (empty) command line in
-    // guest memory. Returning 0 makes CRT arg parsing walk address 0 and
+    // GetCommandLineW/A: return pointers to the (possibly empty) command line
+    // in guest memory. Returning 0 makes CRT arg parsing walk address 0 and
     // spin forever (e.g. notepad's tokenizer + CharNextW).
-    const cmdLineW = bumpAlloc(4);
-    this.runtime.writeBytes(cmdLineW, new Uint8Array(4)); // L""
-    const cmdLineA = bumpAlloc(1);
-    this.runtime.writeBytes(cmdLineA, new Uint8Array(1)); // ""
+    const cmdLine = this.commandLine;
+    // Environment entries shared by the wide/narrow blocks and _environ.
+    // cmd.exe walks the GetEnvironmentStringsW block with wcslen-style loops
+    // (0x40b836) and reads COMSPEC/PATH/PROMPT; returning 0 makes it spin on
+    // the SEH chain bytes at guest address 0.
+    const envEntries: Array<[string, string]> = [
+      ['=C:', 'C:\\'],
+      ['SystemRoot', 'C:\\Windows'],
+      ['COMSPEC', 'C:\\Windows\\System32\\cmd.exe'],
+      ['PATH', 'C:\\Windows\\System32;C:\\Windows'],
+      ['TEMP', 'C:\\Users\\Guest\\AppData\\Local\\Temp'],
+      ['TMP', 'C:\\Users\\Guest\\AppData\\Local\\Temp'],
+      ['USERPROFILE', 'C:\\Users\\Guest'],
+      ['HOMEDRIVE', 'C:'],
+      ['HOMEPATH', '\\Users\\Guest'],
+      ['PROMPT', '$P$G'],
+      ['PATHEXT', '.COM;.EXE;.BAT;.CMD'],
+      ['OS', 'Windows_NT'],
+      ['NUMBER_OF_PROCESSORS', '1'],
+      ['PROCESSOR_ARCHITECTURE', 'x86'],
+    ];
+    const cmdLineW = bumpAlloc((cmdLine.length + 1) * 2);
+    {
+      const w = new Uint8Array((cmdLine.length + 1) * 2);
+      for (let i = 0; i < cmdLine.length; i++) {
+        w[i * 2] = cmdLine.charCodeAt(i) & 0xff;
+        w[i * 2 + 1] = (cmdLine.charCodeAt(i) >> 8) & 0xff;
+      }
+      this.runtime.writeBytes(cmdLineW, w);
+    }
+    const cmdLineA = bumpAlloc(cmdLine.length + 1);
+    {
+      const w = new Uint8Array(cmdLine.length + 1);
+      for (let i = 0; i < cmdLine.length; i++) w[i] = cmdLine.charCodeAt(i) & 0xff;
+      this.runtime.writeBytes(cmdLineA, w);
+    }
     this.interceptor.hook('kernel32.dll', 'GetCommandLineW', () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
     this.interceptor.hook('kernel32.dll', 'GetCommandLineA', () => ({ returnValue: cmdLineA, errorCode: E.NO_ERROR }));
     // UCRT's wide command-line accessor (imported via api-ms-win-crt-private,
@@ -883,6 +947,198 @@ export class GuestProcessRunner {
     // call CharNextW(0) forever.
     this.interceptor.hook('ucrtbase.dll', '_o__get_wide_winmain_command_line', () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
     this.interceptor.hook('ucrtbase.dll', '_get_wide_winmain_command_line', () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
+    // UCRT __argv/__argc (and the private _o__ variants): console programs
+    // like cmd.exe read argc/argv through these; returning 0 makes main()
+    // see a NULL argv and exit immediately.
+    const argvParts = this.commandLine.trim().split(/\s+/).filter(Boolean);
+    const argvSlot = bumpAlloc((argvParts.length + 1) * 4);
+    const argvStrings: number[] = [];
+    for (const part of argvParts) {
+      const p = bumpAlloc(part.length + 1);
+      const w = new Uint8Array(part.length + 1);
+      for (let i = 0; i < part.length; i++) w[i] = part.charCodeAt(i) & 0xff;
+      this.runtime.writeBytes(p, w);
+      argvStrings.push(p);
+    }
+    for (let i = 0; i < argvStrings.length; i++) {
+      this.runtime.writeInt32(argvSlot + i * 4, argvStrings[i]!);
+    }
+    this.runtime.writeInt32(argvSlot + argvStrings.length * 4, 0); // NULL terminator
+    // Wide __wargv for wmain-based console programs.
+    const argvWSlot = bumpAlloc((argvParts.length + 1) * 4);
+    const argvWStrings: number[] = [];
+    for (const part of argvParts) {
+      const p = bumpAlloc((part.length + 1) * 2);
+      const w = new Uint8Array((part.length + 1) * 2);
+      for (let i = 0; i < part.length; i++) {
+        w[i * 2] = part.charCodeAt(i) & 0xff;
+        w[i * 2 + 1] = (part.charCodeAt(i) >> 8) & 0xff;
+      }
+      this.runtime.writeBytes(p, w);
+      argvWStrings.push(p);
+    }
+    for (let i = 0; i < argvWStrings.length; i++) {
+      this.runtime.writeInt32(argvWSlot + i * 4, argvWStrings[i]!);
+    }
+    this.runtime.writeInt32(argvWSlot + argvWStrings.length * 4, 0);
+    // Environment block for _environ / getenv (narrow char* env[] array).
+    const envSlot = bumpAlloc((envEntries.length + 1) * 4);
+    {
+      let i = 0;
+      for (const [k, v] of envEntries) {
+        const s = `${k}=${v}`;
+        const p = bumpAlloc(s.length + 1);
+        const w = new Uint8Array(s.length + 1);
+        for (let j = 0; j < s.length; j++) w[j] = s.charCodeAt(j) & 0xff;
+        this.runtime.writeBytes(p, w);
+        this.runtime.writeInt32(envSlot + i * 4, p);
+        i++;
+      }
+      this.runtime.writeInt32(envSlot + i * 4, 0); // NULL terminator
+    }
+    // Wide environment block (GetEnvironmentStringsW): double-NUL UTF-16LE.
+    {
+      let total = 0;
+      for (const [k, v] of envEntries) total += k.length + 1 + v.length + 1;
+      const buf = bumpAlloc((total + 1) * 2);
+      const w = new Uint8Array((total + 1) * 2);
+      let off = 0;
+      for (const [k, v] of envEntries) {
+        const s = `${k}=${v}`;
+        for (let i = 0; i < s.length; i++) {
+          w[off * 2] = s.charCodeAt(i) & 0xff;
+          w[off * 2 + 1] = (s.charCodeAt(i) >> 8) & 0xff;
+          off++;
+        }
+        off++; // NUL between entries
+      }
+      off++; // final NUL -> double NUL terminator
+      this.runtime.writeBytes(buf, w);
+      this.wideEnvBlock = buf;
+    }
+    // Narrow environment block (GetEnvironmentStringsA): double-NUL ANSI.
+    {
+      let total = 0;
+      for (const [k, v] of envEntries) total += k.length + 1 + v.length + 1;
+      const buf = bumpAlloc(total + 1);
+      const w = new Uint8Array(total + 1);
+      let off = 0;
+      for (const [k, v] of envEntries) {
+        const s = `${k}=${v}`;
+        for (let i = 0; i < s.length; i++) w[off++] = s.charCodeAt(i) & 0xff;
+        off++; // NUL between entries
+      }
+      w[off] = 0; // final NUL -> double NUL terminator
+      this.runtime.writeBytes(buf, w);
+      this.narrowEnvBlock = buf;
+    }
+    this.interceptor.hook('kernel32.dll', 'GetEnvironmentStringsW', () => ({ returnValue: this.wideEnvBlock, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('kernel32.dll', 'GetEnvironmentStringsA', () => ({ returnValue: this.narrowEnvBlock, errorCode: E.NO_ERROR }));
+    for (const name of ['_o___p___argv', '___p___argv', '__p___argv', '_o___p___argc', '___p___argc', '__p___argc', '_o___p___wargv', '___p___wargv', '__p___wargv', '_o___p___wargc', '___p___wargc', '__p___wargc']) {
+      this.interceptor.hook('ucrtbase.dll', name, () => ({
+        returnValue: name.toLowerCase().endsWith('argc') ? argvParts.length : name.includes('wargv') ? argvWSlot : argvSlot,
+        errorCode: E.NO_ERROR,
+      }));
+    }
+    for (const name of ['_o__get_initial_narrow_environment', '_get_initial_narrow_environment', '_o__get_initial_wide_environment', '_get_initial_wide_environment', '_o__environ', '___environ']) {
+      this.interceptor.hook('ucrtbase.dll', name, () => ({ returnValue: envSlot, errorCode: E.NO_ERROR }));
+    }
+    // Current working directory (per-run): cmd.exe's prompt and relative
+    // paths depend on it. The virtual disk is mounted at C:\, so the CWD
+    // lives under C:\.
+    const readW = (a: number): string => {
+      if (!a) return '';
+      const bytes = this.runtime.readBytes(a, 2048);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = '';
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const writeW = (a: number, s: string, maxChars: number): number => {
+      const n = Math.min(s.length, Math.max(0, maxChars - 1));
+      const w = new Uint8Array(n * 2 + 2);
+      for (let i = 0; i < n; i++) {
+        w[i * 2] = s.charCodeAt(i) & 0xff;
+        w[i * 2 + 1] = (s.charCodeAt(i) >> 8) & 0xff;
+      }
+      this.runtime.writeBytes(a, w);
+      return n;
+    };
+    const readA = (a: number): string => {
+      if (!a) return '';
+      const bytes = this.runtime.readBytes(a, 4096);
+      let s = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        if (bytes[i] === 0) break;
+        s += String.fromCharCode(bytes[i]!);
+      }
+      return s;
+    };
+    const writeA = (a: number, s: string, maxChars: number): number => {
+      const n = Math.min(s.length, Math.max(0, maxChars - 1));
+      const w = new Uint8Array(n + 1);
+      for (let i = 0; i < n; i++) w[i] = s.charCodeAt(i) & 0xff;
+      this.runtime.writeBytes(a, w);
+      return n;
+    };
+    // GetEnvironmentVariableW/A: look up the env block. cmd.exe reads
+    // COMSPEC / PATH / PROMPT through these.
+    const envVar = (name: string): string | undefined => {
+      for (const [k, v] of envEntries) if (k === name) return v;
+      return undefined;
+    };
+    this.interceptor.hook('kernel32.dll', 'GetEnvironmentVariableW', (ctx) => {
+      const name = readW(ctx.rawArgs[0] ?? 0);
+      const val = envVar(name);
+      if (val === undefined) return { returnValue: 0, errorCode: E.NO_ERROR }; // not found
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) return { returnValue: writeW(buf, val, ctx.rawArgs[2] ?? 0), errorCode: E.NO_ERROR };
+      return { returnValue: val.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'GetEnvironmentVariableA', (ctx) => {
+      const name = readA(ctx.rawArgs[0] ?? 0);
+      const val = envVar(name);
+      if (val === undefined) return { returnValue: 0, errorCode: E.NO_ERROR }; // not found
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) return { returnValue: writeA(buf, val, ctx.rawArgs[2] ?? 0), errorCode: E.NO_ERROR };
+      return { returnValue: val.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'GetCurrentDirectoryW', (ctx) => {
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) return { returnValue: writeW(buf, this.cwd, ctx.rawArgs[0] ?? 0), errorCode: E.NO_ERROR };
+      return { returnValue: this.cwd.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'GetCurrentDirectoryA', (ctx) => {
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) {
+        const w = new Uint8Array(this.cwd.length + 1);
+        for (let i = 0; i < this.cwd.length; i++) w[i] = this.cwd.charCodeAt(i) & 0xff;
+        this.runtime.writeBytes(buf, w);
+      }
+      return { returnValue: this.cwd.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'SetCurrentDirectoryW', (ctx) => {
+      const p = readW(ctx.rawArgs[0] ?? 0);
+      this.cwd = p || this.cwd;
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'SetCurrentDirectoryA', (ctx) => {
+      const p = ctx.rawArgs[0] ?? 0;
+      if (p) {
+        const bytes = this.runtime.readBytes(p, 2048);
+        let s = '';
+        for (const b of bytes) {
+          if (b === 0) break;
+          s += String.fromCharCode(b);
+        }
+        this.cwd = s || this.cwd;
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
 
     // ------------------------------------------------------------------
     // TEB + TLS. The decoder ignores segment prefixes, so fs: behaves like

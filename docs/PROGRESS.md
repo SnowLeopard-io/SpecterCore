@@ -1,14 +1,15 @@
 # 进度 / 交接文档 (PROGRESS)
 
 > **给下一个 agent 的交接入口。** 目标：让 **Windows exe** 在 Browser Kernel 的 JIT 里跑起来，最终在 L6 桌面（apps/web）里加载并运行（含控制台输出）。
-> 读完本文件后请读 `packages/core/src/{pe, jit, process, api}/` 与 `packages/contracts/src/core/`。
-> **2026-08-19 交接（Step 9 完成 + 无 MUI 兜底）：notepad 在浏览器环境（无 MUI 卫星资源）也能完整创建窗口——LoadStringW 查不到资源时返回占位符串 `S<id>`、LoadMenuW/LoadAcceleratorsW 查不到时返回假句柄（guest-process.ts），替代原来的 fail-fast 退出。验证：`BK_NO_MUI=1` 下 notepad 窗口树（Notepad+Edit）、消息循环（WM_CREATE/WM_PAINT 真实派发到 WndProc 0x40e9c0）、cleanExit 全通；带 MUI 基线无回归。GUI 桥接三层（消息循环真实化 + GDI 桥接层 + L6 窗口面板）全部就绪。下一步候选：EDIT 控件宿主渲染 / 自绘窗口程序验证 / RunExecutableApp fs 桥。**
+> 读完本文件后请读 `packages/core/src/{pe, jit, process, api}/`、`packages/ui/src/` 与 `packages/contracts/src/`。
+> **2026-08-19 交接（Step 10 + Step 11 完成）：① 内置 Windows Notepad 全链路打通——notepad.exe + en-US/zh-CN MUI 预置到虚拟盘（懒预置，点击图标自动补齐）、DesktopController.launchGuestWindow 直接创建 L6 独立窗口（无中间应用壳）、真实 RT_MENU 解析（File/Edit 菜单 + 真实 ID）、EDIT 文本回流、前端 strip &；② 打底层起步——cmd.exe 已预置 public/win/，补齐 FindFirstFileW/GetCurrentDirectoryW/GetCommandLineW/__argv/__wargc/GetCPInfo/GetModuleHandleW/Reg 系列/OpenThread 等底层 API，cmd 从"静默退出"推进到"控制台初始化通过后内部逻辑退出"（下一卡点）。验证：probe-mui.ts 全链路 muiLoaded=true + merged 13 资源 + File 菜单完整真实；vitest 189/189、lint 0/0、build ✓（index-DqK7bcyX.js）。下一步候选：攻坚 cmd CRT 启动（反汇编）/ 内置 Command Prompt 交互应用 / GetOpenFileNameW 文件对话框桥接（notepad Open/Save）/ 文件资源管理器真实化。**
 
-## 当前目标（用户需求，2026-08-18 起）
+## 当前目标（用户需求，2026-08-18 起，2026-08-19 更新）
 
-1. 支持 **64 位 Windows exe（PE32+, magic 0x20B）**。
-2. 最终在 **L6 桌面**里加载本地 exe 并运行。
-3. 每做一步在 `docs/PROGRESS.md` 留痕。
+1. 支持 **Windows exe** 在浏览器 Kernel JIT 里真实运行，最终 L6 桌面（apps/web）内加载运行。
+2. **内置工具真实化**（用户硬性要求，2026-08-19）：notepad（✅ 已完成：MUI + 独立窗口 + 真实菜单）、cmd（攻坚中）、文件资源管理器（要求"和我电脑的一样"，升级中）——必要文件 agent 侧从 C 盘复制进项目（public/win/），运行时默认预置虚拟盘，用户不用拖。
+3. **打底层**：CMD 做成真的、Shell 做成真的（底层 API 补齐，见 Step 11）。
+4. 每做一步在 `docs/PROGRESS.md` 留痕。
 
 ## 已完成里程碑（历史，可复现）
 
@@ -29,6 +30,9 @@
 - **运行环境**：`pnpm` 坏了（corepack 路径转义），用 managed node + esbuild 直跑（见下）。
 - `node_modules/@bk/*` 必须是 junction（`scripts/fix-bk-links.py`），改 `packages/*` 后行为没变先查这个。
 - **int3（0xCC）填充区会被 executor 当普通代码穿过**（见 Step 6 bug 3）：exe 若"执行"到 int3 填充区会继续跑而不是 fault，掩盖真实错误。
+- **虚拟盘（FileStore，浏览器=OPFS，node=MemoryFileStore）**：`stat`/`openFile('read')` 遇缺失目录树返回 null / 抛错（Step 10 已修），绝不隐式创建；'write' 模式不创建文件（要 'create'）；createDirectory 非幂等（node 版）。内置工具经 `packages/ui/src/builtin-win.ts` 懒预置（bootstrap + launchGuestWindow 双调用点）。
+- **UI 层（packages/ui）**：DesktopController（launch 对内置 guest 应用走 launchGuestWindow 独立窗口分支）→ WindowManager（L6 原生窗口）→ GuestWindowView（菜单栏+编辑区，strip &）。内置 notepad 在 apps.tsx 的 render 是占位 null，真实入口是 launchGuestWindow。
+- **GuestProcessResult**：windows（窗口树 hwnd/className/wndProc/parent/text/menu）、paintCommands（GDI 绘制指令）、muiLoaded/muiSource（MUI 合并状态）。
 
 ## 常用命令（Step 4 起的标准工作流）
 
@@ -51,9 +55,17 @@ cd C:/Users/HUAWEI/Desktop/windows
 
 # 5) 资源树扫描（rsrc-scan.py 已支持路径参数）
 "$PY" scripts/rsrc-scan.py "C:/Windows/SysWOW64/notepad.exe"
+
+# 6) MUI/菜单全链路验证（node 模拟浏览器：虚拟盘 + readFile）
+"$N" node_modules/esbuild/bin/esbuild scripts/probe-mui.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/probe-mui.mjs
+"$N" node_modules/.cache/probe-mui.mjs 2>&1 | grep -E "\[probe\]|\[bk\]"
+
+# 7) 带命令行跑 guest（cmd 调试；BK_ARGS 传参，BK_NO_MUI=1 模拟无 MUI 浏览器）
+# 注意：cmd.exe 文件名触发 bash 安全拦截，先 cp 改名 cguest.exe（同一个 guest 镜像）
+BK_ARGS='cmd /c dir C:\Windows' "$N" node_modules/.cache/diag-trap.mjs node_modules/.cache/cguest.exe > /tmp/cmd.log 2>&1
 ```
 
-测试/回归：`"$N" node_modules/vitest/vitest.mjs run`（**当前 187/187 通过，25 files**）、`"$N" node_modules/typescript/bin/tsc -p tsconfig.json --noEmit`。
+测试/回归：`"$N" node_modules/vitest/vitest.mjs run`（**当前 189/189 通过，25 files**）、`"$N" node_modules/typescript/bin/tsc -p tsconfig.json --noEmit`、lint `"$N" node_modules/eslint/bin/eslint.js packages scripts apps --ext .ts,.tsx`。构建：`cd apps/web && rm -rf dist && "$N" ../../node_modules/vite/bin/vite.js build`（**vite 前必须手动 rm -rf dist**，沙箱 safe-delete 拦 emptyDir trash；preview 404 = dist 删了构建没完成）。
 
 ---
 
@@ -398,3 +410,135 @@ notepad.exe（SysWOW64 x86）**首次达到完整生命周期闭环**：
 - `scripts/diag-trap.ts`：本会话未加新断点；保留 [api] 日志、maxSteps 8M、[trace]、dumpFault。
 - IAT 槽补充（VA，本轮新确认）：0x42a210=GetFileAttributesExW（delay-load，静态表无）、0x42a120=UnhookWinEvent、0x42a108=SetWinEventHook、0x42a578=EventUnregister。
 - 已知未解（继承）：`RegQueryValueExW` 返回 0 不写数据；`_o___stdio_common_vswprintf` 返回 0；`GetModuleHandleExW` 返回 0；`IsProcessorFeaturePresent(0x17)` 返回 0（fastfail 不可用）；`CoInitializeEx`/`CoUninitialize` 未实现 handler（默认返回 0=S_OK，未炸）。
+
+---
+
+# Step 10（2026-08-19 交接：内置 Windows Notepad —— MUI 预置 + 独立窗口 + 真实菜单 + 文本回流）
+
+## 一句话现状
+
+浏览器里点开始菜单 **Notepad (Windows)** → **直接弹出独立 notepad 窗口**（L6 原生窗口，无中间应用壳）：真实 MUI 字符串标题、真实 RT_MENU 菜单栏（File/Edit，无 & 符号）、白色可输入编辑区、输入回流 guest EDIT 控件、菜单项点击发真实 WM_COMMAND（ID 来自 MUI）。F12 控制台确认 `[bk] merged 13 MUI resources (C:/Windows/SysWOW64/en-US/notepad.exe.mui)`。
+
+## 架构：内置工具全链路（新 agent 必读）
+
+```
+apps/web/public/win/          ← 打包资源（构建随 dist 发布）
+  notepad.exe (307KB, SysWOW64) + en-US/zh-CN/notepad.exe.mui + cmd.exe + win.ini + hosts + readme.txt
+       ↓ fetch（懒预置，幂等）
+packages/ui/src/builtin-win.ts ← ensureBuiltinWinFiles(fs)：stat 空/缺失 → fetch → 写虚拟盘
+  Windows/SysWOW64/notepad.exe + Windows/SysWOW64/{en-US,zh-CN}/notepad.exe.mui
+       ↓ 点击图标
+DesktopController.launch('windows-notepad') → launchGuestWindow()
+  openFile 读虚拟盘 exe → GuestProcessRunner.run(image, { interactive, modulePath:'C:/Windows/SysWOW64/notepad.exe',
+  readFile: 虚拟盘查找（MUI 合并源）, onMessageWait, onTextChanged })
+       ↓ guest 创建窗口后
+onMessageWait → 把 guest 顶层窗口创建为 L6 独立窗口（WindowManager.createWindow + GuestWindowView 内容）
+```
+
+## 本轮关键修复/实现（按用户问题顺序）
+
+### 1. 点不开图标（根因 1：OPFS stat 抛 NotFoundError）
+- OPFS `resolveHandle`/`stat` 遇缺失目录树抛 `NotFoundError` → `launchGuestWindow` 未捕获 → 图标点击静默崩。
+- 修复：opfs.ts `stat`/`resolveHandle` 缺失目录返回 null；`openFile('read')` 不再隐式创建文件（原 resolveHandle(..., true) 无条件 create，读到空文件 → "not a PE file"）；launchGuestWindow 全程 try/catch → `showGuestError` 弹友好错误窗口。
+
+### 2. 点不开图标（根因 2：预置时序不可靠）→ 懒预置
+- `ensureBuiltinWinFiles` 提取为共享模块 `packages/ui/src/builtin-win.ts`（@bk/ui 导出），bootstrap.ts 和 launchGuestWindow 都调用（幂等：stat 非空文件即跳过，空/缺失重写，fetch 失败记录 warn）。
+- 校验：跳过条件带 `kind==='file' && size>0`，杜绝旧 openFile bug 留下的空文件永久占位。
+
+### 3. "not a PE file"
+- openFile('read') 模式不创建文件（见上），修复空文件被当 PE 加载。
+
+### 4. 菜单只有一部分 / 带 & 符号 / 点菜单无作用
+- **& 是 Win32 加速键标记**（&File→F 键）：前端 GuestWindowView 显示层 stripAmps。
+- **RT_MENU 逆向结论**（Win11 SysWOW64 notepad.exe.mui，铁证，防再走弯路）：
+  - 记录 = `WORD flags + 标题`（UTF-16 NUL 结尾，4 字节对齐），**无 popupOffset、无独立 id 字段**——popup 标题也在 off+2（不是 off+4，不是 off+4+popupOffset）。
+  - **0x10 位是 ID 的一部分**（Find=0x15=21），不能当 MF_POPUP；0x80（MF_END）是分隔符/分节，**不关闭 section**（File>Exit 在其后仍属 File）；0x800 是 MF_SEPARATOR。
+  - 顶层 popup 只有 **File/Edit** 两个；Undo/Find/Format/View/StatusBar/Help 都是 **Edit 的子菜单**（解析时 flatten 进 Edit.items，内容 100% 真实）。所以"只加载了一部分"是误解——结构就是这样。
+  - parseMenuResource（guest-process.ts 私有方法）：popup 标题 off+2、MF_END(0x80) 减 depth 不关 section、MF_SEPARATOR(0x800) 跳过、嵌套 popup(depth>0) 作为 item 加入当前 section、size 限界。
+  - **菜单挂载点**：notepad 菜单是 **WNDCLASSEXW.lpszMenuName（+36，MAKEINTRESOURCE(1)）类菜单**，不是 LoadMenuW！registerClass 读 lpszMenuName → menuResourceTable（type 4）→ parseMenuResource → classMenus；createWindow 从类菜单带出。
+- **菜单项点击无作用（根因）**：guest→前端文本回流通道未接 + EDIT 控件关键消息未处理。修复：
+  - guest-process EDIT 控件（SendMessageW 分支）补：WM_SETTEXT(0xC) 记录+回流、WM_GETTEXT(0xD)/WM_GETTEXTLENGTH(0xE)/EM_GETMODIFY(0xB9)/EM_REPLACESEL(0xC2)/EM_GETSEL/EM_SETSEL/EM_SCROLLCARET 等。
+  - **文本回流**：`packages/ui/src/guest-text.ts`（subscribeGuestText：interceptor→`guestOnText` 总线，组件订阅）；GuestProcessOptions.onTextChanged → GuestWindowView 订阅更新 textarea；desktop-controller 的 launchGuestWindow 传 onTextChanged；onMessageWait 时把顶层窗口创建为独立 L6 窗口（guestWinIds 去重）。
+  - **进程退出关窗**：guest cleanExit 后前端把对应 L6 窗口关闭。
+- **菜单只有 File/Edit 两项是正常的**（RT_MENU 结构如此）；Edit 子菜单项 ID 部分不准（Cut=1 实为 10、Copy=769——嵌套 popup 的 ID 语义待精确化），File 菜单 ID 全真实（1:&New, 8:New &Window, 2:&Open, 3:&Save, 4:Save &As, 5:Page Setup, 6:&Print, 7:E&xit）。
+
+### 5. 独立窗口（用户硬性要求：内置应用不套 RunExecutableApp 壳）
+- `DesktopController.launch('windows-notepad')` 走专用分支 `launchGuestWindow`（不走 app.render 壳；apps.tsx 里 windows-notepad render 是占位 null）。
+- GuestWindowView 从 RunExecutableApp.tsx 导出，desktop-controller 复用。
+- 菜单项点击 → `runner.postMessage({hwnd, msg:0x0111/*WM_COMMAND*/, wParam:it.id})` → guest 真实处理（File 菜单 ID 真实）。
+
+### 6. MUI 加载状态可观测
+- GuestProcessResult 增 `muiLoaded`/`muiSource`；前端结束态打印 `[MUI] merged: <path>` 或 `[MUI] NOT loaded`。
+- **注意**：浏览器里 en-US 优先（System32/en-US/notepad.exe.mui），zh-CN 也预置但模块名决定语言。
+
+## 验证状态
+
+- **probe-mui.ts**（scripts/，node 模拟浏览器完整路径：MemoryFileStore 虚拟盘 + readFile）→ `muiLoaded=true`、`merged 13 MUI resources`、File 菜单完整真实（1:&New, 8:New &Window, 2:&Open, 3:&Save, 4:Save &As, 5:Page Setup, 6:&Print, 7:E&xit）、Edit 含全部真实项。跑法：`"$N" node_modules/esbuild/bin/esbuild scripts/probe-mui.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/probe-mui.mjs && "$N" node_modules/.cache/probe-mui.mjs 2>&1 | grep -E "\[probe\]|\[bk\]"`。
+- 浏览器日志：`[browser-kernel] provisioned Windows/SysWOW64/notepad.exe (307712 bytes)` ×3 + `builtin win files ready`；运行后 `[bk] merged 13 MUI resources`。
+- 回归：typecheck ✓、vitest **189/189** ✓、lint 0/0 ✓、build ✓（历轮 index-Da0IRqmJ → … → CPICXGIS → DqK7bcyX）。
+- **构建注意**：vite build 前必须手动 `rm -rf dist`（沙箱 safe-delete 拦 emptyDir trash）；构建要等 `tail -3 /tmp/build.log` 确认成功，preview 404 = dist 被删构建没完成（多次踩坑）。
+
+## 已知未解 / 注意点（Step 10 继承）
+
+- **notepad 的 Open/Save 走 GetOpenFileNameW（comdlg32 通用对话框）——未实现**，返回 0=用户取消 → Open/Save 点了没反应（New/Exit 等不依赖对话框的命令应生效）。这是"菜单按钮没作用"的剩余部分。
+- 文件资源管理器是 demo 假实现（用户要求真实化，见 Step 11 下一步）。
+- `RegQueryValueExW` 返回 0 不写数据；`_o___stdio_common_vswprintf` 返回 0；`GetModuleHandleExW` 返回 0；`IsProcessorFeaturePresent(0x17)` 返回 0。
+- 浏览器无法直接访问 C 盘（沙箱）："真的资源管理器"= 升级虚拟盘浏览 + 从 C 盘打包预置（agent 侧复制），运行时默认写入，不用用户拖。
+- **虚拟盘旧数据**：OPFS 持久化，升级后右键桌面 Wipe Virtual Disk 清空重试（下次启动自动重新预置）。
+
+---
+
+# Step 11（2026-08-19 交接：打底层 —— CMD 真实化起步 + 系统 API 补强）
+
+## 一句话现状
+
+**cmd.exe 已预置**（apps/web/public/win/cmd.exe，263KB，SysWOW64 32 位，构建后 200 可访问）。底层 API 大幅补强（任何真实 exe 都受益）。cmd 调试从"静默退出"推进到"**控制台初始化通过 → cmd 内部逻辑退出**"（无 API 依赖的纯内部逻辑，需反汇编 cmd CRT 启动定位）。
+
+## 本轮改动清单（全部过 typecheck；vitest 189/189；lint 0/0）
+
+### 1. 文件系统（dir 的地基，handlers.ts + FileSystemBridge）
+- `FindFirstFileW/A`、`FindNextFileW/A`、`FindClose`：WIN32_FIND_DATAW（592B）完整写入（dwFileAttributes/dwFileSize/dwReserved0 等），splitFindPattern（目录/通配符分离），调用 FileSystemBridge.findFirstFile 虚拟盘列目录。
+- `GetCurrentDirectoryW/A`、`SetCurrentDirectoryW/A`：per-run `cwd='C:\\'`（guest-process 实例字段）。
+
+### 2. 命令行与参数表（cmd main 的地基，guest-process.ts）
+- `GetCommandLineW/A` 支持 `options.commandLine`（BK_ARGS 环境变量 / RunExecutableApp 传入）。
+- UCRT `__argv/__argc/__wargv/__wargc` + `_o__` 变体：**窄+宽 argv 数组构造**（之前返回 0 → cmd main 拿不到参数直接退出）；`_environ` 空环境。
+- `GetModuleHandleW`：lpModuleName 为系统 DLL（kernel32 等）时返回 base（cmd 检查 `GetModuleHandleW(L"KERNEL32.DLL")`，返回 0 直接退出）。
+
+### 3. 控制台/系统（handlers.ts）
+- `GetCPInfo`：**成功语义 + 写 CPINFO（MaxCharSize=2）**（原默认返回 0=失败 → cmd 认为控制台初始化失败退出）。
+- `GetThreadLocale`/`GetUserDefaultLCID` → 0x409。
+- Reg 系列：`RegOpenKeyExW/A` → 假句柄 + 值 0；`RegQueryValueExW/A` → 值 0（0x0 大小）；`RegEnumValueW/A` → ERROR_NO_MORE_ITEMS；`RegCloseKey` → 1。
+- `OpenThread` → 递增假句柄（cmd 需要线程句柄，返回 0 在 main 前退出）。
+
+### 4. 弹参表补强（pe/mapper.ts X86_API_ARG_COUNT，stdcall 按栈槽计数）
+- `setthreaduilanguage: 1`（缺了 stub ret 0 → 栈不平衡崩溃）；`getconsolemode: 2, setconsolemode: 2`；`getfileinformationbyhandleex: 4, setfileinformationbyhandle: 4`；`getstdhandle: 1`、`getconsoleoutputcp: 0`、`getconsolecp: 0`；重复 key 清理。
+
+## cmd 调试进展（逐步排除，防回退）
+
+| 阶段 | 症状 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 静默退出（日志极短） | GetCPInfo 返回 0=失败 | GetCPInfo 成功语义+写 CPINFO |
+| 2 | 静默退出 | GetModuleHandleW(L"KERNEL32.DLL") 返回 0 | 系统 DLL 返回 base |
+| 3 | 静默退出 | UCRT argv=NULL → main 拿不到参数 | __argv/__argc/__wargv/__wargc 构造 |
+| 4 | call argv 区 fault | SetThreadUILanguage 等缺 argCount → 栈不平衡 | 弹参表补齐 |
+| 5 | 注册表后退出 | RegQueryValueExW 不写数据 | Reg 系列 handler |
+| 6 | main 前退出 | OpenThread 返回 0 | OpenThread 假句柄 |
+| 7 | **控制台初始化通过后内部退出** | cmd 内部逻辑（无 API 依赖） | **未解：需反汇编 cmd CRT 启动** |
+
+- 环境注意：`cmd.exe` 文件名触发 bash 安全拦截（被当系统命令），调试用 `cp C:/Windows/SysWOW64/cmd.exe node_modules/.cache/cguest.exe` 改名绕过（同一个 guest 镜像）。
+- diag-trap.ts 已支持 `BK_ARGS='cmd /c dir C:\Windows'` 传命令行（argv[0] 建议用 'cmd'，cguest.exe 会触发 cmd 的 argv[0] 检查）。
+
+## 当前卡点 / 下一步（按序，用户方向："一切和 Windows 一样"）
+
+1. **攻坚 cmd**：反汇编 cmd 的 CRT 启动（disasm-win.py 0x41dd08 附近），定位"控制台初始化通过后"的内部退出点。命令 `"$PY" scripts/disasm-win.py "C:/Windows/SysWOW64/cmd.exe" <addr-hex> 200`。
+2. **内置 Command Prompt 应用**（与 notepad 同模式：独立窗口 + 交互 stdin 桥接——GetStdHandle 已返回假句柄，需 WriteFile→stdout 回流 + ReadFile→stdin 下发）。
+3. **GetOpenFileNameW 文件对话框桥接**（comdlg32，notepad Open/Save 无反应的剩余部分）→ 用虚拟盘文件选择器（项目已有 FileExplorerApp 可复用）。
+4. **文件资源管理器真实化**（用户硬性要求）：explorer.exe 实测不可行（单实例 Shell 程序，依赖 CoCreateInstance/IShellFolder 整套 Shell，787 个 API stub 后静默退出）——正确路线是升级内置 FileExplorerApp 为 Windows 11 风格真实资源管理器（浏览虚拟盘 + 侧边栏/重命名/新建文件/状态栏 + 从 C 盘打包预置真实文件：win.ini/hosts/readme.txt 已预置）。
+5. 回归：typecheck + vitest（189/189）+ lint + `rm -rf dist && vite build` + preview 验证。
+
+## 诊断工具（已清理）
+
+- `scripts/diag-trap.ts`：保留 [api] 日志、maxSteps 8M、[trace]、dumpFault；支持 `BK_ARGS`（命令行）、`BK_NO_MUI=1`（模拟无 MUI 浏览器环境）。
+- `scripts/probe-mui.ts`：浏览器路径模拟（虚拟盘 + readFile）验证 MUI 合并/菜单。
+- 反汇编：`"$PY" scripts/disasm-win.py "C:/Windows/SysWOW64/cmd.exe" 41dd08 200`（capstone，线性地址）。

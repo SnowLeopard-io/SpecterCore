@@ -259,6 +259,7 @@ async function main(): Promise<void> {
     maxSteps: 8_000_000,
     createEngine: (mode) => new JitEngineImpl(runtime, mode),
     modulePath,
+    commandLine: process.env.BK_ARGS ?? '',
     readFile: async (p) => {
       if (process.env.BK_NO_MUI === '1') return null; // mimic browser env
       try {
