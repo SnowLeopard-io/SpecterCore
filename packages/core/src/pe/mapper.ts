@@ -170,6 +170,14 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'versetconditionmask': 4, // maskLow, maskHigh, type, cond = 16 bytes (was 3 -> leaked 4B/call)
   'getfullpathnamea': 4,
   'getfullpathnamew': 4,
+  // Get/SetCurrentDirectoryW/A: missing argCounts -> stub ret 0 -> 8 bytes
+  // leaked per GetCurrentDirectoryW call -> GS cookie copy shifted in the
+  // caller frame -> __security_check_cookie fails -> __report_gsfailure
+  // (cmd.exe fail-fast after its environment/registry init, Step 11 stage 7).
+  'getcurrentdirectoryw': 2,
+  'getcurrentdirectorya': 2,
+  'setcurrentdirectoryw': 1,
+  'setcurrentdirectorya': 1,
   'getwindowsdirectorya': 2,
   'getwindowsdirectoryw': 2,
   'getsystemdirectorya': 2,
@@ -335,6 +343,13 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'allocateandinitializesid': 8,
   'equalsid': 2,
   'regqueryvalueexw': 6,
+  // RegGetValueW/A: 7 params stdcall (hkey, lpSubKey, lpValue, dwFlags,
+  // pdwType, pvData, pcbData). Missing -> stub ret 0 -> 28 bytes leaked per
+  // call -> GS cookie copy in the caller's frame is shifted ->
+  // __security_check_cookie fails -> __report_gsfailure -> TerminateProcess
+  // 0xC0000409 (cmd.exe fail-fast right after its registry config loop).
+  'reggetvaluew': 7,
+  'reggetvaluea': 7,
   'gettokeninformation': 5,
   'convertsidtostringsidw': 2,
   'regclosekey': 1,

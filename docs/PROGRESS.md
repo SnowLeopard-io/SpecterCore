@@ -2,7 +2,7 @@
 
 > **给下一个 agent 的交接入口。** 目标：让 **Windows exe** 在 Browser Kernel 的 JIT 里跑起来，最终在 L6 桌面（apps/web）里加载并运行（含控制台输出）。
 > 读完本文件后请读 `packages/core/src/{pe, jit, process, api}/`、`packages/ui/src/` 与 `packages/contracts/src/`。
-> **2026-08-19 交接（Step 10 + Step 11 完成）：① 内置 Windows Notepad 全链路打通——notepad.exe + en-US/zh-CN MUI 预置到虚拟盘（懒预置，点击图标自动补齐）、DesktopController.launchGuestWindow 直接创建 L6 独立窗口（无中间应用壳）、真实 RT_MENU 解析（File/Edit 菜单 + 真实 ID）、EDIT 文本回流、前端 strip &；② 打底层起步——cmd.exe 已预置 public/win/，补齐 FindFirstFileW/GetCurrentDirectoryW/GetCommandLineW/__argv/__wargc/GetCPInfo/GetModuleHandleW/Reg 系列/OpenThread 等底层 API，cmd 从"静默退出"推进到"控制台初始化通过后内部逻辑退出"（下一卡点）。验证：probe-mui.ts 全链路 muiLoaded=true + merged 13 资源 + File 菜单完整真实；vitest 189/189、lint 0/0、build ✓（index-DqK7bcyX.js）。下一步候选：攻坚 cmd CRT 启动（反汇编）/ 内置 Command Prompt 交互应用 / GetOpenFileNameW 文件对话框桥接（notepad Open/Save）/ 文件资源管理器真实化。**
+> **2026-08-19 交接（Step 12 进行中）：cmd.exe 攻坚——7 项底层修复后从「控制台初始化通过→fail-fast(0xC0000409)」推进到「还剩 1 次 GS-cookie FAIL @0x40b4c8」。本轮修复：①getcpinfo 1→2（2 参 stdcall）②真实环境块（GetEnvironmentStringsW/A、GetEnvironmentVariableW/A、_environ 数组）③freeenvironmentstringsw/a:1 ④reggetvaluew/a:7（**首个 fail-fast 根因**）⑤getcurrentdirectoryw/a:2 + setcurrentdirectoryw/a:1（**第二个 fail-fast 根因**）⑥_o__wcsicmp/_stricmp/_time32/time/_o_srand/srand handler（真实比较+时间戳）⑦RegQueryValueExW/A 不再写 lpData（**lpData 与调用者帧 GS cookie 槽重叠，写 4 字节零直接清零 cookie**）。验证：typecheck ✓、notepad cleanExit 回归 ✓（用户已 git 提交基线 0acff25）。当前卡点：0x40b4c8（cmd 大初始化函数尾）cookie 副本 [ebp-4] 在函数执行中被清零（入口已为 0，expect=cookie^ebp），写者尚未定位（RegQueryValueExW 已排除；diag-trap 已留 0x40b430/0x40b49e/0x40b4ba 断点供二分）。下一步：二分定位 [ebp-4] 清零写者 → 之后 GetOpenFileNameW 桥接 / 内置 Command Prompt 应用 / 文件资源管理器真实化。**
 
 ## 当前目标（用户需求，2026-08-18 起，2026-08-19 更新）
 
@@ -542,3 +542,91 @@ onMessageWait → 把 guest 顶层窗口创建为 L6 独立窗口（WindowManage
 - `scripts/diag-trap.ts`：保留 [api] 日志、maxSteps 8M、[trace]、dumpFault；支持 `BK_ARGS`（命令行）、`BK_NO_MUI=1`（模拟无 MUI 浏览器环境）。
 - `scripts/probe-mui.ts`：浏览器路径模拟（虚拟盘 + readFile）验证 MUI 合并/菜单。
 - 反汇编：`"$PY" scripts/disasm-win.py "C:/Windows/SysWOW64/cmd.exe" 41dd08 200`（capstone，线性地址）。
+
+---
+
+# Step 12（2026-08-19 交接：cmd.exe 攻坚 —— 7 项底层修复，fail-fast 根因已除，剩 1 次 cookie FAIL 未定位）
+
+## 一句话现状
+
+cmd.exe（SysWOW64 x86）比 Step 11 大幅推进：**修复 7 个底层 bug 后，「控制台初始化通过 → fail-fast(0xC0000409)」链条基本解除**——原来 3 次 GS-cookie FAIL 已降到 **1 次**（0x40b4c8 调用点）。当前卡在：cmd 大初始化函数（0x40af82 循环）尾部 `__security_check_cookie` 失败，因为 **cookie 副本 [ebp-4] 在函数执行中被清零（入口已为 0，expect=cookie^ebp）**，**写者尚未定位**（RegQueryValueExW 已排除）。日志 223 行，`status=fault eip=0x40eb20`（fail-fast 后垃圾执行的 wcslen）。
+
+**notepad 回归已恢复**：`status=exit eip=0x0 stubs=312` cleanExit ✓（用户已修复并 git 提交，基线 0acff25）。
+
+## 本轮修复的 bug（按根因，全部过 typecheck；vitest 未跑需下轮确认）
+
+### Bug 1：getcpinfo argCount 错（1→2）—— cmd「静默 exit」的收尾
+- **症状**（Step 11 卡点）：cmd 控制台初始化通过后 eip=0 静默退出（`status=exit eip=0x0`），0x40b836 wcslen 死循环。
+- **根因**：`GetCPInfo(UINT, LPCPINFO)` = **2 参 stdcall**，mapper 只有 `'getcpinfo': 1` → stub `ret 4` → 栈偏 4 → `pop ebx` 弹到未弹出的参数（0x1b5=cp）→ `bl=0xb5≠0` → 误入 DBCS 前导字节构建函数 0x427bde → 其 `ret` 弹 CPINFO 数据地址 0x446b10 → 当代码执行 → 垃圾 → eip=0 exit。
+- **修复**：`'getcpinfo': 2`（反汇编证据：0x4167c1 函数 `push 0x446b10; push eax; call [0x4501a0]`）。
+
+### Bug 2：环境块缺失（GetEnvironmentStringsW/A 返回 0）—— 0x40b836 死循环
+- **症状**：修复 Bug 1 后 cmd 在 0x40b836（wcslen 风格循环）死循环（trace 64 次全 0x40b836）。
+- **根因**：0x40b82d `call [0x4501e0]`（GetCommandLineW 路径，fail-fast 后垃圾执行）和 0x40e707（环境拷贝 helper）读环境块；GetEnvironmentStringsW **无 handler 返回 0** → 从 guest 地址 0（SEH 链头 0xffffffff）扫描双 0 终止符 → 死循环。
+- **修复**（guest-process.ts `installStartupHandlers`）：
+  - `envEntries`：14 个变量（=C:, SystemRoot, COMSPEC, PATH, TEMP, TMP, USERPROFILE, HOMEDRIVE, HOMEPATH, PROMPT, PATHEXT, OS, NUMBER_OF_PROCESSORS, PROCESSOR_ARCHITECTURE）。
+  - `_environ`（`envSlot`）：真实 `char* env[]` 数组（原来 `{NULL}` 空）。
+  - `wideEnvBlock`/`narrowEnvBlock`：双 NUL 结尾的 UTF-16LE/ANSI 块；hook `GetEnvironmentStringsW/A`。
+  - `GetEnvironmentVariableW/A`：查 envEntries，命中写缓冲（writeW/writeA），未命中返回 0。
+- 铁证：diag dump `GetEnvironmentStringsW block @0x20006d8: "=C:=C:\\\u0000SystemRoot=C:\\Windows\u0000COMSPEC=..."` ✓。
+
+### Bug 3：freeenvironmentstringsw 缺 argCount（1 参 stdcall）
+- **症状**：环境块修复后 fault at eip=0x7ffff9c（**栈地址**），`unsupported opcode 0xe5`。
+- **根因**：0x40e707（环境拷贝 helper）`FreeEnvironmentStringsW(envBlock)` 无 argCount → stub `ret 0` → 栈偏 4 → `pop ebx` 弹 esi 值、`ret` 弹栈上残留（0x7ffff9c）→ 栈当代码执行。
+- **修复**：`'freeenvironmentstringsw': 1, 'freeenvironmentstringsa': 1`。
+
+### Bug 4：reggetvaluew 缺 argCount（7 参 stdcall）—— **首个 fail-fast(0xC0000409) 根因**
+- **症状**：注册表配置循环（RegQueryValueExW×N + RegGetValueW×2）后 → `_time32` → `_o_srand` → `IsProcessorFeaturePresent(0x17)` → `SetUnhandledExceptionFilter(0)` → `UnhandledExceptionFilter(0x401000)` → `TerminateProcess(0xC0000409)`（fail-fast），随后 0x40b836 死循环（TerminateProcess handler 不终止进程，垃圾继续执行）。
+- **根因**：`RegGetValueW` = **7 参 stdcall**（hkey, lpSubKey, lpValue, dwFlags, pdwType, pvData, pcbData），无 argCount → stub `ret 0` → 每次调用栈偏 28 → 主逻辑函数返回时 GS cookie 副本错位 → `__security_check_cookie`(0x41dea0) 失败 → `__report_gsfailure`(0x41e1e2)。
+- **修复**：`'reggetvaluew': 7, 'reggetvaluea': 7`。
+- 反汇编佐证：0x41e1e2 是 `__report_gsfailure`（`push 0x17; call [0x450240]=IsProcessorFeaturePresent; je 0x41e1fe; int 0x29`），0x41e1b2 是报告尾部（SetUnhandledExceptionFilter→UnhandledExceptionFilter→TerminateProcess(0xC0000409)）。
+
+### Bug 5：getcurrentdirectoryw 缺 argCount（2 参 stdcall）—— **第二个 fail-fast 根因**
+- **症状**：Bug 4 修复后 fail-fast 仍在，但推进到 GetEnvironmentVariableW/_o__wcsicmp/GetCurrentDirectoryW 路径；cookie FAIL 3 次（0x40b4c8、0x40bba9×2）。
+- **根因**：Step 11 只加了 GetCurrentDirectoryW/A **handler**（guest-process），**漏了 mapper argCount** → stub `ret 0` → 每次调用栈偏 8。**cookie 检查代码 `mov ecx,[esp+0x14]; pop edi; pop esi; xor ecx,esp` 依赖被调者 `ret 8`**（0x40bba3 `call [0x4501e4]`=GetCurrentDirectoryW，idx 217 经 IAT 查询确认）——ret 0 时 esp 偏 8，`[esp+0x14]` 读到错误槽 → cookie^esp 结果差 0x10 → FAIL。
+- **修复**：`'getcurrentdirectoryw': 2, 'getcurrentdirectorya': 2, 'setcurrentdirectoryw': 1, 'setcurrentdirectorya': 1`。
+- **铁证**：IAT dump 显示修复前 `IAT 0x4501e4 stub: b8 d9 00 00 00 cd 2e c3`（ret 0），修复后 `c2 08 00`（ret 8）；0x40bba9 的 cookie 检查从 FAIL 变 **OK**（`ecx=0x305e2c77 == want`）。
+
+### Bug 6：_o__wcsicmp / _time32 / _o_srand 无 handler
+- **症状**：`_o__wcsicmp(0x402018="KEYS...", 0x401de0="CD...") -> 0x0`（**相等**！）——cmd 内部变量名匹配（KEYS/GOTO/DPATH…）全部误判；`_time32 -> 0x0`（srand(0) 种子固定）。
+- **修复**（handlers.ts ucrtbase 块）：`_o__wcsicmp/_wcsicmp/wcsicmp`（宽串不区分大小写比较，返回 -1/0/1）、`_stricmp`（窄）、`_time32/time`（返回 `Date.now()/1000` 并写 out 参数）、`_o_srand/srand`（no-op）。
+- 验证：日志 `_o__wcsicmp(0x402018, 0x401e0c) -> 0x1`、`-> 0xffffffff`（真实比较）、`_time32 -> 0x6a850192`（真实时间戳）。
+
+### Bug 7：RegQueryValueExW/A 写 lpData 覆盖调用者帧 GS cookie —— 当前卡点的**已排除**项（重要教训）
+- **症状**：0x40b4c8 入口 [ebp-4]（cookie 副本）= **0**（应为 cookie^ebp）。
+- **发现**：RegQueryValueExW 的 lpData 参数值 = **0x7ffeedc = [ebp-4]**（0x40b4c8 断点 ebp=0x7fffee0）——handler 写 4 字节 0 到 lpData 直接清零 cookie！
+- **修复（实验性）**：RegQueryValueExW/A handler **不再写 lpData（arg4）**，只写 lpcbData（arg5）=4（返回 ERROR_SUCCESS，cmd 仍走"值存在"路径）。
+- **⚠️ 仍 FAIL**：修复后 [ebp-4] 入口仍为 0 → **写者另有其人**（RegGetValueW 无 handler 不写、RegOpenKeyExW 写 arg4=0x7ffeeb8=[ebp-0x28] 不重叠、RegCloseKey 无写）。**待定位**。
+
+## 当前卡点（从这接手，按序）
+
+1. **定位 0x40b4c8 cookie 清零写者**（下一个 agent 第一件事）：
+   - 已知：0x40b4c8 入口 `[ebp-4]=0x0`（expect=cookie^ebp=0x9852de17）；cookie 在函数 prologue（0x40af00 前，需反汇编定位）写入后、0x40b4c8 前被清零。
+   - **diag-trap 已留断点**：`onStep` 检查 `eip ∈ {0x40b4c8, 0x40b430, 0x40b49e, 0x40b4ba}` 打印 ebp/esp/[ebp-4]/cookie/expect——**二分**：若 0x40b430 已为 0 → 写者在 prologue~循环前；若 0x40b430 正常、0x40b49e 为 0 → 循环内 0x40b430-0x40b49e 之间（含 0x40b45e `call [0x4501f0]`=ExpandEnvironmentStringsW，idx 220——**该 handler 是否存在？** 若无 handler 默认返回 0，但 **0x40b464: test eax,eax; je 0x40b47b 走 0x40b47b: mov word [ebp-0x1004],ax** 不碰 [ebp-4]）。
+   - **候选写者**：①0x40b45e ExpandEnvironmentStringsW（idx 220，3 参，`[0x4501f0]`，需确认 handler 及是否写输出缓冲）；②`0x40b468-0x40b474: call 0x4136f0`（0x800 参数拷贝，dst=[ebp-0x1004]，len 若按 wchar 计写 0x1000 字节 → **覆盖 [ebp-4]**——但仅当 ExpandEnvironmentStringsW 返回非 0 才执行，而日志无 ExpandEnvironmentStringsW 调用 → 未走此分支？需确认）；③其他未列出的 handler 越界写。
+   - **建议**：在 0x40b430/0x40b49e 断点基础上，再给 0x40b45e（call ExpandEnvironmentStringsW）和 0x40b468（call 0x4136f0）加断点；或临时 hook 所有"写 guest 内存"的 handler 打印目标地址范围。
+2. cookie 通过后的预期：cmd 继续 → 读环境变量/路径解析 → 执行 `dir`（FindFirstFileW 已实现）→ 输出 → 退出或进入 REPL。**验收**：`BK_ARGS='cmd /c dir C:\Windows'` 能列出虚拟盘 C:\Windows 内容（或至少不 fault/limit）。
+3. **内置 Command Prompt 应用**（与 notepad 同模式：独立窗口 + 交互 stdin 桥接——GetStdHandle 已返回假句柄，需 WriteFile→stdout 回流 + ReadFile→stdin 下发）。
+4. **GetOpenFileNameW 文件对话框桥接**（comdlg32，notepad Open/Save 无反应的剩余部分）→ 用虚拟盘文件选择器（FileExplorerApp 可复用）。
+5. **文件资源管理器真实化**（用户硬性要求）：explorer.exe 实测不可行（单实例 Shell 程序）——升级内置 FileExplorerApp 为 Windows 11 风格真实资源管理器（虚拟盘浏览 + 侧边栏/重命名/新建/状态栏 + 预置真实文件 win.ini/hosts/readme.txt）。
+6. 回归：typecheck ✓（当前已过）+ **vitest（本轮未跑，基线 189/189）** + lint + `rm -rf dist && vite build` + preview + **浏览器 notepad 回归**（probe-mui.ts 确认 cleanExit）。
+
+## 诊断工具 / 断点（⚠️ 临时断点未清理，下个 agent 用完后删除）
+
+- `scripts/diag-trap.ts` 当前含**临时 [ck] 断点**（onStep 内）：
+  - `eip===0x41dea0`：__security_check_cookie 入口，打印 ecx/want/ebp/[ebp-4]/栈 + IAT 0x4501e4/0x4504a0/0x4503d4 stub dump。
+  - `eip∈{0x40b4c8, 0x40b430, 0x40b49e, 0x40b4ba}`：cookie 二分断点。
+  - `GetEnvironmentStringsW/A` dispatch 后 dump 环境块内容。
+  - **定位完成后全部移除**（保留 [api]/[trace]/dumpFault/maxSteps 8M/BK_ARGS/BK_NO_MUI）。
+- IAT 查询脚本：`node_modules/.cache/iat3.py`（FirstThunk 遍历，**slot = 0x400000 + first_thunk + j*4**，注意 FirstThunk 是 RVA 要加 image base；已确认 idx 217=GetCurrentDirectoryW、idx 220=ExpandEnvironmentStringsW、idx 28=_o__wcsicmp、idx 3=_time32、idx 49=_o_srand、idx 52=_o_towupper、idx 253=RegCloseKey）。
+- 反汇编辅助：cmd 关键地址——0x415c37（主逻辑入口，CRT 0x41ddfd 调用）、0x40e707（环境块拷贝 helper）、0x40bb7e（变量查找+GetCurrentDirectoryW+cookie）、0x40af82（大初始化函数循环）、0x40b4c8（大函数尾 cookie）、0x41dea0（__security_check_cookie）、0x41e1e2（__report_gsfailure）、0x41e1b2（报告尾部）。
+
+## 本会话未解 / 注意点（继承 + 新增）
+
+- **`_o_towupper`（idx 52）无 handler**（默认返回 0）——cmd 的宽字符大小写转换可能受影响（0x40bbc9 `call [0x4503e0]`）。
+- **`ExpandEnvironmentStringsW`（idx 220）无 handler**（默认返回 0）——cmd 的 `%VAR%` 展开不生效（0x40b45e 调用），且该路径是 [ebp-4] 覆盖的**头号嫌疑**（0x40b468 拷贝 0x800 可能越界）。
+- `RegQueryValueExW` 现在不写 lpData——**cmd 读注册表值会拿到垃圾**（之前写 4 字节 0），但保证 cookie 不崩；后续可在确认 cookie 机制稳定后，改为"只写合理地址"（如检查目标不在当前栈帧内）。
+- `IsProcessorFeaturePresent(0x17)` 返回 0 → __report_gsfailure 走 UnhandledExceptionFilter 路径（不是 fastfail）——诊断时注意。
+- `TerminateProcess` handler 不终止进程（只对 exitprocess 特殊处理）——fail-fast 后垃圾执行是诊断噪音来源。
+- vitest 未跑（基线 189/189）；lint 未跑；apps/web 未构建。
+- notepad 回归基线（用户已提交 0acff25）：probe-mui 显示 `status=fault cleanExit=false` 是**用户修复前**的现象，当前代码已恢复 cleanExit ✓（diag-trap 跑真 notepad 验证）。

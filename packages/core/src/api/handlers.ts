@@ -172,16 +172,17 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       return ok(0);
     },
     RegQueryValueExW: (ctx, host) => {
-      const data = raw(ctx, 4);
+      // Do NOT write lpData (arg4): cmd.exe passes a stack slot that overlaps
+      // the GS cookie copy in the caller frame ([ebp-4] in its big init
+      // function) — writing 4 zero bytes there zeroes the cookie and every
+      // later __security_check_cookie fails -> __report_gsfailure. Report the
+      // size (4 bytes) so callers can still take the "value found" path.
       const cb = raw(ctx, 5);
-      if (data) host.memory.write(data, new Uint8Array(4));
       if (cb) host.memory.write(cb, new Uint8Array([0x04, 0, 0, 0]));
       return ok(0);
     },
     RegQueryValueExA: (ctx, host) => {
-      const data = raw(ctx, 4);
       const cb = raw(ctx, 5);
-      if (data) host.memory.write(data, new Uint8Array(4));
       if (cb) host.memory.write(cb, new Uint8Array([0x04, 0, 0, 0]));
       return ok(0);
     },
@@ -419,8 +420,61 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       while (n + 1 < bytes.byteLength && view.getUint16(n * 2, true) !== 0) n += 1;
       return ok(n);
     },
+    // _o__wcsicmp / _wcsicmp / wcsicmp / _stricmp: case-insensitive wide/narrow
+    // compare. cmd.exe matches its internal variable names (KEYS/GOTO/DPATH…)
+    // and environment names with these; returning 0 (the default for an
+    // unimplemented handler) makes every comparison "equal" and cmd misroutes.
+    _o__wcsicmp: (ctx, host) => ok(wcsicmpImpl(host, raw(ctx, 0), raw(ctx, 1), true)),
+    _wcsicmp: (ctx, host) => ok(wcsicmpImpl(host, raw(ctx, 0), raw(ctx, 1), true)),
+    wcsicmp: (ctx, host) => ok(wcsicmpImpl(host, raw(ctx, 0), raw(ctx, 1), true)),
+    _stricmp: (ctx, host) => {
+      const a = memCStr(host, raw(ctx, 0)).toLowerCase();
+      const b = memCStr(host, raw(ctx, 1)).toLowerCase();
+      return ok(a < b ? -1 : a > b ? 1 : 0);
+    },
+    _time32: (ctx, host) => {
+      const t = Math.floor(Date.now() / 1000);
+      const out = raw(ctx, 0);
+      if (out) {
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, t, true);
+        host.memory.write(out, b);
+      }
+      return ok(t);
+    },
+    time: (ctx, host) => {
+      const t = Math.floor(Date.now() / 1000);
+      const out = raw(ctx, 0);
+      if (out) {
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, t, true);
+        host.memory.write(out, b);
+      }
+      return ok(t);
+    },
+    _o_srand: () => ok(0),
+    srand: () => ok(0),
   };
   interceptor.hookBatch('ucrtbase.dll', ucrtbase);
+}
+
+/** Case-insensitive wide string compare (returns -1/0/1 like wcsicmp). */
+function wcsicmpImpl(host: ApiHost, aPtr: number, bPtr: number, wide: boolean): number {
+  const readW = (p: number): string => {
+    if (!p) return '';
+    const bytes = host.memory.read(p, 0x20000);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let s = '';
+    for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+      const c = view.getUint16(i, true);
+      if (c === 0) break;
+      s += String.fromCharCode(c);
+    }
+    return s.toLowerCase();
+  };
+  const a = wide ? readW(aPtr) : memCStr(host, aPtr).toLowerCase();
+  const b = wide ? readW(bPtr) : memCStr(host, bPtr).toLowerCase();
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 export type { ApiHost, ApiResult, ApiCallContext };

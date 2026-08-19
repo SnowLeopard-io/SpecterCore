@@ -1007,15 +1007,22 @@ function emitLeave(fn: WasmFunction): void {
 // ---------------------------------------------------------------------------
 
 function emitXchg(fn: WasmFunction, a: Operand, b: Operand, size: Size): void {
+  // NOTE: storeOperand() clobbers L_TMP internally (its first step is
+  // `local.set L_TMP`), so a's old value must be parked in L_TMP2, NOT
+  // L_TMP. The previous version kept it in L_TMP: the second store then
+  // wrote b back to b (swap silently lost) — e.g. cmd.exe's __chkstk
+  // `xchg esp, eax` never moved esp, so the following `push ebx` wrote
+  // over the caller's GS cookie copy at [ebp-4] -> __security_check_cookie
+  // FAIL (0x40b4c8). This is the root cause of the last cmd.exe fail-fast.
   pushOperand(fn, a);
-  fn.localSet(L_TMP);
+  fn.localSet(L_TMP2); // keep a's old value here (safe from storeOperand)
   pushOperand(fn, b);
-  fn.localSet(L_TMP2);
+  fn.localSet(L_TMP);
   // store b -> a
-  fn.localGet(L_TMP2);
+  fn.localGet(L_TMP);
   storeOperand(fn, a);
   // store a -> b
-  fn.localGet(L_TMP);
+  fn.localGet(L_TMP2);
   storeOperand(fn, b);
   void size;
 }

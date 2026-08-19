@@ -850,8 +850,15 @@ class DecoderState {
     const size = this.operandSize(o66);
     switch (opcode) {
       case 0x1e:
-      case 0x1f:
+      case 0x1f: {
+        // Multi-byte NOP (0F 1F /r — "nop r/m"). The ModRM (and SIB/disp)
+        // bytes MUST be consumed, otherwise the following instruction is
+        // decoded from the middle of the NOP and the whole block desyncs
+        // (cmd.exe 0x40eb20 faulted on a stray modrm byte 0x06 = "push es"
+        // after `0f 1f 40 00` was treated as a 2-byte nop).
+        this.decodeRm(32);
         return { inst: { op: 'nop' }, terminator: false };
+      }
 
       case 0xa2:
         // CPUID — no operands; eax selects the leaf, results go to eax/ebx/ecx/edx.
