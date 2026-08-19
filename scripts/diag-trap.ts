@@ -286,13 +286,19 @@ async function main(): Promise<void> {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
-      if ([0x40b9f9, 0x40b9fc, 0x40ba01, 0x40ba06, 0x40ba11, 0x40ba21, 0x40ba2b, 0x40ba4f, 0x40ba52, 0x40ba59, 0x40ba5d, 0x40ba63, 0x40baa6, 0x40a1c7, 0x40a1eb, 0x40a1f5, 0x42d3cd, 0x42d3d2, 0x42d3d8, 0x42d47a, 0x42d47f].includes(eip)) {
+      if ([0x40b9f9, 0x40b9fc, 0x40ba01, 0x40ba06, 0x40ba11, 0x40ba21, 0x40ba2b, 0x40ba4f, 0x40ba52, 0x40ba59, 0x40ba5d, 0x40ba63, 0x40baa6, 0x40b8d9, 0x40b8de, 0x40dfb6, 0x40dfca, 0x40e1f2, 0x40e1c0, 0x40e299, 0x426f7a, 0x415d02, 0x415d6a, 0x40a1c7, 0x40a1eb, 0x40a1f5, 0x42d3cd, 0x42d3d2, 0x42d3d8, 0x42d47a, 0x42d47f].includes(eip)) {
         const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
         const rd32 = (a: number) => {
           const b = rt.readBytes(a >>> 0, 4);
           return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
         };
         const e60 = rt.getReg('ebp') - 0x60;
+        const ebp = rt.getReg('ebp') >>> 0;
+        if (eip === 0x40b8d9 || eip === 0x40b8de || eip === 0x40dfb6 || eip === 0x40dfca || eip === 0x40e1f2 || eip === 0x40e1c0 || eip === 0x40e299 || eip === 0x426f7a || eip === 0x415d02 || eip === 0x415d6a) {
+          const slotBase = eip === 0x415d02 || eip === 0x415d6a ? ebp - 0x14 : eip === 0x40dfca ? rt.getReg('edi') >>> 0 : eip === 0x40e1c0 ? rt.getReg('eax') >>> 0 : rd32(ebp - 0x60);
+          const slots = [0, 1, 2, 3].map((i) => `0x${(rd32(slotBase + i * 4) >>> 0).toString(16)}`).join(',');
+          console.error(`[cmd] eip=0x${eip.toString(16)} slotBase=0x${slotBase.toString(16)} slots=[${slots}] tail=0x${(rd32(0x4406dc) >>> 0).toString(16)} flag=0x${(rd32(0x440860) >>> 0).toString(16)}`);
+        }
         console.error(
           `[bp] eip=0x${eip.toString(16)} edi=${r('edi')} esi=${r('esi')} ebx=${r('ebx')} ebp=${r('ebp')} esp=${r('esp')} [ebp-0x60]=0x${(rd32(e60) >>> 0).toString(16)} [edi]=0x${(rd32(rt.getReg('edi')) >>> 0).toString(16)} [edi+8]=0x${(rd32(rt.getReg('edi') + 8) >>> 0).toString(16)}`,
         );

@@ -444,6 +444,18 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       while (n + 1 < bytes.byteLength && view.getUint16(n * 2, true) !== 0) n += 1;
       return ok(n);
     },
+    wcschr: (ctx, host) => {
+      const p = raw(ctx, 0);
+      const target = raw(ctx, 1) & 0xffff;
+      const bytes = host.memory.read(p, 0x100000);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === target) return ok((p + i) >>> 0);
+        if (c === 0) break;
+      }
+      return ok(0);
+    },
     // _o__wcsicmp / _wcsicmp / wcsicmp / _stricmp: case-insensitive wide/narrow
     // compare. cmd.exe matches its internal variable names (KEYS/GOTO/DPATH…)
     // and environment names with these; returning 0 (the default for an
@@ -451,6 +463,30 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     _o__wcsicmp: (ctx, host) => ok(wcsicmpImpl(host, raw(ctx, 0), raw(ctx, 1), true)),
     _wcsicmp: (ctx, host) => ok(wcsicmpImpl(host, raw(ctx, 0), raw(ctx, 1), true)),
     wcsicmp: (ctx, host) => ok(wcsicmpImpl(host, raw(ctx, 0), raw(ctx, 1), true)),
+    _o_iswspace: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok(c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20 ? 1 : 0);
+    },
+    iswspace: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok(c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20 ? 1 : 0);
+    },
+    _o_towupper: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok(c >= 0x61 && c <= 0x7a ? c - 0x20 : c);
+    },
+    towupper: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok(c >= 0x61 && c <= 0x7a ? c - 0x20 : c);
+    },
+    _o_iswalpha: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) ? 1 : 0);
+    },
+    iswalpha: (ctx) => {
+      const c = raw(ctx, 0) & 0xffff;
+      return ok((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) ? 1 : 0);
+    },
     _stricmp: (ctx, host) => {
       const a = memCStr(host, raw(ctx, 0)).toLowerCase();
       const b = memCStr(host, raw(ctx, 1)).toLowerCase();

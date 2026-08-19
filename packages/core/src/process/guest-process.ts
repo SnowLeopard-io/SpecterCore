@@ -706,7 +706,7 @@ export class GuestProcessRunner {
       let module = 'kernel32.dll';
       for (const key of this.interceptor.listHooks()) {
         const bang = key.indexOf('!');
-        if (bang > 0 && key.slice(bang + 1) === procName) {
+        if (bang > 0 && key.slice(bang + 1).toLowerCase() === procName.toLowerCase()) {
           module = key.slice(0, bang);
           break;
         }
