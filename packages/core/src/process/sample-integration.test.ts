@@ -52,7 +52,7 @@ describe.skipIf(skip)('sample/hello.exe（全链路集成，设计文档 9.4）'
     expect(result.status).toBe('exit');
     expect(result.cleanExit).toBe(true);
     expect(result.exitCode).toBe(7);
-    expect(new TextDecoder().decode(result.output)).toBe('hello from specter-core!\n');
+    expect(new TextDecoder().decode(result.output)).toBe('hello from browser-kernel!\n');
     expect(stdout.length).toBeGreaterThan(0);
     expect(result.stubs.map((s) => s.proc)).toEqual([
       'GetTickCount',

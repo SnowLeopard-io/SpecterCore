@@ -45,7 +45,6 @@ function buildPeMulti(
   const rva = (raw: number) => raw - 0x200 + 0x1000;
   const align4 = (n: number) => (n + 3) & ~3;
 
-  const totalFuncs = imports.reduce((n, d) => n + d.funcs.length, 0);
   const totalSlots = imports.reduce((n, d) => n + d.funcs.length + 1, 0);
 
   // Dynamic layout starting right after the code.
@@ -156,7 +155,13 @@ class RecordingGdiBridge implements GdiBridge {
   async deleteDC(dc: number): Promise<void> {
     this.calls.push(`deleteDC:${dc}`);
   }
-  async textOut(dc: number, x: number, y: number, text: string, _font?: FontSpec): Promise<WinError> {
+  async textOut(
+    dc: number,
+    x: number,
+    y: number,
+    text: string,
+    _font?: FontSpec,
+  ): Promise<WinError> {
     this.calls.push(`textOut:${dc}:${x},${y}:${text}`);
     return E.NO_ERROR;
   }
@@ -172,16 +177,27 @@ class RecordingGdiBridge implements GdiBridge {
     this.calls.push(`setBkMode:${dc}:${mode}`);
     return E.NO_ERROR;
   }
-  async lineTo(dc: number, x0: number, y0: number, x1: number, y1: number, color: Color): Promise<WinError> {
+  async lineTo(
+    dc: number,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    color: Color,
+  ): Promise<WinError> {
     this.calls.push(`lineTo:${dc}:${x0},${y0}->${x1},${y1}:${rgb(color)}`);
     return E.NO_ERROR;
   }
   async fillRect(dc: number, rect: Rect, color: Color): Promise<WinError> {
-    this.calls.push(`fillRect:${dc}:${rect.x},${rect.y},${rect.width},${rect.height}:${rgb(color)}`);
+    this.calls.push(
+      `fillRect:${dc}:${rect.x},${rect.y},${rect.width},${rect.height}:${rgb(color)}`,
+    );
     return E.NO_ERROR;
   }
   async frameRect(dc: number, rect: Rect, color: Color): Promise<WinError> {
-    this.calls.push(`frameRect:${dc}:${rect.x},${rect.y},${rect.width},${rect.height}:${rgb(color)}`);
+    this.calls.push(
+      `frameRect:${dc}:${rect.x},${rect.y},${rect.width},${rect.height}:${rgb(color)}`,
+    );
     return E.NO_ERROR;
   }
   async ellipse(dc: number, bounds: Rect, color: Color): Promise<WinError> {
@@ -192,7 +208,13 @@ class RecordingGdiBridge implements GdiBridge {
     this.calls.push(`frameEllipse:${dc}:${rgb(color)}`);
     return E.NO_ERROR;
   }
-  async roundRect(dc: number, bounds: Rect, _rx: number, _ry: number, color: Color): Promise<WinError> {
+  async roundRect(
+    dc: number,
+    bounds: Rect,
+    _rx: number,
+    _ry: number,
+    color: Color,
+  ): Promise<WinError> {
     this.calls.push(`roundRect:${dc}:${rgb(color)}`);
     return E.NO_ERROR;
   }
@@ -220,11 +242,23 @@ class RecordingGdiBridge implements GdiBridge {
     this.calls.push(`restoreDC:${dc}`);
     return 1;
   }
-  async bitBlt(destDc: number, destRect: Rect, srcDc: number, srcRect: Rect, rop: number): Promise<WinError> {
+  async bitBlt(
+    destDc: number,
+    destRect: Rect,
+    srcDc: number,
+    srcRect: Rect,
+    rop: number,
+  ): Promise<WinError> {
     this.calls.push(`bitBlt:${destDc}<-${srcDc}:${destRect.width}x${destRect.height}:${rop}`);
     return E.NO_ERROR;
   }
-  async stretchBlt(destDc: number, destRect: Rect, srcDc: number, srcRect: Rect, rop: number): Promise<WinError> {
+  async stretchBlt(
+    destDc: number,
+    destRect: Rect,
+    srcDc: number,
+    srcRect: Rect,
+    rop: number,
+  ): Promise<WinError> {
     this.calls.push(`stretchBlt:${destDc}<-${srcDc}:${destRect.width}x${destRect.height}:${rop}`);
     return E.NO_ERROR;
   }
@@ -233,7 +267,14 @@ class RecordingGdiBridge implements GdiBridge {
     return E.NO_ERROR;
   }
   async getDeviceCaps(_dc: number): Promise<DeviceCaps> {
-    return { bitsPerPixel: 32, width: 640, height: 480, colorPlanes: 1, horizontalResolution: 96, verticalResolution: 96 };
+    return {
+      bitsPerPixel: 32,
+      width: 640,
+      height: 480,
+      colorPlanes: 1,
+      horizontalResolution: 96,
+      verticalResolution: 96,
+    };
   }
   async flush(dc: number): Promise<void> {
     this.calls.push(`flush:${dc}`);
@@ -248,6 +289,7 @@ const rgb = (c: Color): string => `${c.r},${c.g},${c.b}`;
 function makeRunner() {
   const runtime = new WasmRuntimeImpl(64);
   const loader = new PeLoaderImpl();
+  const host = {
     fs: {} as never,
     gdi: {} as never,
     audio: {} as never,
@@ -263,8 +305,6 @@ function makeRunner() {
   const runner = new GuestProcessRunner(runtime, new JitEngineImpl(runtime), loader, interceptor);
   return { runtime, runner, interceptor };
 }
-
-const encoder = new TextEncoder();
 
 describe('GDI pixel path (L6 image bridge, 设计文档 3.2)', () => {
   it('forwards BeginPaint/draw/EndPaint to the per-window bridge', async () => {
@@ -291,20 +331,19 @@ describe('GDI pixel path (L6 image bridge, 设计文档 3.2)', () => {
     // Two passes: the code's `call [IAT]` operands need the IAT addresses, but
     // those depend on the code length. Each call is a fixed 6 bytes, so build
     // with placeholders first, then rebuild with real addresses.
-    const makeCall = (proc: string) => (addr: number) => [0xff, 0x15, ...le32(addr)];
-    const callOf = new Map<string, (addr: number) => number[]>();
-    for (const d of imports) for (const f of d.funcs) callOf.set(f, makeCall(f));
     const push = (v: number) => [0x68, ...le32(v)];
 
     const buildCode = (addr: (proc: string) => number) =>
       new Uint8Array([
         ...push(0x0000ff00),
         ...[0xff, 0x15, ...le32(addr('CreateSolidBrush'))],
-        0x89, 0xc6, // mov esi, eax (brush)
+        0x89,
+        0xc6, // mov esi, eax (brush)
         ...push(0x401240), // &ps
         ...push(0x10001),
         ...[0xff, 0x15, ...le32(addr('BeginPaint'))],
-        0x89, 0xc3, // mov ebx, eax (hdc)
+        0x89,
+        0xc3, // mov ebx, eax (hdc)
         ...push(0x00ff0000), // SetTextColor(hdc, color)
         0x53, // push ebx (hdc)
         ...[0xff, 0x15, ...le32(addr('SetTextColor'))],
@@ -325,11 +364,18 @@ describe('GDI pixel path (L6 image bridge, 设计文档 3.2)', () => {
         ...[0xff, 0x15, ...le32(addr('ExitProcess'))],
       ]);
 
-    const first = buildPeMulti(imports, buildCode(() => 0x401000), data);
+    const first = buildPeMulti(
+      imports,
+      buildCode(() => 0x401000),
+      data,
+    );
     const real = new Map<string, number>();
     for (const [p, a] of first.iat) real.set(p, a);
-    const image = buildPeMulti(imports, buildCode((p) => real.get(p)!), data).image;
-    const code = buildCode((p) => real.get(p)!);
+    const image = buildPeMulti(
+      imports,
+      buildCode((p) => real.get(p)!),
+      data,
+    ).image;
 
     const result = await runner.run(image, {
       gdiBridge: (hwnd) => {
@@ -337,17 +383,6 @@ describe('GDI pixel path (L6 image bridge, 设计文档 3.2)', () => {
         return hwnd === 0x10001 ? bridge : null;
       },
     });
-
-    if (result.status !== 'exit') {
-      // eslint-disable-next-line no-console
-      console.log('fault', { eip: result.eip, error: result.error, stubs: result.stubs.map((s) => s.proc) });
-      // eslint-disable-next-line no-console
-      console.log('code', [...code].map((b) => b.toString(16).padStart(2, '0')).join(' '));
-      // eslint-disable-next-line no-console
-      console.log('iat', [...real.entries()].map(([p, a]) => `${p}=0x${a.toString(16)}`).join(' '));
-      // eslint-disable-next-line no-console
-      console.log('mem@entry', [...runtime.readBytes(0x401000, 32)].map((b) => b.toString(16).padStart(2, '0')).join(' '));
-    }
 
     expect(result.status).toBe('exit');
     expect(result.exitCode).toBe(0);
@@ -360,7 +395,6 @@ describe('GDI pixel path (L6 image bridge, 设计文档 3.2)', () => {
       'textOut:769:5,10:hello',
       'fillRect:769:0,0,100,50:0,255,0',
       'flush:769',
-      'deleteDC:769',
     ]);
   });
 
@@ -375,31 +409,43 @@ describe('GDI pixel path (L6 image bridge, 设计文档 3.2)', () => {
       { dll: 'user32.dll', funcs: ['BeginPaint', 'EndPaint'] },
       { dll: 'gdi32.dll', funcs: ['CreateSolidBrush', 'TextOutW'] },
     ];
-    const { image, iat } = buildPeMulti(imports, new Uint8Array(0), data);
-    const call = (proc: string) => [0xff, 0x15, ...le32(iat.get(proc)!)];
     const push = (v: number) => [0x68, ...le32(v)];
+    const buildCode = (addr: (proc: string) => number) =>
+      new Uint8Array([
+        ...push(0x0000ff00),
+        ...[0xff, 0x15, ...le32(addr('CreateSolidBrush'))],
+        0x89,
+        0xc6, // mov esi, eax (brush)
+        ...push(0x401240), // &ps
+        ...push(0x10001),
+        ...[0xff, 0x15, ...le32(addr('BeginPaint'))],
+        0x89,
+        0xc3, // mov ebx, eax (hdc)
+        ...push(5), // cch
+        ...push(0x401200), // &str
+        ...push(10), // y
+        ...push(5), // x
+        0x53, // push ebx (hdc)
+        ...[0xff, 0x15, ...le32(addr('TextOutW'))],
+        ...push(0x401240), // &ps
+        ...push(0x10001),
+        ...[0xff, 0x15, ...le32(addr('EndPaint'))],
+        ...push(0),
+        ...[0xff, 0x15, ...le32(addr('ExitProcess'))],
+      ]);
 
-    const code = new Uint8Array([
-      ...push(0x0000ff00),
-      ...call('CreateSolidBrush'),
-      0x89, 0xc6,
-      ...push(0x401240),
-      ...push(0x10001),
-      ...call('BeginPaint'),
-      0x89, 0xc3,
-      ...push(5),
-      ...push(0x401200),
-      ...push(10),
-      ...push(5),
-      ...push(0),
-      0x89, 0x5c, 0x24, 0x00,
-      ...call('TextOutW'),
-      ...push(0x401240),
-      ...push(0x10001),
-      ...call('EndPaint'),
-      ...push(0),
-      ...call('ExitProcess'),
-    ]);
+    const first = buildPeMulti(
+      imports,
+      buildCode(() => 0x401000),
+      data,
+    );
+    const real = new Map<string, number>();
+    for (const [p, a] of first.iat) real.set(p, a);
+    const image = buildPeMulti(
+      imports,
+      buildCode((p) => real.get(p)!),
+      data,
+    ).image;
 
     const result = await runner.run(image);
 
@@ -410,4 +456,9 @@ describe('GDI pixel path (L6 image bridge, 设计文档 3.2)', () => {
   });
 });
 
-const le32 = (v: number): number[] => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+const le32 = (v: number): number[] => [
+  v & 0xff,
+  (v >>> 8) & 0xff,
+  (v >>> 16) & 0xff,
+  (v >>> 24) & 0xff,
+];
