@@ -143,7 +143,21 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       if (h === 0xffffffff) return ok(0); // INVALID_HANDLE_VALUE -> UNKNOWN
       return ok(0);
     },
-    GetConsoleMode: () => ok(1),
+    // GetConsoleMode(HANDLE, LPDWORD lpMode): must fill *lpMode, not just return
+    // TRUE. cmd.exe checks `mode & 7` and `mode & 3` (0x411dbd / 0x427628) to
+    // decide the console is usable; ENABLE_PROCESSED_*|ENABLE_LINE_INPUT (0x7)
+    // satisfies both. Returning TRUE with a stale/garbage mode made cmd longjmp
+    // into its error-recovery path and call _o_exit without running the command.
+    GetConsoleMode: (ctx, host) => {
+      const out = raw(ctx, 1);
+      if (out) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 0x7, true);
+        host.memory.write(out, w);
+      }
+      return ok(1);
+    },
+    SetConsoleMode: () => ok(1),
     GetConsoleOutputCP: () => ok(437),
     SetConsoleOutputCP: () => ok(1),
     GetCPInfo: (ctx, host) => {

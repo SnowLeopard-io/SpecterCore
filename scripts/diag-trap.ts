@@ -286,7 +286,7 @@ async function main(): Promise<void> {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
-      if ([0x40b9f9, 0x40b9fc, 0x40ba01, 0x40ba63, 0x40baa6, 0x40a1c7, 0x40a1f5].includes(eip)) {
+      if ([0x40b9f9, 0x40b9fc, 0x40ba01, 0x40ba06, 0x40ba11, 0x40ba21, 0x40ba2b, 0x40ba4f, 0x40ba52, 0x40ba59, 0x40ba5d, 0x40ba63, 0x40baa6, 0x40a1c7, 0x40a1eb, 0x40a1f5, 0x42d3cd, 0x42d3d2, 0x42d3d8, 0x42d47a, 0x42d47f].includes(eip)) {
         const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
         const rd32 = (a: number) => {
           const b = rt.readBytes(a >>> 0, 4);

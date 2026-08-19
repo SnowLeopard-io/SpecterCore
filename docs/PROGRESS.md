@@ -2,7 +2,7 @@
 
 > **给下一个 agent 的交接入口。** 目标：让 **Windows exe** 在 SpecterCore 的 JIT 里跑起来，最终在 L6 桌面（apps/web）里加载并运行（含控制台输出）。
 > 读完本文件后请读 `packages/core/src/{pe, jit, process, api}/`、`packages/ui/src/` 与 `packages/contracts/src/`。
-> **2026-08-19 交接（Step 13 进行中）：cmd.exe 攻坚——定位并修复了 Step 12 遗留「最后 1 次 cookie FAIL」的两个根因：①`emitXchg`（codegen.ts）把 a 旧值存 L_TMP 但 storeOperand 内部第一步就覆盖 L_TMP → `xchg esp,eax` 静默失效 → __chkstk 未分配栈 → `push ebx` 覆盖 [ebp-4] cookie（**0x40b4c8 FAIL 真正根因**）②`0F 1F /r` 多字节 NOP 不消费 ModRM（x86-decoder.ts）→ 0x40eb20 解码错位 fault。修复后 0x40b4c8/0x40bba9/0x414aa9/0x40b6e3 cookie 全 OK，cmd 推进到 `ApiSetQueryApiSetPresence → RtlCreateUnicodeStringFromAsciiz → 0x42d39c`。当前卡点：**0x42d47a cookie FAIL（ebp=0x7000000）——ApiSetQueryApiSetPresence（无 handler 无 argCount）默认处理向 present 指针（=0x41efeb 帧 [ebp-1]=0x7fffe63）写数据，4 字节覆盖相邻 [ebp]=0x7fffe64 槽（保存的调用者 ebp）→ leave 后 ebp=0x07000000 → 后续全错位**。下一步：查 dispatcher 默认行为确认 → 给 ApiSetQueryApiSetPresence 加 handler（present 只写 1 字节）+ 补 rtlcreateunicodestringfromasciiz argCount:2 → cmd 应能进入 dir 执行。⚠️ 本会话有同事并行修改同一工作区（以文件实际内容为准，提交前 git status 确认）。diag-trap 留了 [ck3]/[ck4] 断点供定位 0x42d47a（用完删）。**
+> **2026-08-19 交接（Step 15 进行中）：cmd.exe 攻坚——Step 14 卡点 0x40baa6（edi=0xfffffff4 当指针）第一个根因已修：delay-load `BrandingFormatString`（winbrand，stdcall 1 参）在 `allocDynamicStub` 里用**未小写** procName 查 `X86_API_ARG_COUNT`（ResolveDelayLoadedAPI 路径不清空）+ 表里缺该条目 → argCount=0 → stub `ret 0` 不 `ret 4` → 参数残留栈 → 0x42d39c epilogue pop edi/esi/ebx 错位。已加 `brandingformatstring:1` + allocDynamicStub 改 `procName.toLowerCase()`，**验证通过**（0x42d39c 正确恢复 edi=0x7ffff9c）。第二个 clobber 已定位：0x40a1f5（0x408a5a 薄包装调进来）内部 `GetConsoleScreenBufferInfo`（2 参 stdcall）**不在 X86_API_ARG_COUNT** → stub `ret 0` → 8 字节泄漏 → epilogue pop 错位（edi=0xfffffff5）。**下一步：补 `getconsolescreenbufferinfo:2` + cmd 控制台族 argCount（writeconsolew:5/readconsolew:4 等，见 Step 15），重跑 → 预期进入 dir 执行。** ⚠️ 本会话有同事并行修改同一工作区（以文件实际内容为准，提交前 git status 确认）。diag-trap 留了 20 个 [bp] 断点供定位（修完删）。**
 
 ## 当前目标（用户需求，2026-08-18 起，2026-08-19 更新）
 
@@ -808,3 +808,58 @@ Step 13 遗留的 0x42d47a cookie FAIL（ebp=0x7000000）已彻底解决，**真
 - **GetOpenFileNameW 文件对话框桥接**（notepad Open/Save）未实现。
 - **文件资源管理器真实化**（用户硬性要求"和我电脑的一样"）未完成。
 - **同事并行修改警告**：packages/bridges/src/graphics.ts、raster.ts、index.ts、packages/contracts/src/bridge/graphics.ts 已被同事修改，本轮未碰。提交前 git status 确认。
+
+---
+
+# Step 15（2026-08-19：cmd.exe 攻坚 —— 修复 delay-load BrandingFormatString argCount bug；第二个 clobber 定位到 0x40a1f5 内部 GetConsoleScreenBufferInfo 缺 argCount）
+
+## 一句话现状
+
+Step 14 的卡点 0x40baa6（edi=0xfffffff4 当指针）**根因已找到并修复第一个**：0x42d39c 经 delay-load 调 winbrand 的 **BrandingFormatString**（stdcall 1 参），但 `allocDynamicStub` 用**未小写**的 procName 查 `X86_API_ARG_COUNT`（ResolveDelayLoadedAPI 路径 guest-process.ts:787 不清空），且表里缺该条目 → argCount=0 → stub `ret 0` 不 `ret 4` → 参数残留栈 → 0x42d39c epilogue `pop edi/esi/ebx` 读错位槽 → edi=0x402bf8（残留参数）→ 后续 `cmp [edi],ebx` OOB。**已修复并验证**（cmd-fix1.log：0x42d39c 现在正确恢复 edi=0x7ffff9c、esp 平衡）。
+
+**第二个 clobber 已定位**：0x40ba11→0x40ba21 之间 `0x408a5a`（0x40ba1c call）→ `0x40a1f5`（0x408a74 call），0x40a1f5 **入口寄存器正确**（edi=0x7ffff9c esi=0x20012f8 ebx=0）但**返回时全错位**（edi=0xfffffff5 esi=0x7fffe8c ebx=0x7ffff9c）——epilogue pop 偏移 8 字节。0x40a1f5 内部调用 `[0x450038]=GetConsoleScreenBufferInfo`（2 参 stdcall）**不在 X86_API_ARG_COUNT** → stub `ret 0` → **8 字节泄漏** → pop edi/esi/ebx 全错位。**修复方案已定（见下），尚未应用。**
+
+## 本轮定位过程（关键证据链）
+
+1. 修 BrandingFormatString 后重跑（cmd-fix1.log）：0x40ba06 处 edi=0x7ffff9c **正确恢复**（Step 14 修复生效）✓；0x42d3cd→0x42d47a 之间 esp=0x7fffe6c 稳定 ✓。
+2. 新 bp 序列 `[0x40b9f9, 0x40ba01, 0x40ba06, 0x40ba11, 0x40ba21, 0x40ba2b, 0x40ba4f, 0x40ba52, 0x40ba59, 0x40ba5d, 0x40ba63, 0x40baa6, 0x40a1c7, 0x40a1eb, 0x40a1f5, 0x42d3cd, 0x42d3d2, 0x42d3d8, 0x42d47a, 0x42d47f]`。
+3. **clobber 窗口**：0x40ba11（edi=0x7ffff9c 正常）→ `0x40ba1c call 0x408a5a` → 0x40a1f5 入口（edi=0x7ffff9c ✓）→ 0x40ba21（edi=0xfffffff5 ✗）。错位值 = 0x40a1f5 epilogue `pop edi/esi/ebx` 读偏移 8 的槽（保存的 edi 落进 ebx）。
+4. **0x40a1f5 内部 API 调用**（api 日志，夹在入口/出口 bp 之间）：`_o__get_osfhandle(0x1)`（**cdecl**，call 后有 `pop ecx` 手动清参）→ `GetFileType` → `GetStdHandle` → `AcquireSRWLockShared` → `GetConsoleMode` → `ReleaseSRWLockShared` → `_o__get_osfhandle(0x1)` → **`GetConsoleScreenBufferInfo(0xfffffff5, 0x7fffe8c)`**（无后续清参 = stdcall，但表里没有 → stub ret 0 → **8 字节泄漏**）→ `FormatMessageW` 等。
+5. IAT 映射（python 解析 cmd.exe 导入表，slot=0x400000+ft+j*4）：`0x450334=_o__get_osfhandle`、`0x450038=GetConsoleScreenBufferInfo`、`0x45001c=WriteConsoleW`、`0x450090=GetLastError`、`0x450154=GlobalAlloc`、`0x45015c=GlobalFree`、`0x450180=GetProcAddress`、`0x450184=GetModuleHandleW`、`0x4504e0=RtlCreateUnicodeStringFromAsciiz`、`0x453020=BrandingFormatString`(delay-load)。
+
+## 本轮修复（第一个已应用并验证；第二个待应用）
+
+### Bug 1（已修复）：BrandingFormatString delay-load argCount 缺失 + 大小写不一致
+- **根因**：`allocDynamicStub`（guest-process.ts:714）`X86_API_ARG_COUNT[procName] ?? 0`——ResolveDelayLoadedAPI 路径（guest-process.ts:787）的 procName 是**原样** `"BrandingFormatString"`，而表键是小写 `brandingformatstring`（还不存在）→ argCount=0 → stub `ret 0`。BrandingFormatString 是 stdcall 1 参，需 `ret 4`。
+- **修复**：
+  - `packages/core/src/pe/mapper.ts`：表加 `'brandingformatstring': 1`（带注释：缺 0 导致栈漂移 → caller pop edi/esi/ebx 错位 → edi=0xfffffff4 伪句柄 → OOB）。
+  - `packages/core/src/process/guest-process.ts` `allocDynamicStub`：`X86_API_ARG_COUNT[procName.toLowerCase()] ?? 0`（与静态导入路径 mapper.ts:631 的 toLowerCase 对齐）。
+- **验证**（cmd-fix1.log）：0x40ba06 edi=0x7ffff9c、esi=0x20012f8、ebx=0 ✓；0x42d39c 内 esp 平衡 ✓；api 日志出现 `kernel32.dll!BrandingFormatString(0x402bf8, ...)`（无 handler 默认返回 0，可接受——cmd 走 `je 0x40ba4f` 错误路径是因为上游 0x42d39c 返回 NULL，不是栈问题）。
+
+### Bug 2（待应用）：GetConsoleScreenBufferInfo 缺 argCount（2 参 stdcall）→ 0x40a1f5 栈泄漏 8 字节
+- **证据**：0x40a1f5 内 `push eax; push ebx; call [0x450038]` 后无 `add esp,8` → 期望 callee ret 8；表里没有 → stub ret 0 → 8 字节泄漏 → epilogue pop 错位。
+- **修复**：mapper.ts 补 `'getconsolescreenbufferinfo': 2`。
+- **同批顺带补齐**（cmd.exe 静态导入里其他控制台 stdcall，都是"call 后无清参"模式，缺了同样栈泄漏）：`writeconsolew: 5, readconsolew: 4, setconsolecursorposition: 2, scrollconsolescreenbufferw: 5, fillconsoleoutputattribute: 5, setconsoletextattribute: 2, flushconsoleinputbuffer: 1, fillconsoleoutputcharacterw: 5, setconsolectrlhandler: 2, getconsolewindow: 0`（对照 `node_modules/.cache/allimports.txt` 里 api-ms-win-core-console-* 与 -console-l2-* 清单逐一核对）。
+- 注意 `_o__get_osfhandle`（cdecl，call 后有 pop ecx 手动清参）**不要加 argCount**（保持 0 默认）。
+
+## 当前卡点 / 下一步（按序）
+
+1. 应用 Bug 2 修复（getconsolescreenbufferinfo:2 + 控制台族 argCount），重新 esbuild 打包 diag-trap，重跑 cmd，确认 0x40a1f5 返回后 edi=0x7ffff9c 保持、越过 0x40baab。
+2. 若仍 fault，继续检查 0x40a1f5 内 0x40dafc / 0x40a92f 等 guest 内部调用链是否有同类问题。
+3. 预期 cmd 继续推进到 `dir` 执行（FindFirstFileW 已实现）→ 虚拟盘 C:\Windows 输出。
+4. 之后：headless clean exit 验收 → L6 内置 Command Prompt（独立窗口 + stdin/stdout 桥接：WriteFile→stdout 回流、ReadFile→stdin 下发）。
+5. 回归：typecheck + vitest + lint + notepad probe-mui cleanExit。
+
+## 诊断工具 / 断点（⚠️ 临时断点未清理，修完 Bug 2 后删除）
+
+- `scripts/diag-trap.ts` 当前含临时 [bp] 列表（上记 20 个地址，onStep 内 eip 命中即打印 edi/esi/ebx/ebp/esp/[ebp-0x60]/[edi]/[edi+8]）。**定位完成后全部移除**（保留 [api]/[trace]/dumpFault/maxSteps 8M/BK_ARGS/BK_NO_MUI）。
+- 日志：`node_modules/.cache/cmd-bp.log`、`cmd-bp2.log`、`cmd-bp3.log`（修复前）、`cmd-fix1.log`（BrandingFormatString 修复后）。`allimports.txt`（cmd.exe 完整静态导入清单）。
+- IAT 槽（本轮新增确认）：`0x450334=_o__get_osfhandle`、`0x450038=GetConsoleScreenBufferInfo`、`0x45001c=WriteConsoleW`、`0x450154=GlobalAlloc`、`0x45015c=GlobalFree`、`0x453020=BrandingFormatString`（delay-load，描述符 0x432c64，dll=`ext-ms-win-branding-winbrand-l1-1-0.dll`）。
+- 反汇编辅助：0x408a5a（0x40a1f5 薄包装）、0x40a1f5（字符串/错误处理函数，epilogue 0x40a2ce 起 pop edi/esi/ebx）、0x40a1c7（0x40a1e6 call 0x40a1f5）。
+
+## 未解 / 注意点（继承 + 新增）
+
+- **0x42d39c 仍返回 NULL**（api 日志 BrandingFormatString 返回 0）→ 0x40ba33 je 0x40ba4f 错误路径 → 后续走 0x40a1c7/0x40a1f5。这是 cmd 内部逻辑（格式字符串失败），不是栈问题；修完 Bug 2 再看是否仍 fault。
+- 还有第二处 `ResolveDelayLoadedAPI(0x432cc4, 0x453004, ...)`（另一个 delay-load 槽，函数未识别，fix1 日志中先于 BrandingFormatString 出现）。
+- `status=exit eip=0x0` 现在不代表成功：判定成功 = 无 `TerminateProcess(0xc0000409)` + 出现 `dir` 输出。
+- 同事并行修改警告：packages/bridges/src/graphics.ts、raster.ts、index.ts、packages/contracts/src/bridge/graphics.ts 已被同事修改，本轮未碰。提交前 git status 确认。

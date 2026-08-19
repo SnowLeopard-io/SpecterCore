@@ -711,7 +711,7 @@ export class GuestProcessRunner {
           break;
         }
       }
-      const argCount = X86_API_ARG_COUNT[procName] ?? 0;
+      const argCount = X86_API_ARG_COUNT[procName.toLowerCase()] ?? 0;
       const index = stubs.length;
       const stubAddress = dynCursor();
       const stubLen = argCount === 0 ? 8 : 10;
@@ -2146,6 +2146,45 @@ export class GuestProcessRunner {
     this.interceptor.hook('ucrtbase.dll', 'longjmp', longjmpHandler);
     this.interceptor.hook('ucrtbase.dll', '_longjmp', longjmpHandler);
     this.interceptor.hook('msvcrt.dll', 'longjmp', longjmpHandler);
+
+    // ------------------------------------------------------------------
+    // _setjmp3: the MSVC x86 companion of longjmp. setjmp/longjmp power
+    // cmd.exe's error-recovery: a setjmp saves the register state, and the
+    // error path calls longjmp to "return" non-zero from the setjmp call
+    // site. Without this handler the jmp_buf stays all zeros, so longjmp
+    // jumps to eip=0 and the process traps. Signature (cdecl, variadic):
+    //   int _setjmp3(void* env, int savemask, ...);
+    // We write the same MSVC x86 layout longjmp reads:
+    //   [0]=Ebp [4]=Ebx [8]=Edi [12]=Esi [16]=Esp [20]=Eip
+    // and return 0 (setjmp returns 0 the first time). At trap time esp
+    // points at the return address (pushed by the call); arg0 sits at
+    // [esp+4]. The stub is `ret 0` (cdecl, caller cleans the args), so the
+    // saved Esp must be esp+4 — the caller's esp right after the call
+    // returns, with its own args still on the stack to pop.
+    // ------------------------------------------------------------------
+    const setjmp3Handler: ApiHandler = (ctx, host) => {
+      const env = (ctx.rawArgs[0] ?? 0) >>> 0;
+      if (!env) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const espAtTrap = runtime.getReg('esp') >>> 0;
+      const eip = runtime.readInt32(espAtTrap) >>> 0; // return address = setjmp call site
+      const ebp = runtime.getReg('ebp') >>> 0;
+      const ebx = runtime.getReg('ebx') >>> 0;
+      const edi = runtime.getReg('edi') >>> 0;
+      const esi = runtime.getReg('esi') >>> 0;
+      const esp = (espAtTrap + 4) >>> 0;
+      runtime.writeInt32(env + 0, ebp);
+      runtime.writeInt32(env + 4, ebx);
+      runtime.writeInt32(env + 8, edi);
+      runtime.writeInt32(env + 12, esi);
+      runtime.writeInt32(env + 16, esp);
+      runtime.writeInt32(env + 20, eip);
+      dbg(
+        `setjmp3 env=0x${env.toString(16)} eip=0x${eip.toString(16)} esp=0x${esp.toString(16)} ` +
+          `ebp=0x${ebp.toString(16)} ebx=0x${ebx.toString(16)} edi=0x${edi.toString(16)} esi=0x${esi.toString(16)}`,
+      );
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook('ucrtbase.dll', '_setjmp3', setjmp3Handler);
 
     // ------------------------------------------------------------------
     // _initterm / _initterm_e: the CRT calls these to run the table of

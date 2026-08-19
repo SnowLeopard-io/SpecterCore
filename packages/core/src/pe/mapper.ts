@@ -57,6 +57,11 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getstdhandle': 1,
   'getconsoleoutputcp': 0,
   'setconsoleoutputcp': 1,
+  // BrandingFormatString (winbrand.dll, delay-loaded): stdcall, 1 arg.
+  // A missing/0 argCount makes the dynamic stub `ret 0`, leaving the pushed
+  // arg on the stack — the caller's `pop edi/esi/ebx` then read shifted slots
+  // and edi ends up a pseudo-handle (0xfffffff4) -> OOB in cmd.exe.
+  'brandingformatstring': 1,
   'exitprocess': 1,
   'createfilea': 7,
   'createfilew': 7,
@@ -417,6 +422,28 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getconsoletitlea': 2,
   'setconsoletitlew': 1,
   'setconsoletitlea': 1,
+  // Console I/O family (cmd.exe 0x40a1f5 = console/error-format helper):
+  // GetConsoleScreenBufferInfo(hConsoleOutput, LPSCREEN_BUFFER_INFO) = 2-arg
+  // stdcall. Missing -> stub ret 0 -> 8 bytes leaked -> 0x40a1f5 epilogue's
+  // pop edi/esi/ebx read shifted slots (saved edi lands in ebx) -> the caller
+  // then derefs a pseudo-handle (0xfffffff4) -> OOB at 0x40baa6.
+  'getconsolescreenbufferinfo': 2,
+  'writeconsolew': 5,
+  'writeconsolea': 5,
+  'readconsolew': 4,
+  'readconsolea': 4,
+  'setconsolecursorposition': 2,
+  'getconsolecursorinfo': 2,
+  'scrollconsolescreenbufferw': 5,
+  'fillconsoleoutputattribute': 5,
+  'fillconsoleoutputcharacterw': 5,
+  'setconsoletextattribute': 2,
+  'flushconsoleinputbuffer': 1,
+  'setconsolectrlhandler': 2,
+  'getconsolewindow': 0,
+  'setconsoleactivebuffer': 1,
+  'getconsoleprocesslist': 2,
+  'setconsolecp': 1,
   'lstrlenw': 1,
   'lstrlena': 1,
   'rtldllshutdowninprogress': 0,
