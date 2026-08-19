@@ -2055,6 +2055,50 @@ export class GuestProcessRunner {
     });
 
     // ------------------------------------------------------------------
+    // longjmp: non-local goto used by cmd.exe's error-recovery paths
+    // (e.g. when a command fails or CreateFileW gets a bad path). The
+    // default no-op handler returns 0 without restoring registers or
+    // jumping, so cmd falls through the error path and faults into data
+    // sections. MSVC x86 jmp_buf layout (first 6 dwords):
+    //   [0]=Ebp [4]=Ebx [8]=Edi [12]=Esi [16]=Esp [20]=Eip
+    // Restore them, set EAX = value (never 0 per C standard), and jump
+    // to the saved EIP (the setjmp return site).
+    // ------------------------------------------------------------------
+    const longjmpHandler: ApiHandler = (ctx, host) => {
+      const jmpBuf = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const value = (ctx.rawArgs[1] ?? 0) >>> 0;
+      if (!jmpBuf) return { returnValue: 0, errorCode: E.NO_ERROR };
+      // Dump first 64 bytes to determine MSVC jmp_buf layout
+      const dump: string[] = [];
+      for (let i = 0; i < 16; i++) {
+        dump.push(`[${i * 4}]=0x${(runtime.readInt32(jmpBuf + i * 4) >>> 0).toString(16)}`);
+      }
+      dbg(`longjmp buf=0x${jmpBuf.toString(16)} val=${value}: ${dump.join(' ')}`);
+      const ebp = runtime.readInt32(jmpBuf + 0);
+      const ebx = runtime.readInt32(jmpBuf + 4);
+      const edi = runtime.readInt32(jmpBuf + 8);
+      const esi = runtime.readInt32(jmpBuf + 12);
+      const esp = runtime.readInt32(jmpBuf + 16);
+      const eip = runtime.readInt32(jmpBuf + 20);
+      dbg(`longjmp buf=0x${jmpBuf.toString(16)} val=${value} -> eip=0x${(eip>>>0).toString(16)} esp=0x${(esp>>>0).toString(16)}`);
+      runtime.setReg('ebp', ebp);
+      runtime.setReg('ebx', ebx);
+      runtime.setReg('edi', edi);
+      runtime.setReg('esi', esi);
+      runtime.setReg('esp', esp);
+      runtime.setEip(eip);
+      // longjmp must not return 0; return value goes in EAX (dispatcher
+      // will overwrite EAX with returnValue after the handler returns, so
+      // set it here too in case the dispatcher path changes).
+      const ret = value === 0 ? 1 : value;
+      runtime.setReg('eax', ret);
+      return { returnValue: ret, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook('ucrtbase.dll', 'longjmp', longjmpHandler);
+    this.interceptor.hook('ucrtbase.dll', '_longjmp', longjmpHandler);
+    this.interceptor.hook('msvcrt.dll', 'longjmp', longjmpHandler);
+
+    // ------------------------------------------------------------------
     // _initterm / _initterm_e: the CRT calls these to run the table of
     // static initializers (which includes __security_init_cookie and the C
     // runtime constructors). Not implementing them means __security_cookie

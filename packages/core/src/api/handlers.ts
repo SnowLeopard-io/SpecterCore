@@ -133,6 +133,16 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
           return ok(raw(ctx, 0));
       }
     },
+    // GetFileType(HANDLE): cmd.exe probes stdin/stdout/stderr with this after
+    // _get_osfhandle. The standard pseudo-handles (-10/-11/-12) are consoles,
+    // so return FILE_TYPE_CHAR (2) instead of 0 (UNKNOWN) — otherwise cmd
+    // thinks the console is broken and longjmps to an uninitialised jmp_buf.
+    GetFileType: (ctx) => {
+      const h = raw(ctx, 0) >>> 0;
+      if (h === 0xfffffff6 || h === 0xfffffff5 || h === 0xfffffff4) return ok(2); // FILE_TYPE_CHAR
+      if (h === 0xffffffff) return ok(0); // INVALID_HANDLE_VALUE -> UNKNOWN
+      return ok(0);
+    },
     GetConsoleMode: () => ok(1),
     GetConsoleOutputCP: () => ok(437),
     SetConsoleOutputCP: () => ok(1),
@@ -454,6 +464,25 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     },
     _o_srand: () => ok(0),
     srand: () => ok(0),
+    // _o__get_osfhandle(int fd): maps a CRT file descriptor to an OS handle.
+    // cmd.exe calls this for fd 0/1/2 during console init; returning 0 (the
+    // default) makes GetFileType(0) return FILE_TYPE_UNKNOWN and cmd takes
+    // its error-recovery path (longjmp to an uninitialised jmp_buf -> eip=0
+    // trap). Return the standard pseudo-handles so cmd sees a console.
+    _o__get_osfhandle: (ctx) => {
+      const fd = raw(ctx, 0);
+      if (fd === 0) return ok(0xfffffff6); // STD_INPUT_HANDLE (-10)
+      if (fd === 1) return ok(0xfffffff5); // STD_OUTPUT_HANDLE (-11)
+      if (fd === 2) return ok(0xfffffff4); // STD_ERROR_HANDLE (-12)
+      return ok(0xffffffff); // INVALID_HANDLE_VALUE
+    },
+    _get_osfhandle: (ctx) => {
+      const fd = raw(ctx, 0);
+      if (fd === 0) return ok(0xfffffff6);
+      if (fd === 1) return ok(0xfffffff5);
+      if (fd === 2) return ok(0xfffffff4);
+      return ok(0xffffffff);
+    },
   };
   interceptor.hookBatch('ucrtbase.dll', ucrtbase);
 }

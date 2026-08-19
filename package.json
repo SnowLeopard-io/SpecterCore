@@ -22,6 +22,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "run:exe": "esbuild scripts/run-exe.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/run-exe.mjs && node node_modules/.cache/run-exe.mjs",
+    "bench": "esbuild scripts/bench.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/bench.mjs && node node_modules/.cache/bench.mjs",
     "build:sample-exe": "esbuild scripts/build-sample-exe.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/build-sample-exe.mjs && node node_modules/.cache/build-sample-exe.mjs",
     "build:x64-exe": "esbuild scripts/build-x64-exe.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/build-x64-exe.mjs && node node_modules/.cache/build-x64-exe.mjs",
     "lint": "eslint .",
