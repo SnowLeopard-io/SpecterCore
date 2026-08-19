@@ -282,10 +282,17 @@ async function main(): Promise<void> {
       }
     },
     onOutput: (bytes, stderr) => process[stderr ? 'stderr' : 'stdout'].write(Buffer.from(bytes)),
-    onStep: (eip) => {
+    onStep: (eip, rt) => {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
+      // [diag3] Temporary: trace edi around call [0x45015c] at 0x40ba5d
+      if (eip === 0x40ba5d || eip === 0x40ba63 || eip === 0x40baa6) {
+        const edi = rt.getReg('edi');
+        const ebx = rt.getReg('ebx');
+        const eax = rt.getReg('eax');
+        console.error(`[diag3] eip=0x${eip.toString(16)} edi=0x${(edi >>> 0).toString(16)} ebx=0x${(ebx >>> 0).toString(16)} eax=0x${(eax >>> 0).toString(16)}`);
+      }
     },
     onFault: (rt, res) => {
       console.error('[trace] last blocks:');

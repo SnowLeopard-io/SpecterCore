@@ -33,7 +33,7 @@ export interface ExecutorOptions {
    * lets a runner trace the exact path a guest takes, e.g. to explain why a
    * process returned without calling ExitProcess.
    */
-  onStep?: (eip: number) => void;
+  onStep?: (eip: number, runtime: WasmRuntimeImpl) => void;
 }
 
 const DEFAULT_MAX_STEPS = 50_000_000;
@@ -62,7 +62,7 @@ export class Executor {
       if (address === 0 || address === 0xcccccccc) {
         return { status: 'exit', eip: address };
       }
-      this.options?.onStep?.(address);
+      this.options?.onStep?.(address, this.runtime);
       const code = this.runtime.readBytes(address, this.readAhead);
       if (code.byteLength === 0) {
         return { status: 'exit', eip: address };

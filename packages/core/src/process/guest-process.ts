@@ -157,7 +157,7 @@ export interface GuestProcessOptions {
   readFile?: (path: string) => Promise<Uint8Array | null>;
   onOutput?: (bytes: Uint8Array, stderr: boolean) => void;
   /** Forwarded to the executor: per-block trace (diagnostics). */
-  onStep?: (eip: number) => void;
+  onStep?: (eip: number, runtime: WasmRuntimeImpl) => void;
   /**
    * Invoked with the runtime + result when the guest faults (memory OOB,
    * unsupported opcode, ...). Lets CLIs and the L6 desktop show register state
