@@ -286,6 +286,17 @@ async function main(): Promise<void> {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
+      if ([0x40b9f9, 0x40b9fc, 0x40ba01, 0x40ba63, 0x40baa6, 0x40a1c7, 0x40a1f5].includes(eip)) {
+        const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
+        const rd32 = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const e60 = rt.getReg('ebp') - 0x60;
+        console.error(
+          `[bp] eip=0x${eip.toString(16)} edi=${r('edi')} esi=${r('esi')} ebx=${r('ebx')} ebp=${r('ebp')} esp=${r('esp')} [ebp-0x60]=0x${(rd32(e60) >>> 0).toString(16)} [edi]=0x${(rd32(rt.getReg('edi')) >>> 0).toString(16)} [edi+8]=0x${(rd32(rt.getReg('edi') + 8) >>> 0).toString(16)}`,
+        );
+      }
     },
     onFault: (rt, res) => {
       console.error('[trace] last blocks:');
