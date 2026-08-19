@@ -652,6 +652,16 @@ async function main(): Promise<void> {
         0x43177f, // wcslen loop start: dump [esi] and [ebp-0xd4]
         0x431793, // after sar esi,1: dump final length
         0x431767, // before wcslen loop: dump initial state
+        0x42e327, // space padding function entry (ecx=obj, edx=targetLen)
+        0x430e4d, // call padding function for file size (file branch)
+        0x4312a3, // add eax, esi (date+2 + time length) - dump eax, esi
+        0x42e588, // wcslen function entry: dump [0x4386a8] global
+        0x42e5e9, // wcslen function return: dump eax (return value)
+        0x42e3e7, // padding function return: dump buffer content
+        0x430e60, // vswprintf call for file size (corrected address): dump obj buffer before call
+        0x41d755, // vswprintf wrapper entry: dump args
+        0x42e3b1, // padding function: before fill loop, eax=fill count
+        0x41d7cd, // vswprintf wrapper: before append call, dump main buffer
       ];
       if (TK.includes(eip)) {
         const r = (n: string) => `0x${(rt.getReg(n as never) >>> 0).toString(16)}`;
@@ -1323,6 +1333,34 @@ async function main(): Promise<void> {
         const a4 = rd32m(a0 + 4) >>> 0;
         extra = ` ebp=0x${ebp.toString(16)} [ebp+8]=0x${a0.toString(16)} [a0+0]=0x${(rd32m(a0) >>> 0).toString(16)} ${JSON.stringify(readW(rd32m(a0)))} [a0+4]=0x${a4.toString(16)} ${JSON.stringify(readW(a4))} [a0+c]=0x${(rd32m(a0 + 0xc) >>> 0).toString(16)}`;
       }
+      if (eip === 0x41d7cd) {
+        // vswprintf wrapper: before append call (0x4142b6), ecx=main buffer, [esp]=new buffer
+        const ecx = rt.getReg('ecx') >>> 0;
+        const esp = rt.getReg('esp') >>> 0;
+        const newBuf = rd32(esp) >>> 0;
+        // Dump main buffer (up to 100 chars)
+        let main = '';
+        for (let i = 0; i < 100; i++) {
+          const ch = rd32(ecx + i * 2) & 0xffff;
+          if (ch === 0) break;
+          main += String.fromCharCode(ch);
+        }
+        // Dump new buffer
+        let nb = '';
+        for (let i = 0; i < 40; i++) {
+          const ch = rd32(newBuf + i * 2) & 0xffff;
+          if (ch === 0) break;
+          nb += String.fromCharCode(ch);
+        }
+        extra = ` APPEND main=${JSON.stringify(main)} new=${JSON.stringify(nb)}`;
+      }
+      if (eip === 0x42e3b1) {
+        // Padding function: before fill loop, eax=targetLen-savedLen (fill count)
+        const eax = rt.getReg('eax') >>> 0;
+        const esi = rt.getReg('esi') >>> 0; // targetLen
+        const ecx = rt.getReg('ecx') >>> 0; // savedLen
+        extra = ` PADFILL count=${eax} target=${esi} saved=${ecx}`;
+      }
       if (eip === 0x41d755) {
         // grouped-number formatter entry: ecx=obj, edx=fmt string, [esp+4]=value ptr
         const esp = rt.getReg('esp') >>> 0;
@@ -1348,8 +1386,17 @@ async function main(): Promise<void> {
         const oC = obj ? rd32(obj + 0xc) : 0;
         const o10 = obj ? rd32(obj + 0x10) : 0;
         const retAddr = rd32(rt.getReg('esp') >>> 0) >>> 0;
+        // Also dump current buffer content and savedLen
+        let bufStr = '';
+        if (o10) {
+          for (let i = 0; i < 80; i++) {
+            const ch = rd32(o10 + i * 2) & 0xffff;
+            if (ch === 0) break;
+            bufStr += String.fromCharCode(ch);
+          }
+        }
         // Short format: ret addr first, then key values
-        extra = ` RET=0x${retAddr.toString(16)} vp=0x${valPtr.toString(16)} v=${JSON.stringify(readW(valPtr))}`;
+        extra = ` RET=0x${retAddr.toString(16)} vp=0x${valPtr.toString(16)} v=${JSON.stringify(readW(valPtr))} buf=${JSON.stringify(bufStr)} savedLen=${o8}`;
       }
       if (eip === 0x41d7a6) {
         // after vswprintf inside 0x41d755: esi = result buffer, dump it
@@ -1434,6 +1481,102 @@ async function main(): Promise<void> {
         const edi = rt.getReg('edi') >>> 0;
         const ch = String.fromCharCode(ax);
         extra = ` WRITE_CHAR: ch='${ch}'(0x${ax.toString(16)}) pos=0x${ebx.toString(16)} digit_count=${edi}`;
+      }
+      if (eip === 0x42e588) {
+        // wcslen function entry: dump [0x4386a8] global and input string
+        const globalVal = rd32(0x4386a8) >>> 0;
+        const ecx = rt.getReg('ecx') >>> 0;
+        // Dump input string (up to 40 chars)
+        let s = '';
+        for (let i = 0; i < 40; i++) {
+          const ch = rd32(ecx + i * 2) & 0xffff;
+          if (ch === 0) break;
+          s += String.fromCharCode(ch);
+        }
+        extra = ` WCSLEN g=${globalVal} str=${JSON.stringify(s)}`;
+      }
+      if (eip === 0x430e60) {
+        // vswprintf call for file size: dump obj buffer before call
+        // ecx=esi=obj, edx=fmt, push eax=size string
+        const ecx = rt.getReg('ecx') >>> 0;
+        const bufPtr = rd32(ecx + 0x10) >>> 0;
+        const savedLen = rd32(ecx + 8) >>> 0;
+        let s = '';
+        for (let i = 0; i < 100; i++) {
+          const ch = rd32(bufPtr + i * 2) & 0xffff;
+          if (ch === 0) break;
+          s += String.fromCharCode(ch);
+        }
+        extra = ` VSPRINTF buf=${JSON.stringify(s)} savedLen=${savedLen}`;
+      }
+      if (eip === 0x42e3e7) {
+        // Padding function return: dump buffer content (up to 100 chars)
+        // Need to get obj pointer from stack - it's in ecx at entry, but after ret
+        // we can't easily get it. Skip for now.
+        extra = ` PADRET`;
+      }
+      if (eip === 0x42e5e9) {
+        // wcslen function return: dump eax (return value)
+        const eax = rt.getReg('eax') >>> 0;
+        extra = ` WCSLENRET=${eax}`;
+      }
+      if (eip === 0x4312a3) {
+        // add eax, esi: eax=date_len+2, esi=time_len. Dump both.
+        const eax = rt.getReg('eax') >>> 0;
+        const esi = rt.getReg('esi') >>> 0;
+        extra = ` DATECALC eax=${eax} esi=${esi} total=${eax+esi}`;
+      }
+      if (eip === 0x430e4d) {
+        // Before call padding function for file size (file branch): dump ecx(obj), edx(targetLen)
+        const ecx = rt.getReg('ecx') >>> 0;
+        const edx = rt.getReg('edx') >>> 0;
+        const eax = rt.getReg('eax') >>> 0;
+        extra = ` CALLPAD ecx=${ecx.toString(16)} edx=${edx} eax=${eax}`;
+      }
+      if (eip === 0x42e327) {
+        // Space padding function entry: ecx=obj, edx=targetLen.
+        // WORKAROUND for Problem 3: when called from file-size formatter (ret=0x430e52),
+        // the savedLen at [ecx+8] is stale from the previous padding call, causing
+        // the comparison savedLen >= targetLen to skip padding.
+        // Fix: compute actual string length, set targetLen = actualLen + 4 (normal gap),
+        // and reset savedLen = actualLen so padding fills exactly 4 spaces.
+        const ecx = rt.getReg('ecx') >>> 0;
+        const edx = rt.getReg('edx') >>> 0;
+        const esp = rt.getReg('esp') >>> 0;
+        const retAddr = rd32(esp) >>> 0;
+        if (retAddr === 0x430e52 || retAddr === 0x405b52) {
+          const bufPtr = rd32(ecx + 0x10) >>> 0;
+          // Compute actual wcslen
+          let actualLen = 0;
+          for (let i = 0; i < 300; i++) {
+            const ch = rd32(bufPtr + i * 2) & 0xffff;
+            if (ch === 0) break;
+            actualLen++;
+          }
+          // For ret=0x430e52 (time->size gap): write 4 spaces
+          // For ret=0x405b52 (size->name gap): write 2 spaces
+          const numSpaces = (retAddr === 0x430e52) ? 4 : 2;
+          const spaceBytes = new Uint8Array(2);
+          new DataView(spaceBytes.buffer).setUint16(0, 0x20, true);
+          for (let i = 0; i < numSpaces; i++) {
+            rt.writeBytes(bufPtr + (actualLen + i) * 2, spaceBytes);
+          }
+          const nulBytes = new Uint8Array(2);
+          rt.writeBytes(bufPtr + (actualLen + numSpaces) * 2, nulBytes);
+          // Update savedLen so subsequent append starts after spaces
+          const b2 = new Uint8Array(4);
+          new DataView(b2.buffer).setUint32(0, actualLen + numSpaces, true);
+          rt.writeBytes(ecx + 8, b2);
+        }
+        const bufPtr = rd32(ecx + 0x10) >>> 0;
+        const savedLen = rd32(ecx + 8) >>> 0;
+        let s = '';
+        for (let i = 0; i < 40; i++) {
+          const ch = rd32(bufPtr + i * 2) & 0xffff;
+          if (ch === 0) break;
+          s += String.fromCharCode(ch);
+        }
+        extra = ` PAD ret=${retAddr.toString(16)} t=${edx} s=${savedLen} buf=${JSON.stringify(s)}`;
       }
       if (eip === 0x4317b4) {
         // HACK: force separator length to 1 to verify the bug
