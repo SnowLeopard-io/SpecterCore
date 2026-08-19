@@ -407,6 +407,16 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'formatmessagea': 7,
   'formatmessagew': 7,
   'getconsolecp': 0,
+  // GetConsoleTitleW/A(LPTSTR lpConsoleTitle, DWORD nSize) — 2-arg stdcall.
+  // Missing -> stub ret 0 -> 8 bytes leaked -> caller's esp drifts -> every
+  // later push/call lands at the wrong slot -> the next function's EBP comes
+  // out as 0x07000000 (cmd.exe: 0x40b991 call [0x450044]=GetConsoleTitleW,
+  // then 0x40ba01 call 0x42d39c reads a garbage EBP -> [ebp-4] cookie copy
+  // lands at the wrong address -> __security_check_cookie FAIL @0x42d47a).
+  'getconsoletitlew': 2,
+  'getconsoletitlea': 2,
+  'setconsoletitlew': 1,
+  'setconsoletitlea': 1,
   'lstrlenw': 1,
   'lstrlena': 1,
   'rtldllshutdowninprogress': 0,
@@ -505,6 +515,17 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'strncmp': 0,
   'strncpy': 0,
   'memcmp': 0,
+  // ApiSetQueryApiSetPresence(PCWSTR Namespace, PBOOLEAN Present) — 2-arg
+  // stdcall (api-ms-win-core-apiquery -> kernel32). Missing argCount made the
+  // stub `ret 0`, leaking 8 bytes; the default no-handler return (0) made cmd
+  // treat it as success and the Present output slot (a stack byte adjacent to
+  // the saved caller EBP) was left uninitialised, but the real corruption came
+  // from the 8-byte stack drift shifting the caller's frame. Declare explicitly.
+  'apisetqueryapisetpresence': 2,
+  // RtlCreateUnicodeStringFromAsciiz(PUNICODE_STRING Dest, PCSTR Src) — 2-arg
+  // stdcall (ntdll). Missing argCount -> stub ret 0 -> 8 bytes leaked per call,
+  // drifting the caller's stack in cmd's string-init path (0x42d3e7).
+  'rtlcreateunicodestringfromasciiz': 2,
 };
 export interface ApiStub {
   index: number;

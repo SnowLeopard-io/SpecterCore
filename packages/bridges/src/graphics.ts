@@ -1,37 +1,84 @@
 import type {
+  BkMode,
+  ClipRegion,
   Color,
+  D3DBridge,
   DeviceCaps,
   Dispose,
-  D3DBridge,
   FontSpec,
   GdiBridge,
   OglBridge,
+  Point,
   Rect,
+  WinError,
 } from '@bk/contracts';
 import { WinError as E } from '@bk/contracts';
 import { nextId } from '@bk/shared';
+import { GdiSurface, ROP_INDEX_COPY, ROP_INDEX_PATCOPY, ropIndex } from './raster';
 
 const NOT_IMPLEMENTED = E.ERROR_NOT_IMPLEMENTED;
 
 /**
- * A GDI bridge that returns ERROR_NOT_IMPLEMENTED for every operation.
- * Serves as the P0 placeholder until the real canvas/WebGPU renderer lands (P3).
+ * 空 GDI 桥接：全部返回 NOT_IMPLEMENTED（占位，直到真实渲染器接入）。
  */
 export class NullGdiBridge implements GdiBridge {
   async createDC(_name: string): Promise<number> {
     return 0;
   }
+  async createCompatibleDC(_dc: number): Promise<number> {
+    return 0;
+  }
   async deleteDC(_dc: number): Promise<void> {}
-  async textOut(_dc: number, _x: number, _y: number, _text: string, _font?: FontSpec): Promise<number> {
+  async textOut(_dc: number, _x: number, _y: number, _text: string, _font?: FontSpec): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
-  async bitBlt(
-    _destDc: number,
-    _destRect: Rect,
-    _srcDc: number,
-    _srcRect: Rect,
-    _rop: number,
-  ): Promise<number> {
+  async setTextColor(_dc: number, _color: Color): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async setBkColor(_dc: number, _color: Color): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async setBkMode(_dc: number, _mode: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async lineTo(_dc: number, _x0: number, _y0: number, _x1: number, _y1: number, _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async fillRect(_dc: number, _rect: Rect, _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async frameRect(_dc: number, _rect: Rect, _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async ellipse(_dc: number, _bounds: Rect, _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async frameEllipse(_dc: number, _bounds: Rect, _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async roundRect(_dc: number, _bounds: Rect, _rx: number, _ry: number, _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async polyline(_dc: number, _points: Point[], _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async polygon(_dc: number, _points: Point[], _color: Color, _rop?: number): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async setPixel(_dc: number, _x: number, _y: number, _color: Color): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async setClip(_dc: number, _region: ClipRegion | null): Promise<void> {}
+  async getClip(_dc: number): Promise<ClipRegion | null> {
+    return null;
+  }
+  async saveDC(_dc: number): Promise<number> {
+    return 0;
+  }
+  async restoreDC(_dc: number, _saved?: number): Promise<number> {
+    return 0;
+  }
+  async bitBlt(_destDc: number, _destRect: Rect, _srcDc: number, _srcRect: Rect, _rop: number): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
   async stretchBlt(
@@ -40,13 +87,10 @@ export class NullGdiBridge implements GdiBridge {
     _srcDc: number,
     _srcRect: Rect,
     _rop: number,
-  ): Promise<number> {
+  ): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
-  async patBlt(_dc: number, _rect: Rect, _color: Color, _rop: number): Promise<number> {
-    return NOT_IMPLEMENTED;
-  }
-  async setPixel(_dc: number, _x: number, _y: number, _color: Color): Promise<number> {
+  async patBlt(_dc: number, _rect: Rect, _color: Color, _rop: number): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
   async getDeviceCaps(_dc: number): Promise<DeviceCaps> {
@@ -58,24 +102,89 @@ export class NullGdiBridge implements GdiBridge {
   }
 }
 
+interface GdiDcState {
+  textColor: Color;
+  bkColor: Color;
+  bkMode: number;
+  font: FontSpec | null;
+  penColor: Color;
+  clip: ClipRegion | null;
+}
+
+interface GdiDc {
+  surface: GdiSurface;
+  state: GdiDcState;
+  saveStack: GdiDcState[];
+  canvas: HTMLCanvasElement | null;
+}
+
+const DEFAULT_STATE: GdiDcState = {
+  textColor: { r: 0, g: 0, b: 0, a: 255 },
+  bkColor: { r: 255, g: 255, b: 255, a: 255 },
+  bkMode: 1, // BkMode.TRANSPARENT
+  font: null,
+  penColor: { r: 0, g: 0, b: 0, a: 255 },
+  clip: null,
+};
+
+function cloneState(state: GdiDcState): GdiDcState {
+  return {
+    textColor: { ...state.textColor },
+    bkColor: { ...state.bkColor },
+    bkMode: state.bkMode,
+    font: state.font ? { ...state.font } : null,
+    penColor: { ...state.penColor },
+    clip: state.clip ? { type: state.clip.type, rect: { ...state.clip.rect } } : null,
+  };
+}
+
+const RGB = (c: Color): string => `rgb(${c.r & 0xff},${c.g & 0xff},${c.b & 0xff})`;
+
 /**
- * Minimal GDI bridge rendered onto a 2D canvas.
- * Demonstrates the DC/text/bitblt pipeline end-to-end; full GDI raster ops are P3.
+ * 基于软件光栅化器（GdiSurface）的 GDI 桥接，通过 2D canvas 呈现。
+ * 全 ROP（ROP2/ROP3）、裁剪、双缓冲（内存 DC）、形状与文本绘制。
  */
 export class CanvasGdiBridge implements GdiBridge {
-  private readonly dcs = new Map<number, HTMLCanvasElement>();
+  private readonly dcs = new Map<number, GdiDc>();
   private readonly invalidateHandlers = new Set<(dc: number, rect: Rect) => void>();
+  private readonly textCtx: CanvasRenderingContext2D | null;
 
-  constructor(private readonly surface: HTMLCanvasElement) {}
+  constructor(private readonly display: HTMLCanvasElement) {
+    this.textCtx = typeof document !== 'undefined' ? display.getContext('2d') : null;
+  }
+
+  private requireDc(dc: number): GdiDc {
+    const rec = this.dcs.get(dc);
+    if (!rec) throw new Error(`Invalid DC: ${dc}`);
+    return rec;
+  }
+
+  private fullRect(dc: number): Rect {
+    const { surface } = this.requireDc(dc);
+    return { x: 0, y: 0, width: surface.width, height: surface.height };
+  }
+
+  private notify(dc: number, rect: Rect): void {
+    for (const handler of this.invalidateHandlers) handler(dc, rect);
+  }
 
   async createDC(name: string): Promise<number> {
-    if (typeof document === 'undefined') return 0;
-    const canvas = document.createElement('canvas');
-    canvas.width = 800;
-    canvas.height = 600;
-    canvas.dataset.dcName = name;
+    const surface = new GdiSurface(800, 600);
     const handle = nextId();
-    this.dcs.set(handle, canvas);
+    this.dcs.set(handle, { surface, state: cloneState(DEFAULT_STATE), saveStack: [], canvas: null });
+    void name;
+    return handle;
+  }
+
+  async createCompatibleDC(dc: number): Promise<number> {
+    const { surface } = this.requireDc(dc);
+    const handle = nextId();
+    this.dcs.set(handle, {
+      surface: new GdiSurface(surface.width, surface.height),
+      state: cloneState(DEFAULT_STATE),
+      saveStack: [],
+      canvas: null,
+    });
     return handle;
   }
 
@@ -83,92 +192,210 @@ export class CanvasGdiBridge implements GdiBridge {
     this.dcs.delete(dc);
   }
 
-  private getCtx(dc: number): CanvasRenderingContext2D {
-    const canvas = this.dcs.get(dc);
-    if (!canvas) throw new Error(`Invalid DC: ${dc}`);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error(`Cannot get 2D context for DC ${dc}`);
-    return ctx;
+  // -- 文本（3.2.2） ---------------------------------------------------------
+
+  async setTextColor(dc: number, color: Color): Promise<WinError> {
+    const rec = this.requireDc(dc);
+    const prev = rec.state.textColor;
+    rec.state.textColor = color;
+    return toRgb(prev);
   }
 
-  async textOut(dc: number, x: number, y: number, text: string, font?: FontSpec): Promise<number> {
-    const ctx = this.getCtx(dc);
-    ctx.font = `${font?.italic ? 'italic ' : ''}${font?.weight === 'bold' ? 'bold ' : ''}${font?.size ?? 12}px ${font?.name ?? 'sans-serif'}`;
-    ctx.fillText(text, x, y);
-    this.notify(dc, { x, y, width: ctx.measureText(text).width, height: font?.size ?? 16 });
+  async setBkColor(dc: number, color: Color): Promise<WinError> {
+    const rec = this.requireDc(dc);
+    const prev = rec.state.bkColor;
+    rec.state.bkColor = color;
+    return toRgb(prev);
+  }
+
+  async setBkMode(dc: number, mode: number): Promise<WinError> {
+    const rec = this.requireDc(dc);
+    const prev = rec.state.bkMode;
+    rec.state.bkMode = mode;
+    return prev;
+  }
+
+  async textOut(dc: number, x: number, y: number, text: string, font?: FontSpec): Promise<WinError> {
+    const rec = this.requireDc(dc);
+    if (!this.textCtx) return E.NO_ERROR; // node 无 canvas：文本为 no-op
+    const { surface } = rec;
+    const f = font ?? rec.state.font;
+    const ctx = this.textCtx;
+    ctx.font = toCanvasFont(f);
+    const metrics = ctx.measureText(text);
+    const width = Math.ceil(metrics.width) + 2;
+    const height = Math.ceil((f?.size ?? 12) * 1.4);
+    const scratch = document.createElement('canvas');
+    scratch.width = width;
+    scratch.height = height;
+    const sctx = scratch.getContext('2d');
+    if (!sctx) return E.NO_ERROR;
+    sctx.font = ctx.font;
+    if (rec.state.bkMode === 2 /* BkMode.OPAQUE */) {
+      sctx.fillStyle = RGB(rec.state.bkColor);
+      sctx.fillRect(0, 0, width, height);
+    }
+    sctx.fillStyle = RGB(rec.state.textColor);
+    sctx.textBaseline = 'top';
+    sctx.fillText(text, 0, 0);
+    const image = sctx.getImageData(0, 0, width, height);
+    blitRgbaIntoSurface(surface, x, y, image.data, width, height, ROP_INDEX_COPY);
+    this.notify(dc, { x, y, width, height });
     return E.NO_ERROR;
   }
 
-  async bitBlt(
-    destDc: number,
-    destRect: Rect,
-    srcDc: number,
-    srcRect: Rect,
-    _rop: number,
-  ): Promise<number> {
-    const dest = this.getCtx(destDc);
-    const srcCanvas = this.dcs.get(srcDc);
-    if (!srcCanvas) return E.ERROR_INVALID_HANDLE;
-    dest.drawImage(
-      srcCanvas,
-      srcRect.x,
-      srcRect.y,
-      srcRect.width,
-      srcRect.height,
-      destRect.x,
-      destRect.y,
-      destRect.width,
-      destRect.height,
-    );
-    this.notify(destDc, destRect);
+  // -- 形状（3.2.1 扩展） -----------------------------------------------------
+
+  async lineTo(dc: number, x0: number, y0: number, x1: number, y1: number, color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.line(x0, y0, x1, y1, color, rop ?? ROP_INDEX_COPY);
+    this.notify(dc, { x: Math.min(x0, x1), y: Math.min(y0, y1), width: Math.abs(x1 - x0) + 1, height: Math.abs(y1 - y0) + 1 });
     return E.NO_ERROR;
   }
 
-  async stretchBlt(
-    destDc: number,
-    destRect: Rect,
-    srcDc: number,
-    srcRect: Rect,
-    rop: number,
-  ): Promise<number> {
-    return this.bitBlt(destDc, destRect, srcDc, srcRect, rop);
-  }
-
-  async patBlt(dc: number, rect: Rect, color: Color, _rop: number): Promise<number> {
-    const ctx = this.getCtx(dc);
-    const prev = ctx.fillStyle;
-    ctx.fillStyle = `rgb(${color.r},${color.g},${color.b})`;
-    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-    ctx.fillStyle = prev;
+  async fillRect(dc: number, rect: Rect, color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.fillRect(rect, color, rop ?? ROP_INDEX_PATCOPY);
     this.notify(dc, rect);
     return E.NO_ERROR;
   }
 
-  async setPixel(dc: number, x: number, y: number, color: Color): Promise<number> {
-    const ctx = this.getCtx(dc);
-    ctx.fillStyle = `rgb(${color.r},${color.g},${color.b})`;
-    ctx.fillRect(x, y, 1, 1);
+  async frameRect(dc: number, rect: Rect, color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.frameRect(rect, color, rop ?? ROP_INDEX_COPY);
+    this.notify(dc, rect);
     return E.NO_ERROR;
   }
 
-  async getDeviceCaps(_dc: number): Promise<DeviceCaps> {
+  async ellipse(dc: number, bounds: Rect, color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.ellipse(bounds, color, rop ?? ROP_INDEX_PATCOPY);
+    this.notify(dc, bounds);
+    return E.NO_ERROR;
+  }
+
+  async frameEllipse(dc: number, bounds: Rect, color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.frameEllipse(bounds, color, rop ?? ROP_INDEX_COPY);
+    this.notify(dc, bounds);
+    return E.NO_ERROR;
+  }
+
+  async roundRect(dc: number, bounds: Rect, rx: number, ry: number, color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.roundRect(bounds, rx, ry, color, rop ?? ROP_INDEX_PATCOPY);
+    this.notify(dc, bounds);
+    return E.NO_ERROR;
+  }
+
+  async polyline(dc: number, points: Point[], color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.polyline(points, color, rop ?? ROP_INDEX_COPY);
+    this.notify(dc, boundsOf(points));
+    return E.NO_ERROR;
+  }
+
+  async polygon(dc: number, points: Point[], color: Color, rop?: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.fillPolygon(points, color, rop ?? ROP_INDEX_PATCOPY);
+    this.notify(dc, boundsOf(points));
+    return E.NO_ERROR;
+  }
+
+  async setPixel(dc: number, x: number, y: number, color: Color): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    surface.setPixel(x, y, color);
+    this.notify(dc, { x, y, width: 1, height: 1 });
+    return E.NO_ERROR;
+  }
+
+  // -- 裁剪（3.2.3） ---------------------------------------------------------
+
+  async setClip(dc: number, region: ClipRegion | null): Promise<void> {
+    const rec = this.requireDc(dc);
+    rec.state.clip = region;
+    rec.surface.clip = region;
+  }
+
+  async getClip(dc: number): Promise<ClipRegion | null> {
+    return this.requireDc(dc).state.clip;
+  }
+
+  // -- DC 状态保存/恢复 ------------------------------------------------------
+
+  async saveDC(dc: number): Promise<number> {
+    const rec = this.requireDc(dc);
+    rec.saveStack.push(cloneState(rec.state));
+    return rec.saveStack.length;
+  }
+
+  async restoreDC(dc: number, saved?: number): Promise<number> {
+    const rec = this.requireDc(dc);
+    if (saved === undefined) {
+      const state = rec.saveStack.pop();
+      if (state) {
+        rec.state = state;
+        rec.surface.clip = state.clip;
+      }
+      return rec.saveStack.length;
+    }
+    // 恢复到指定层级
+    const target = Math.max(0, Math.min(rec.saveStack.length, saved));
+    while (rec.saveStack.length > target) rec.saveStack.pop();
+    const state = rec.saveStack[target - 1];
+    if (state) {
+      rec.state = state;
+      rec.surface.clip = state.clip;
+    }
+    return target;
+  }
+
+  // -- 位块传输（3.2.1） -----------------------------------------------------
+
+  async bitBlt(destDc: number, destRect: Rect, srcDc: number, srcRect: Rect, rop: number): Promise<WinError> {
+    const dest = this.requireDc(destDc);
+    const src = this.requireDc(srcDc);
+    dest.surface.blit(destRect, src.surface, srcRect, rop);
+    this.notify(destDc, destRect);
+    return E.NO_ERROR;
+  }
+
+  async stretchBlt(destDc: number, destRect: Rect, srcDc: number, srcRect: Rect, rop: number): Promise<WinError> {
+    return this.bitBlt(destDc, destRect, srcDc, srcRect, rop);
+  }
+
+  async patBlt(dc: number, rect: Rect, color: Color, rop: number): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    const index = ropIndex(rop);
+    for (let y = rect.y; y < rect.y + rect.height; y++) {
+      for (let x = rect.x; x < rect.x + rect.width; x++) {
+        surface.setPixelPattern(x, y, color, index);
+      }
+    }
+    this.notify(dc, rect);
+    return E.NO_ERROR;
+  }
+
+  async getDeviceCaps(dc: number): Promise<DeviceCaps> {
+    const { surface } = this.requireDc(dc);
     return {
       bitsPerPixel: 32,
-      width: this.surface.width,
-      height: this.surface.height,
+      width: surface.width,
+      height: surface.height,
       colorPlanes: 1,
-      horizontalResolution: this.surface.width,
-      verticalResolution: this.surface.height,
+      horizontalResolution: surface.width,
+      verticalResolution: surface.height,
     };
   }
 
-  async flush(_dc: number): Promise<void> {
-    const ctx = this.surface.getContext('2d');
-    if (!ctx) return;
-    for (const dc of this.dcs.values()) {
-      ctx.drawImage(dc, 0, 0);
+  async flush(dc: number): Promise<void> {
+    const { surface } = this.requireDc(dc);
+    if (this.textCtx) {
+      const image = this.textCtx.createImageData(surface.width, surface.height);
+      image.data.set(surface.toRgba());
+      this.textCtx.putImageData(image, 0, 0);
     }
-    this.notify(0, { x: 0, y: 0, width: this.surface.width, height: this.surface.height });
+    this.notify(dc, this.fullRect(dc));
   }
 
   onInvalidate(listener: (dc: number, rect: Rect) => void): Dispose {
@@ -177,9 +404,55 @@ export class CanvasGdiBridge implements GdiBridge {
       this.invalidateHandlers.delete(listener);
     };
   }
+}
 
-  private notify(dc: number, rect: Rect): void {
-    for (const handler of this.invalidateHandlers) handler(dc, rect);
+function toRgb(color: Color): number {
+  return (((color.r & 0xff) << 16) | ((color.g & 0xff) << 8) | (color.b & 0xff)) >>> 0;
+}
+
+function toCanvasFont(font: FontSpec | null): string {
+  if (!font) return '12px sans-serif';
+  const italic = font.italic ? 'italic ' : '';
+  const weight = typeof font.weight === 'number' ? String(font.weight) : font.weight;
+  const size = `${font.size ?? 12}px`;
+  return `${italic}${weight} ${size} ${font.name ?? 'sans-serif'}`;
+}
+
+function boundsOf(points: Point[]): Rect {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  if (points.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
+  return { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+/** 把 RGBA 字节块按 SRCCOPY 写入表面（文本栅格化结果）。 */
+function blitRgbaIntoSurface(
+  surface: GdiSurface,
+  x: number,
+  y: number,
+  rgba: Uint8ClampedArray,
+  width: number,
+  height: number,
+  rop: number,
+): void {
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const i = (row * width + col) * 4;
+      surface.setPixel(x + col, y + row, {
+        r: rgba[i] ?? 0,
+        g: rgba[i + 1] ?? 0,
+        b: rgba[i + 2] ?? 0,
+        a: rgba[i + 3] ?? 0,
+      }, rop);
+    }
   }
 }
 

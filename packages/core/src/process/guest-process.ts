@@ -2039,6 +2039,21 @@ export class GuestProcessRunner {
     this.interceptor.hook('ntdll.dll', 'RtlUnwind', rtlUnwindHandler);
     this.interceptor.hook('kernel32.dll', 'RtlUnwind', rtlUnwindHandler);
 
+    // ApiSetQueryApiSetPresence(PCWSTR Namespace, PBOOLEAN Present) —
+    // api-ms-win-core-apiquery-* normalizes to kernel32. cmd.exe calls this
+    // during its console/string init (0x41efeb wrapper -> 0x41f181 IAT slot).
+    // The Present output pointer sits at [ebp-1] in the wrapper frame, adjacent
+    // to the saved caller EBP at [ebp]; writing 4 bytes (or any dword write)
+    // would clobber [ebp] and make `leave` restore a garbage EBP (0x07000000),
+    // cascading into every later [ebp-N] read and a GS-cookie FAIL. Write ONLY
+    // 1 byte (BOOLEAN) and return STATUS_SUCCESS so cmd takes the "API set
+    // present" path without touching the neighbouring stack slot.
+    this.interceptor.hook('kernel32.dll', 'ApiSetQueryApiSetPresence', (ctx, host) => {
+      const present = (ctx.rawArgs[1] ?? 0) >>> 0;
+      if (present) host.memory.write(present, new Uint8Array([1])); // TRUE
+      return { returnValue: 0, errorCode: E.NO_ERROR }; // STATUS_SUCCESS
+    });
+
     // ------------------------------------------------------------------
     // _initterm / _initterm_e: the CRT calls these to run the table of
     // static initializers (which includes __security_init_cookie and the C

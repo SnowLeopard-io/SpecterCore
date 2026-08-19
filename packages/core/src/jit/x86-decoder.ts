@@ -653,11 +653,18 @@ class DecoderState {
       case 0xc6:
       case 0xc7: {
         // C6: mov r/m8, imm8; C7: mov r/m, imm32 (sign-extended to 64 when REX.W)
+        // IMPORTANT: for C6 the operand size is 8 bits, NOT the outer `size`
+        // (32). Using `size` for dst/src made `mov byte [ebp-1], 0` write 4
+        // bytes, clobbering the saved caller EBP at [ebp] and cascading into
+        // every later [ebp-N] read + GS-cookie check (cmd.exe: 0x41f001 in the
+        // ApiSetQueryApiSetPresence wrapper wrote [ebp-1] and zeroed [ebp]'s
+        // low 3 bytes -> EBP restored as 0x07000000 -> cookie FAIL @0x42d47a).
+        const opSize = opcode === 0xc6 ? 8 : size;
         const immSize = opcode === 0xc6 ? 8 : size === 64 ? 32 : size;
-        const raw = this.decodeRm(size);
-        const dst = this.rmOperand(raw, size);
+        const raw = this.decodeRm(opSize);
+        const dst = this.rmOperand(raw, opSize);
         const imm = this.readImm(immSize);
-        return { inst: { op: 'mov', dst, src: this.immOperand(imm, size) }, terminator: false };
+        return { inst: { op: 'mov', dst, src: this.immOperand(imm, opSize) }, terminator: false };
       }
 
       case 0xc8: {

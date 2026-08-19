@@ -286,59 +286,6 @@ async function main(): Promise<void> {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
-      if (eip === 0x40b4c8 || eip === 0x40b430 || eip === 0x40b49e || eip === 0x40b4ba) {
-        const esp = runtime.getReg('esp');
-        const ebp = runtime.getReg('ebp');
-        const frame = runtime.readInt32(ebp - 4);
-        const want = runtime.readInt32(0x4340c0);
-        console.error(
-          `[ck] 0x${eip.toString(16)} ebp=0x${(ebp >>> 0).toString(16)} esp=0x${(esp >>> 0).toString(16)} [ebp-4]=0x${(frame >>> 0).toString(16)} cookie=0x${(want >>> 0).toString(16)} expect=0x${((want ^ ebp) >>> 0).toString(16)}`,
-        );
-      }
-      // Step 12 bisect: find who zeroes [ebp-4] inside cmd's big init fn
-      // (0x40af19). Block starts only — every call return site. 0x40af26 is
-      // the block right after __chkstk that writes the cookie copy.
-      if ([0x40af26, 0x40afa3, 0x40afe2, 0x40b052, 0x40b0c2, 0x40b132, 0x40b19a, 0x40b22b, 0x40b2f4, 0x40b3e5].includes(eip)) {
-        const ebp = runtime.getReg('ebp');
-        if (ebp === 0x7fffee0) {
-          const frame = runtime.readInt32(ebp - 4);
-          const want = runtime.readInt32(0x4340c0);
-          const ebx = runtime.getReg('ebx');
-          console.error(
-            `[ck2] 0x${eip.toString(16)} ebx=${ebx} [ebp-4]=0x${(frame >>> 0).toString(16)} expect=0x${((want ^ ebp) >>> 0).toString(16)} ${frame === (want ^ ebp) ? 'OK' : 'ZEROED'}`,
-          );
-        }
-      }
-      // Step 12b: 0x42d39c (dup of a cmd line string) — watch ebp at entry
-      // and around the RtlCreateUnicodeStringFromAsciiz call.
-      if ([0x42d39c, 0x42d3e7, 0x42d3ed, 0x42d47a].includes(eip)) {
-        const esp = runtime.getReg('esp');
-        const ebp = runtime.getReg('ebp');
-        const a = runtime.getReg('eax');
-        const c = runtime.getReg('ecx');
-        console.error(
-          `[ck3] 0x${eip.toString(16)} esp=0x${(esp >>> 0).toString(16)} ebp=0x${(ebp >>> 0).toString(16)} eax=0x${(a >>> 0).toString(16)} ecx=0x${(c >>> 0).toString(16)}`,
-        );
-      }
-      if (eip === 0x41dea0) {
-        // cmd.exe __security_check_cookie entry — dump the failure context.
-        const esp = runtime.getReg('esp');
-        const ebp = runtime.getReg('ebp');
-        const ecx = runtime.getReg('ecx');
-        const want = runtime.readInt32(0x4340c0);
-        const prev = trace.slice(-4, -1).map((e) => `0x${e.toString(16)}`);
-        const frame = runtime.readInt32(ebp - 4);
-        console.error(
-          `[ck] cookie chk from ${prev.join(' ')} ecx=0x${(ecx >>> 0).toString(16)} want=0x${(want >>> 0).toString(16)} ebp=0x${(ebp >>> 0).toString(16)} [ebp-4]=0x${(frame >>> 0).toString(16)} ${ecx === want ? 'OK' : 'FAIL'}`,
-        );
-        const stk = runtime.readBytes(esp, 56);
-        console.error(`[ck]   esp=0x${esp.toString(16)} stack: ${[...stk].map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
-        for (const slot of [0x4501e4, 0x4504a0, 0x4503d4]) {
-          const iat = runtime.readInt32(slot);
-          const sb = runtime.readBytes(iat, 12);
-          console.error(`[ck]   IAT 0x${slot.toString(16)}=0x${(iat >>> 0).toString(16)} stub: ${[...sb].map((b) => b.toString(16).padStart(2, '0')).join(' ')}`);
-        }
-      }
     },
     onFault: (rt, res) => {
       console.error('[trace] last blocks:');

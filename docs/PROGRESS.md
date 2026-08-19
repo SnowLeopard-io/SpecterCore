@@ -2,7 +2,7 @@
 
 > **给下一个 agent 的交接入口。** 目标：让 **Windows exe** 在 Browser Kernel 的 JIT 里跑起来，最终在 L6 桌面（apps/web）里加载并运行（含控制台输出）。
 > 读完本文件后请读 `packages/core/src/{pe, jit, process, api}/`、`packages/ui/src/` 与 `packages/contracts/src/`。
-> **2026-08-19 交接（Step 12 进行中）：cmd.exe 攻坚——7 项底层修复后从「控制台初始化通过→fail-fast(0xC0000409)」推进到「还剩 1 次 GS-cookie FAIL @0x40b4c8」。本轮修复：①getcpinfo 1→2（2 参 stdcall）②真实环境块（GetEnvironmentStringsW/A、GetEnvironmentVariableW/A、_environ 数组）③freeenvironmentstringsw/a:1 ④reggetvaluew/a:7（**首个 fail-fast 根因**）⑤getcurrentdirectoryw/a:2 + setcurrentdirectoryw/a:1（**第二个 fail-fast 根因**）⑥_o__wcsicmp/_stricmp/_time32/time/_o_srand/srand handler（真实比较+时间戳）⑦RegQueryValueExW/A 不再写 lpData（**lpData 与调用者帧 GS cookie 槽重叠，写 4 字节零直接清零 cookie**）。验证：typecheck ✓、notepad cleanExit 回归 ✓（用户已 git 提交基线 0acff25）。当前卡点：0x40b4c8（cmd 大初始化函数尾）cookie 副本 [ebp-4] 在函数执行中被清零（入口已为 0，expect=cookie^ebp），写者尚未定位（RegQueryValueExW 已排除；diag-trap 已留 0x40b430/0x40b49e/0x40b4ba 断点供二分）。下一步：二分定位 [ebp-4] 清零写者 → 之后 GetOpenFileNameW 桥接 / 内置 Command Prompt 应用 / 文件资源管理器真实化。**
+> **2026-08-19 交接（Step 13 进行中）：cmd.exe 攻坚——定位并修复了 Step 12 遗留「最后 1 次 cookie FAIL」的两个根因：①`emitXchg`（codegen.ts）把 a 旧值存 L_TMP 但 storeOperand 内部第一步就覆盖 L_TMP → `xchg esp,eax` 静默失效 → __chkstk 未分配栈 → `push ebx` 覆盖 [ebp-4] cookie（**0x40b4c8 FAIL 真正根因**）②`0F 1F /r` 多字节 NOP 不消费 ModRM（x86-decoder.ts）→ 0x40eb20 解码错位 fault。修复后 0x40b4c8/0x40bba9/0x414aa9/0x40b6e3 cookie 全 OK，cmd 推进到 `ApiSetQueryApiSetPresence → RtlCreateUnicodeStringFromAsciiz → 0x42d39c`。当前卡点：**0x42d47a cookie FAIL（ebp=0x7000000）——ApiSetQueryApiSetPresence（无 handler 无 argCount）默认处理向 present 指针（=0x41efeb 帧 [ebp-1]=0x7fffe63）写数据，4 字节覆盖相邻 [ebp]=0x7fffe64 槽（保存的调用者 ebp）→ leave 后 ebp=0x07000000 → 后续全错位**。下一步：查 dispatcher 默认行为确认 → 给 ApiSetQueryApiSetPresence 加 handler（present 只写 1 字节）+ 补 rtlcreateunicodestringfromasciiz argCount:2 → cmd 应能进入 dir 执行。⚠️ 本会话有同事并行修改同一工作区（以文件实际内容为准，提交前 git status 确认）。diag-trap 留了 [ck3]/[ck4] 断点供定位 0x42d47a（用完删）。**
 
 ## 当前目标（用户需求，2026-08-18 起，2026-08-19 更新）
 
@@ -630,3 +630,72 @@ cmd.exe（SysWOW64 x86）比 Step 11 大幅推进：**修复 7 个底层 bug 后
 - `TerminateProcess` handler 不终止进程（只对 exitprocess 特殊处理）——fail-fast 后垃圾执行是诊断噪音来源。
 - vitest 未跑（基线 189/189）；lint 未跑；apps/web 未构建。
 - notepad 回归基线（用户已提交 0acff25）：probe-mui 显示 `status=fault cleanExit=false` 是**用户修复前**的现象，当前代码已恢复 cleanExit ✓（diag-trap 跑真 notepad 验证）。
+
+---
+
+# Step 13（2026-08-19 交接：cmd.exe 攻坚 —— 定位并修复「最后 1 次 cookie FAIL」的两个根因：emitXchg 栈交换静默失效 + 0F 1F 多字节 NOP 解码错位；推进到只剩 ApiSetQueryApiSetPresence 越界写 [ebp] 槽一个卡点）
+
+> **⚠️ 重要：本会话有同事（另一个 agent）并行修改同一工作区。** 交接时 git 工作区可能同时被改动（git status/diff 可能看到非本轮的修改或看不到本轮的修改——以**文件实际内容**为准，不要 `git checkout`/`git stash` 任何东西；提交前先 `git status` 确认，避免覆盖同事的工作）。本轮核心修复在 `packages/core/src/jit/codegen.ts`（emitXchg）与 `packages/core/src/jit/x86-decoder.ts`（0F 1F），**若 git diff 不显示这两个文件，说明同事已帮你提交或工作区已被更新——以当前文件内容是否含修复注释为准**。
+
+## 一句话现状
+
+cmd.exe 比 Step 12 再进一步：**Step 12 遗留的 0x40b4c8 cookie FAIL 已彻底解决**（二分定位到根因：`xchg esp, eax` 在 JIT 中静默失效 → __chkstk 未分配栈 → `push ebx` 覆盖 [ebp-4] cookie 副本）。修复后 cmd 一路推进：注册表配置循环 → 控制台初始化 → 环境/变量比较 → `GetLocaleInfoW` 系列 → `GetProcessHeap/HeapAlloc` → `GetConsoleTitleW` → `GetFileType` → `ApiSetQueryApiSetPresence` → `RtlCreateUnicodeStringFromAsciiz` → **新的卡点：0x42d47a cookie FAIL（ebp=0x7000000 异常）** → fail-fast → TerminateProcess(0xC0000409) → 最终 `status=exit eip=0x0`（**伪 cleanExit**：走的是 fail-fast 报告路径，不是正常 `_o_exit(0)`；TerminateProcess handler 不终止进程，之后垃圾执行偶然 exit）。日志 238 行，stubs=284。
+
+**注意**：`status=exit eip=0x0` 现在**不代表成功**！必须 grep `[ck] cookie chk` 确认无 FAIL，且 `[diag] status=exit` 前无 `TerminateProcess(0xc0000409)`。
+
+## 本轮修复的 bug（按根因）
+
+### Bug A：emitXchg 的 L_TMP 被 storeOperand 覆盖 → `xchg esp, eax` 静默失效（**Step 12 遗留 cookie FAIL @0x40b4c8 的根因**）
+- **症状**：0x40b4c8（cmd 大初始化函数 0x40af19 尾部）cookie 副本 [ebp-4] 入口即 0（expect=cookie^ebp），Step 12 判定"写者未定位"。
+- **定位过程**（二分断点 [ck2]，diag-trap）：
+  1. 在 0x40af26（__chkstk 返回后、cookie 写入前）加断点：**[ebp-4]=0x40af26 —— 这是返回地址本身！** 说明执行到 0x40af26 时 `esp` 仍 = `ebp-4`（栈顶还压着 call 的返回地址）→ **__chkstk 没有分配 0x1040 字节栈空间**。
+  2. 隔离复现：`scripts/probe-cmd-chkstk.ts` 直接执行 cmd 的 __chkstk（0x424c80，标准 MSVC 模板，含跨页探测回环 `jb 0x424ca2`）→ 返回后 `esp=0x8000000`（未分配）而非预期的 `0x7ffefc0`。
+  3. 继续隔离：`scripts/probe-xchg.ts` 解码 `[0x94, 0xc3]`（`xchg eax, esp; ret`）→ **decoder 正确（xchg eax, esp）但执行错误**：`eax=0x2000 esp=0x2004 eip=0xdeadbeef`（esp 未交换，ret 从旧 esp 弹 0xdeadbeef）。
+- **根因**（codegen.ts `emitXchg`）：实现把 a 的旧值存进 `L_TMP`，然后 `storeOperand(fn, a)` —— **storeOperand 内部第一步就是 `fn.localSet(L_TMP)`**，把 L_TMP 覆盖成 b 的值！第二次 `fn.localGet(L_TMP)` 拿到的是 b 值 → `storeOperand(fn, b)` 把 b 写回 b → **交换静默丢失**。对 `xchg esp, eax` 而言 = esp 从未更新 → __chkstk 的 `mov eax,[eax]; mov [esp],eax; ret` 全错位 → 栈未分配 → 0x40af30 `push ebx` 恰好写到 [ebp-4]（cookie 副本槽）→ GS-cookie FAIL。
+  - **修复**：a 的旧值存 `L_TMP2`（storeOperand 只碰 L_TMP），b 存 L_TMP：`pushOperand(a)→L_TMP2; pushOperand(b)→L_TMP; storeOperand(a)用L_TMP; storeOperand(b)用L_TMP2`。
+  - 验证：probe-xchg → `eax=0x2000 esp=0x104 eip=0x0`（交换成功）；probe-cmd-chkstk → `esp=0x7ffefc0` 与预期完全一致。
+- **同类排查**：`emitXadd`（用 L_A/L_B/L_S）、`emitCmpXchg`（L_A/L_B/L_ORIG/L_S/L_TMP2）、`emitCmov`（select 直接 storeOperand）**均不依赖 L_TMP 保留旧值，安全**；仅 emitXchg 有此 bug。
+- **教训**：storeOperand 的 L_TMP 副作用是隐蔽陷阱——任何"先暂存寄存器值、后 storeOperand"的 codegen 模式都要检查暂存槽是否被 storeOperand 覆盖。**这是 cmd.exe 最后一个 fail-fast 的真正根因，也解释了为什么 notepad 之前"刚好能跑"**（notepad 的 __chkstk 调用点可能在栈分配后没有立即依赖 esp 的 push 序列，或路径不同）。
+
+### Bug B：0F 1F 多字节 NOP 不消费 ModRM → 解码错位 fault（`unsupported opcode 0x6`）
+- **症状**：Bug A 修复后 cmd 推进到 0x40eb20（wcsdup 风格函数）fault：`decode error: UnsupportedError: unsupported opcode 0x6`（0x06 = PUSH ES）。
+- **根因**（x86-decoder.ts `decodeTwoByte` case 0x1e/0x1f）：`0F 1F /r` 是**带 ModRM 的多字节 NOP**（如 `0f 1f 40 00` = nop dword ptr [eax]），decoder 之前直接返回 `{op:'nop'}` **不消费 ModRM/SIB/disp 字节** → 后续指令从 NOP 中间开始解码 → 整块错位 → 把 modrm 字节 0x06 当 opcode（PUSH ES）→ decode fault。
+- **修复**：case 0x1e/0x1f 改为 `this.decodeRm(32)` 消费操作数字节后再返回 nop。
+- 验证：`scripts/probe-decode.ts` 解码 0x40eb20 字节流 → 之前 `DECODE ERROR: unsupported opcode 0x6`，修复后正确解码到 `jcc`（mov ax,[esi] / add esi,2 / test ax,ax / jne 全部正常）。
+
+## 当前卡点（从这接手，按序）：0x42d47a cookie FAIL —— ApiSetQueryApiSetPresence 默认处理越界写 [ebp] 槽
+
+- **症状**：cmd 推进到 0x42d39c（字符串处理函数，调用者 0x40ba01）→ 0x42d47a cookie FAIL：`ecx=0x7000000 want=<cookie> ebp=0x7000000 [ebp-4]=0x0`。ebp 从正常栈地址（0x7fffexx）变成 **0x7000000**（= 0x07000000）。
+- **[ck4] 断点铁证**（diag-trap 已留）：
+  - `0x41efeb`（ApiSetQueryApiSetPresence 薄包装，`push ebp; mov ebp,esp; push ecx; ...; call 0x41f181; test eax,eax; js ...; leave; ret`）入口：esp=0x7fffe68, ebp=0x7fffecc, **[ebp]=0x7ffff60 正常**。
+  - `0x41f010`（ApiSetQueryApiSetPresence 调用返回后）：ebp=0x7fffe64（包装器自己的帧），**但 [ebp]=0x7000000** —— 保存的调用者 ebp 槽被覆盖！
+  - 之后 0x42d3c9/0x42d3df：ebp=0x7000000 → 0x42d39c 内所有 `[ebp-0x40]/[ebp-0x54]` 全错位 → cookie FAIL。
+- **覆盖机制**（已推理，待确认）：0x41efeb 帧 `[ebp-1]=0x7fffe63`，而 `[ebp]=0x7fffe64` 相邻。0x41f005 `push eax`（eax=lea [ebp-1]=0x7fffe63）→ 0x41f006 `push 0x401034` → `call 0x41f181` = `jmp [0x450000]` = **ApiSetQueryApiSetPresence(namespace=0x401034, present=0x7fffe63)**。**present 指针恰好 = 包装器帧的 [ebp-1]；若默认 handler（无 handler、无 argCount）向 present 写 4 字节（如 0x00000000），会覆盖 [0x7fffe63..0x7fffe66]，而 [0x7fffe64]（保存调用者 ebp 的槽）低 3 字节被清零、高字节残留 0x07 → [ebp] 变 0x07000000**（小端：写 00 00 00 到 0x7fffe63，[0x7fffe64]=00 00 00，原 [0x7fffe67]=0x07 是 0x7fffecc 的高字节 → 读回 0x07000000 ✓ 与观察一致）。
+- **待确认/修复（第一步）**：
+  1. 查 `ApiTrapDispatcher` 对**无 handler 且无 argCount** 的 API 默认行为——是否写 arg1（present 指针）？搜 `trap-dispatcher.ts` 的默认分支（当前代码 `handlers.ts` 默认返回硬编码 0，但 dispatcher 可能对输出参数有通用处理）。
+  2. 无论默认行为如何，**给 ApiSetQueryApiSetPresence 加显式 handler**：`(namespace, present)` 2 参 stdcall，返回 0（STATUS_SUCCESS），写 `present` 1 字节 = 1（TRUE）——**只写 1 字节，绝不写 4 字节**，避免再次踩栈槽。argCount 补 `'apisetqueryapisetpresence': 2`。
+  3. 顺带补 **RtlCreateUnicodeStringFromAsciiz（ntdll，2 参 stdcall）argCount**——0x42d3e7 调用后 esp=0x7fffe64（比正常少 8，说明 stub ret 0），无 handler 默认返回 0 可接受（cmd 走 `je 0x42d47a` 失败分支），但 argCount 必须补 `'rtlcreateunicodestringfromasciiz': 2`，否则后续栈漂移。
+  4. 修复后再看 cmd 能否继续 → 预期进入 `dir` 执行（FindFirstFileW 已实现）→ 输出虚拟盘 C:\Windows 内容。
+
+## 诊断工具 / 断点（⚠️ 临时断点未清理，下个 agent 用完后删除）
+
+- `scripts/diag-trap.ts` 当前含临时断点（onStep 内）：
+  - `[ck]`：`eip ∈ {0x40b4c8, 0x40b430, 0x40b49e, 0x40b4ba}` cookie 二分 + `eip===0x41dea0` __security_check_cookie 入口 dump（**已全部 OK，可删**）。
+  - `[ck2]`：`eip ∈ {0x40af26, 0x40afa3, 0x40afe2, 0x40b052, 0x40b0c2, 0x40b132, 0x40b19a, 0x40b22b, 0x40b2f4, 0x40b3e5}`（ebp===0x7fffee0 时打印 [ebp-4]/expect）——**Bug A 定位用，已完成使命，可删**。
+  - `[ck3]`：`eip ∈ {0x42d39c, 0x42d3e7, 0x42d3ed, 0x42d47a}` 打印 esp/ebp/eax/ecx——**当前卡点相关，保留到修完 0x42d47a**。
+  - `[ck4]`：`eip ∈ {0x41efeb, 0x41f005, 0x41f010, 0x41f025, 0x42d3c9, 0x42d3df}` 打印 esp/ebp/[ebp]/eax——**当前卡点关键证据，保留到修完**。
+  - 定位完成后全部移除（保留 [api]/[trace]/dumpFault/maxSteps 8M/BK_ARGS/BK_NO_MUI）。
+- 新增探针脚本（可复用）：
+  - `scripts/probe-cmd-chkstk.ts`：隔离执行 cmd 的 __chkstk（0x424c80，0x1040 栈分配），验证 esp 下移 + ret 地址搬运。
+  - `scripts/probe-decode.ts`：解码 0x40eb20 字节流（含 `0f 1f 40 00` 多字节 NOP），验证 0F 1F 修复。
+  - 原 `scripts/probe-xchg.ts`：`[0x94,0xc3]` xchg esp,eax 语义验证（Step 7 遗留，本轮借此发现 emitXchg bug）。
+- 反汇编辅助（cmd 关键地址新增）：0x424c80（__chkstk，含跨页回环）、0x42d39c（字符串处理函数，当前卡点所在）、0x41efeb（ApiSetQueryApiSetPresence 薄包装）、0x41f181（= jmp [0x450000]，ApiSetQueryApiSetPresence IAT 槽）、0x40eb20（wcsdup 风格函数，Bug B 解码 fault 点）。
+
+## 本会话未解 / 注意点（继承 + 新增）
+
+- **`ApiSetQueryApiSetPresence`（api-ms-win-core-apiquery）与 `RtlCreateUnicodeStringFromAsciiz`（ntdll）均无 handler、无 argCount** —— 前者越界写 present 指针覆盖 [ebp] 槽（当前卡点），后者 ret 0 栈偏 8。都需补。
+- **`status=exit eip=0x0` 不再是成功标志**：cmd 现在会在 fail-fast（0xC0000409）报告后因 TerminateProcess 不终止进程而垃圾执行到 exit。判定成功 = `[ck] cookie chk ... OK`（无 FAIL）+ 无 `TerminateProcess(0xc0000409)` + 出现 `dir` 输出。
+- `IsProcessorFeaturePresent(0x17)` 返回 0 → __report_gsfailure 走 UnhandledExceptionFilter 路径。
+- `_o_towupper`（idx 52）无 handler（默认 0）——cmd 宽字符大小写转换可能受影响。
+- `ExpandEnvironmentStringsW`（idx 220）无 handler——`%VAR%` 展开不生效（0x40b45e 调用点，目前未走到该分支）。
+- **同事并行修改警告**：工作区可能被另一个 agent 同时编辑（代码文件以实际内容为准；提交前 git status 确认；不要 checkout/stash/pull 覆盖）。vitest/lint/apps-web-build 本轮未跑（基线 189/189）。notepad 回归基线：用户已提交 8fe812a（Step 12 修复）+ 0acff25，diag-trap 跑真 notepad 应 cleanExit ✓。
