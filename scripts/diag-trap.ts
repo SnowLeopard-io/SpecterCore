@@ -482,6 +482,7 @@ async function main(): Promise<void> {
     modulePath,
     commandLine: process.env.BK_ARGS ?? '',
     interactive: true,
+    patches: [{ va: 0x41dea0, bytes: [0xc3] }], // neutralize __security_check_cookie (GS fast-fail)
     readFile: async (p) => {
       if (process.env.BK_NO_MUI === '1') return null; // mimic browser env
       try {

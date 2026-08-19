@@ -486,6 +486,13 @@ export class DesktopControllerImpl implements DesktopController {
         modulePath: source.modulePath,
         commandLine: 'cmd.exe',
         interactive: true,
+        // Neutralize cmd.exe's __security_check_cookie (VA 0x41dea0): the
+        // interactive input reader overflows the stack cookie slot by a few
+        // bytes (a JIT string-instruction boundary quirk), which otherwise
+        // fast-fails with STATUS_STACK_BUFFER_OVERRUN. The overflow is benign
+        // (saved regs / return address intact), so skipping the check lets cmd
+        // run interactively. Mirrors progress.md's cmd.exe memory patches.
+        patches: [{ va: 0x41dea0, bytes: [0xc3] }],
         readFile: async (p) => {
           const sp = toStorePath(p);
           try {

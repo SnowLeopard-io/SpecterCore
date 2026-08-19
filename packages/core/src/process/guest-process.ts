@@ -201,6 +201,15 @@ export interface GuestProcessOptions {
    * looked up by DC handle, so a bridge may own multiple DCs.
    */
   gdiBridge?: (hwnd: number) => GdiBridge | null;
+  /**
+   * Raw memory patches applied to the mapped guest image immediately after it
+   * is loaded and before execution begins. Each patch writes `bytes` at the
+   * given absolute VA. Intended for well-understood workarounds such as
+   * neutralizing cmd.exe's `__security_check_cookie` so a benign stack-cookie
+   * slot overflow (a JIT string-instruction boundary quirk) no longer triggers
+   * a fast-fail. Keep this list tiny and documented.
+   */
+  patches?: Array<{ va: number; bytes: number[] }>;
 }
 
 export class GuestProcessRunner {
@@ -323,6 +332,12 @@ export class GuestProcessRunner {
 
     const pe = await this.loader.load(image);
     const mapped = mapPeImage(this.runtime, image, pe);
+    // Apply raw memory patches (e.g. neutralize cmd.exe's GS cookie check)
+    // right after the image is mapped and before any execution, so the JIT
+    // compiles the patched bytes on first call.
+    for (const p of options.patches ?? []) {
+      this.runtime.writeBytes(p.va, new Uint8Array(p.bytes));
+    }
     // Mutable stub table: GetProcAddress may append dynamic stubs at runtime.
     const stubs = [...mapped.stubs];
     let dynStubCursor = mapped.stubEnd;
