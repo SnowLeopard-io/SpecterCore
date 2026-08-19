@@ -2131,7 +2131,7 @@ export class GuestProcessRunner {
     // Restore them, set EAX = value (never 0 per C standard), and jump
     // to the saved EIP (the setjmp return site).
     // ------------------------------------------------------------------
-    const longjmpHandler: ApiHandler = (ctx, host) => {
+    const longjmpHandler: ApiHandler = (ctx, _host) => {
       const jmpBuf = (ctx.rawArgs[0] ?? 0) >>> 0;
       const value = (ctx.rawArgs[1] ?? 0) >>> 0;
       if (!jmpBuf) return { returnValue: 0, errorCode: E.NO_ERROR };
@@ -2180,7 +2180,7 @@ export class GuestProcessRunner {
     // saved Esp must be esp+4 — the caller's esp right after the call
     // returns, with its own args still on the stack to pop.
     // ------------------------------------------------------------------
-    const setjmp3Handler: ApiHandler = (ctx, host) => {
+    const setjmp3Handler: ApiHandler = (ctx, _host) => {
       const env = (ctx.rawArgs[0] ?? 0) >>> 0;
       if (!env) return { returnValue: 0, errorCode: E.NO_ERROR };
       const espAtTrap = runtime.getReg('esp') >>> 0;
