@@ -1,4 +1,4 @@
-import type { FileStore } from '@bk/contracts';
+import type { FileStore } from '@specter-core/contracts';
 
 /**
  * Bundled Windows tools copied into the virtual disk so the guest runs with
@@ -32,7 +32,7 @@ export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
     if (existing && existing.kind === 'file' && existing.size > 0) continue;
     const res = await fetch(f.url);
     if (!res.ok) {
-      console.warn(`[bk] builtin fetch failed ${f.url}: ${res.status}`);
+      console.warn(`[specter-core] builtin fetch failed ${f.url}: ${res.status}`);
       continue;
     }
     const data = new Uint8Array(await res.arrayBuffer());
@@ -52,6 +52,6 @@ export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
     } finally {
       await file.close();
     }
-    console.warn(`[bk] provisioned ${f.storePath} (${data.byteLength} bytes)`);
+    console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
   }
 }

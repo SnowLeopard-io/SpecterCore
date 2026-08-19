@@ -1,6 +1,6 @@
-import type { Irp, IrpResult, UsbDeviceInfo, UsbDriver } from '@bk/contracts';
-import { IrpMajorFunction } from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
+import type { Irp, IrpResult, UsbDeviceInfo, UsbDriver } from '@specter-core/contracts';
+import { IrpMajorFunction } from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
 
 /**
  * PnP manager (design doc 5.1.4).

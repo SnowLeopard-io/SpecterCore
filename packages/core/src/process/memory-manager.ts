@@ -1,6 +1,6 @@
-import type { MemoryManager, MemoryRegion } from '@bk/contracts';
-import { AllocationType, MemoryProtection, MemoryState } from '@bk/contracts';
-import { nextId } from '@bk/shared';
+import type { MemoryManager, MemoryRegion } from '@specter-core/contracts';
+import { AllocationType, MemoryProtection, MemoryState } from '@specter-core/contracts';
+import { nextId } from '@specter-core/shared';
 
 const PAGE_SIZE = 4 * 1024;
 const BASE_ADDRESS = 0x00010000;

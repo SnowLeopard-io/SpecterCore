@@ -10,15 +10,15 @@ import type {
   SetFilePointerResult,
   WinError,
   WriteFileResult,
-} from '@bk/contracts';
+} from '@specter-core/contracts';
 import {
   CreationDisposition,
   DesiredAccess,
   FileAttributeFlags,
   FileMoveMethod,
   WinError as E,
-} from '@bk/contracts';
-import { normalizePath, splitWildcard, wildcardMatch } from '@bk/shared';
+} from '@specter-core/contracts';
+import { normalizePath, splitWildcard, wildcardMatch } from '@specter-core/shared';
 import { FileHandleTable } from './handle-table';
 
 /**

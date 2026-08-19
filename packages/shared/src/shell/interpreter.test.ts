@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DirEntry, FileOpenMode, FileStore, OpenedFile } from '@bk/contracts';
+import type { DirEntry, FileOpenMode, FileStore, OpenedFile } from '@specter-core/contracts';
 import { CommandInterpreter } from './interpreter';
 
 /** Minimal in-memory FileStore used to drive the interpreter in isolation. */

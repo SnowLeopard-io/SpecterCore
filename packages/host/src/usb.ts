@@ -6,8 +6,8 @@ import type {
   UsbDeviceInfo,
   UsbHostAdapter,
   UsbRequestFilter,
-} from '@bk/contracts';
-import { toArrayBufferView } from '@bk/shared';
+} from '@specter-core/contracts';
+import { toArrayBufferView } from '@specter-core/shared';
 
 /**
  * WebUSB 宿主适配器：包装 navigator.usb。

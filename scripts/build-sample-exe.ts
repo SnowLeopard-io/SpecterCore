@@ -83,7 +83,7 @@ function buildPe(functions: string[], code: Uint8Array, data = new Uint8Array(0)
   return img;
 }
 
-const MESSAGE = 'hello from browser-kernel!\n';
+const MESSAGE = 'hello from specter-core!\n';
 const code = new Uint8Array([
   0xff,
   0x15,

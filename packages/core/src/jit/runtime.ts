@@ -7,8 +7,8 @@
  * dispatcher and for loading images.
  */
 
-import type { WasmRuntime } from '@bk/contracts';
-import { DEFAULT_LINEAR_MEMORY } from '@bk/contracts';
+import type { WasmRuntime } from '@specter-core/contracts';
+import { DEFAULT_LINEAR_MEMORY } from '@specter-core/contracts';
 import { CTX_BASE, CTX_SIZE, EFLAGS_OFFSET, EIP_OFFSET, INT_VECTOR_OFFSET, REG_OFFSET } from './cpu';
 import type { RegName } from './ir';
 

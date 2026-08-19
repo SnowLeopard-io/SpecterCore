@@ -1,6 +1,6 @@
-# Contributing to Browser Kernel
+# Contributing to SpecterCore
 
-Thanks for taking the time to contribute. Browser Kernel is a browser-based
+Thanks for taking the time to contribute. SpecterCore is a browser-based
 Windows compatibility layer: the goal is to run Windows x86 applications in the
 browser through WASM + high-level emulation (HLE), plus an L6 Windows-style
 desktop shell.
@@ -38,7 +38,7 @@ packages/
 ```
 
 Layer dependencies follow the design doc: each package may only depend on
-`@bk/contracts` and the layers below it. See `设计文档.md` for the full spec.
+`@specter-core/contracts` and the layers below it. See `设计文档.md` for the full spec.
 
 ## Code style
 
@@ -56,7 +56,7 @@ pnpm test:coverage
 ```
 
 Core Windows logic (cmd interpreter, installer/registry, PE parsing, text
-decoding) lives in `@bk/shared` and is unit-tested against the `FileStore`
+decoding) lives in `@specter-core/shared` and is unit-tested against the `FileStore`
 contract — UI-agnostic by design.
 
 ## Commands and workflow

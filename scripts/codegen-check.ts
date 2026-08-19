@@ -4,7 +4,7 @@
  *   node codegen-check.mjs <exe> <addrHex>
  */
 import { readFile } from 'node:fs/promises';
-import { PeLoaderImpl, mapPeImage, WasmRuntimeImpl, X86Decoder, buildBlockFunction } from '@bk/core';
+import { PeLoaderImpl, mapPeImage, WasmRuntimeImpl, X86Decoder, buildBlockFunction } from '@specter-core/core';
 
 async function main(): Promise<void> {
   const file = process.argv[2];

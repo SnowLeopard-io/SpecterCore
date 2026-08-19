@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AllocationType, MemoryProtection, MemoryState } from '@bk/contracts';
+import { AllocationType, MemoryProtection, MemoryState } from '@specter-core/contracts';
 import { MemoryManagerImpl } from './memory-manager';
 
 const RW = MemoryProtection.PAGE_READWRITE;

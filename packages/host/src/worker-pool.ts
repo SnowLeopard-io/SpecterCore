@@ -1,5 +1,5 @@
-import type { Dispose, WorkerHandle, WorkerMessage, WorkerPool, WorkerPoolOptions, WorkerReply } from '@bk/contracts';
-import { createDeferred, nextId } from '@bk/shared';
+import type { Dispose, WorkerHandle, WorkerMessage, WorkerPool, WorkerPoolOptions, WorkerReply } from '@specter-core/contracts';
+import { createDeferred, nextId } from '@specter-core/shared';
 
 /**
  * Worker 池：每个 Windows 进程映射到一个 Web Worker（进程隔离）。

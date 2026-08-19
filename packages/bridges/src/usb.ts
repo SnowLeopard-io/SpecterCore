@@ -5,8 +5,8 @@ import type {
   UsbHostAdapter,
   UsbRequestFilter,
   WasmUsbHost,
-} from '@bk/contracts';
-import { nextId } from '@bk/shared';
+} from '@specter-core/contracts';
+import { nextId } from '@specter-core/shared';
 
 /**
  * WASI-USB host bridge: maps the L3-facing handle-based API onto the

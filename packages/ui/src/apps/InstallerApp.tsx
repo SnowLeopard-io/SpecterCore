@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { AppPackage } from '@bk/contracts';
-import { loadPackageFile } from '@bk/shared';
+import type { AppPackage } from '@specter-core/contracts';
+import { loadPackageFile } from '@specter-core/shared';
 import { useUi } from '../context';
 import { helloWorldPackage, loadExecutablePackage, packageToManifest } from './installer-packages';
 
@@ -15,7 +15,7 @@ const ENCODER = new TextEncoder();
 
 /**
  * Installer (Windows 11 style wizard): installs an app package onto the
- * virtual C: drive via the reusable installer core (@bk/shared/shell/installer).
+ * virtual C: drive via the reusable installer core (@specter-core/shared/shell/installer).
  */
 export function InstallerApp({ initialPackagePath }: InstallerProps) {
   const { controller } = useUi();
@@ -70,8 +70,8 @@ export function InstallerApp({ initialPackagePath }: InstallerProps) {
 
   if (!pkg) {
     return (
-      <div className="bk-installer">
-        <div className="bk-installer-empty">
+      <div className="sc-installer">
+        <div className="sc-installer-empty">
           {error ?? 'Loading package…'}
         </div>
       </div>
@@ -79,42 +79,42 @@ export function InstallerApp({ initialPackagePath }: InstallerProps) {
   }
 
   return (
-    <div className="bk-installer">
-      {error && <div className="bk-installer-error">{error}</div>}
+    <div className="sc-installer">
+      {error && <div className="sc-installer-error">{error}</div>}
 
       {step === 'overview' && (
         <>
-          <div className="bk-installer-head">
-            <span className="bk-installer-icon">{pkg.icon}</span>
+          <div className="sc-installer-head">
+            <span className="sc-installer-icon">{pkg.icon}</span>
             <div>
-              <div className="bk-installer-name">{pkg.name}</div>
-              <div className="bk-installer-version">Version {pkg.version}</div>
+              <div className="sc-installer-name">{pkg.name}</div>
+              <div className="sc-installer-version">Version {pkg.version}</div>
             </div>
           </div>
-          <p className="bk-installer-desc">{pkg.description}</p>
+          <p className="sc-installer-desc">{pkg.description}</p>
           {initialPackagePath?.toLowerCase().endsWith('.exe') && (
-            <div className="bk-installer-warn">
+            <div className="sc-installer-warn">
               Native Windows executable (.exe). Its bytes will be copied to Program Files and
               registered in the Start Menu. Running it requires the PE execution engine
               (design doc P3 milestone); the install pipeline is fully real.
             </div>
           )}
-          <div className="bk-installer-row">
+          <div className="sc-installer-row">
             <span>Install to</span>
-            <span className="bk-installer-value">C:\Program Files\{pkg.packageId}</span>
+            <span className="sc-installer-value">C:\Program Files\{pkg.packageId}</span>
           </div>
-          <div className="bk-installer-row">
+          <div className="sc-installer-row">
             <span>Files</span>
-            <span className="bk-installer-value">{pkg.files.length} file(s)</span>
+            <span className="sc-installer-value">{pkg.files.length} file(s)</span>
           </div>
           {alreadyInstalled && (
-            <div className="bk-installer-warn">This application is already installed. Reinstalling will upgrade it.</div>
+            <div className="sc-installer-warn">This application is already installed. Reinstalling will upgrade it.</div>
           )}
-          <div className="bk-installer-actions">
-            <button className="bk-nt-btn" onClick={() => setStep('overview')} disabled>
+          <div className="sc-installer-actions">
+            <button className="sc-nt-btn" onClick={() => setStep('overview')} disabled>
               Cancel
             </button>
-            <button className="bk-nt-btn primary" onClick={() => void runInstall()}>
+            <button className="sc-nt-btn primary" onClick={() => void runInstall()}>
               {alreadyInstalled ? 'Reinstall' : 'Install'}
             </button>
           </div>
@@ -122,27 +122,27 @@ export function InstallerApp({ initialPackagePath }: InstallerProps) {
       )}
 
       {step === 'installing' && (
-        <div className="bk-installer-progress">
-          <div className="bk-installer-spinner" />
+        <div className="sc-installer-progress">
+          <div className="sc-installer-spinner" />
           <span>Installing {pkg.name} to C:\Program Files\{pkg.packageId}…</span>
         </div>
       )}
 
       {step === 'done' && installed && (
         <>
-          <div className="bk-installer-done-icon">✓</div>
-          <div className="bk-installer-name">{installed.name} installed successfully</div>
-          <p className="bk-installer-desc">
+          <div className="sc-installer-done-icon">✓</div>
+          <div className="sc-installer-name">{installed.name} installed successfully</div>
+          <p className="sc-installer-desc">
             {installed.name} has been added to the Start Menu and desktop. A .bkapp manifest
             was also written to C:\{installed.packageId}.bkapp — double-click it in File
             Explorer to re-run the installer.
           </p>
-          <div className="bk-installer-actions">
-            <button className="bk-nt-btn" onClick={() => setStep('overview')}>
+          <div className="sc-installer-actions">
+            <button className="sc-nt-btn" onClick={() => setStep('overview')}>
               Close
             </button>
             <button
-              className="bk-nt-btn primary"
+              className="sc-nt-btn primary"
               onClick={() => void controller.launch(`installed:${installed.packageId}`)}
             >
               Launch

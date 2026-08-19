@@ -1,5 +1,5 @@
-import type { AppPackage, FileStore } from '@bk/contracts';
-import { parsePe } from '@bk/shared';
+import type { AppPackage, FileStore } from '@specter-core/contracts';
+import { parsePe } from '@specter-core/shared';
 
 /**
  * 演示应用包、.bkapp 清单序列化与 .exe 安装包构造。

@@ -18,7 +18,7 @@
  *  - bitBlt/stretchBlt：src 表面像素为 SOURCE，pattern=白；桥接层用 `ropIndex(dwRop)` 归一化 32 位 ROP3 码。
  */
 
-import type { ClipRegion, Color, Point, Rect } from '@bk/contracts';
+import type { ClipRegion, Color, Point, Rect } from '@specter-core/contracts';
 
 export const WHITE_COLOR: Color = { r: 255, g: 255, b: 255, a: 255 };
 export const BLACK_COLOR: Color = { r: 0, g: 0, b: 0, a: 255 };

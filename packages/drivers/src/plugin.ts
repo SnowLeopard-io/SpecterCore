@@ -1,5 +1,5 @@
-import type { Plugin, PluginContext } from '@bk/contracts';
-import { tokens } from '@bk/contracts';
+import type { Plugin, PluginContext } from '@specter-core/contracts';
+import { tokens } from '@specter-core/contracts';
 import { DriverRegistryImpl } from './usb/registry';
 import { PnPManagerImpl, HidUsbDriver, MassStorageUsbDriver } from './usb/pnp';
 import { WebGpuDisplayDriver } from './graphics/display';

@@ -7,9 +7,9 @@
  */
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { MemoryFileStore } from '@bk/host';
-import { toStorePath } from '@bk/shared';
-import { GuestProcessRunner, JitEngineImpl, WasmRuntimeImpl, PeLoaderImpl, ApiInterceptorImpl, registerDefaultHandlers } from '@bk/core';
+import { MemoryFileStore } from '@specter-core/host';
+import { toStorePath } from '@specter-core/shared';
+import { GuestProcessRunner, JitEngineImpl, WasmRuntimeImpl, PeLoaderImpl, ApiInterceptorImpl, registerDefaultHandlers } from '@specter-core/core';
 
 const root = 'C:/Users/HUAWEI/Desktop/windows/apps/web/dist/win';
 const exeBytes = new Uint8Array(await readFile(resolve(root, 'notepad.exe')));

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { AppLaunchArgs } from '@bk/contracts';
+import type { AppLaunchArgs } from '@specter-core/contracts';
 
 /** Renders a React node from a window's content, used across the desktop shell. */
 export type { ReactNode };

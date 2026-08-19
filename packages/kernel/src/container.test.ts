@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createToken } from '@bk/contracts';
+import { createToken } from '@specter-core/contracts';
 import { Container, ContainerError } from './container';
 
 const tokenA = createToken<string>('a');

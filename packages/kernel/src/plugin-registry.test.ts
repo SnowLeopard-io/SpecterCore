@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Plugin } from '@bk/contracts';
+import type { Plugin } from '@specter-core/contracts';
 import { PluginRegistry, PluginRegistryError } from './plugin-registry';
 
 function makePlugin(id: string, dependsOn?: string[]): Plugin {

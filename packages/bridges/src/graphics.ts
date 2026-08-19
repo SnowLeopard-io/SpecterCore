@@ -10,9 +10,9 @@ import type {
   Point,
   Rect,
   WinError,
-} from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
-import { nextId } from '@bk/shared';
+} from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
+import { nextId } from '@specter-core/shared';
 import { GdiSurface, ROP_INDEX_COPY, ROP_INDEX_PATCOPY, ropIndex } from './raster';
 
 const NOT_IMPLEMENTED = E.ERROR_NOT_IMPLEMENTED;
@@ -202,7 +202,11 @@ export class CanvasGdiBridge implements GdiBridge {
   }
 
   async createDC(name: string): Promise<number> {
-    const surface = new GdiSurface(800, 600);
+    // Match the L6 window canvas size when present (pixel path); node/headless
+    // falls back to a default 800x600 surface.
+    const w = this.display?.width || 800;
+    const h = this.display?.height || 600;
+    const surface = new GdiSurface(w, h);
     const handle = nextId();
     this.dcs.set(handle, {
       surface,

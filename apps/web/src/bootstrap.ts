@@ -1,11 +1,11 @@
-import { Kernel } from '@bk/kernel';
-import { HostLayerPlugin } from '@bk/host';
-import { BridgeLayerPlugin } from '@bk/bridges';
-import { CoreLayerPlugin } from '@bk/core';
-import { DriverLayerPlugin } from '@bk/drivers';
-import { UiLayerPlugin, ensureBuiltinWinFiles } from '@bk/ui';
-import { tokens, type FileStore } from '@bk/contracts';
-import type { DesktopController } from '@bk/contracts';
+import { Kernel } from '@specter-core/kernel';
+import { HostLayerPlugin } from '@specter-core/host';
+import { BridgeLayerPlugin } from '@specter-core/bridges';
+import { CoreLayerPlugin } from '@specter-core/core';
+import { DriverLayerPlugin } from '@specter-core/drivers';
+import { UiLayerPlugin, ensureBuiltinWinFiles } from '@specter-core/ui';
+import { tokens, type FileStore } from '@specter-core/contracts';
+import type { DesktopController } from '@specter-core/contracts';
 
 /**
  * Bootstraps the whole system: assemble the kernel with one plugin per layer,
@@ -22,11 +22,11 @@ export function assertSecureContext(container: HTMLElement): void {
   container.innerHTML =
     '<div style="padding:32px;font-family:sans-serif;color:#b00;max-width:520px">' +
     '<h2>Insecure context</h2>' +
-    '<p>Browser Kernel requires a secure context (HTTPS or localhost) because it uses ' +
+    '<p>SpecterCore requires a secure context (HTTPS or localhost) because it uses ' +
     'OPFS, WebUSB and AudioWorklet. Serve this page over <code>https://</code> or ' +
     '<code>http://localhost</code> and reload.</p>' +
     '</div>';
-  throw new Error('Browser Kernel requires a secure context (HTTPS or localhost)');
+  throw new Error('SpecterCore requires a secure context (HTTPS or localhost)');
 }
 
 // 1.1 浏览器版本检查：目标 Chromium >= 120（Chrome/Edge）。仅警告，不阻断。
@@ -35,7 +35,7 @@ export function checkBrowserVersion(): void {
   const match = /(?:Chrome|Edg)\/(\d+)/.exec(ua);
   if (match && Number(match[1]) < 120) {
     console.warn(
-      `[browser-kernel] Chromium ${match[1]} detected; the supported baseline is Chromium >= 120. ` +
+      `[specter-core] Chromium ${match[1]} detected; the supported baseline is Chromium >= 120. ` +
         'OPFS/WebUSB features may behave differently.',
     );
   }
@@ -64,8 +64,8 @@ export async function bootstrap(container: HTMLElement): Promise<Kernel> {
   if (kernel.container.has(tokens.hostFileStore)) {
     const fs = kernel.container.resolve(tokens.hostFileStore) as FileStore;
     await ensureBuiltinWinFiles(fs)
-      .then(() => console.warn('[browser-kernel] builtin win files ready'))
-      .catch((err) => console.warn('[browser-kernel] builtin win files failed:', err));
+      .then(() => console.warn('[specter-core] builtin win files ready'))
+      .catch((err) => console.warn('[specter-core] builtin win files failed:', err));
   }
 
   const desktop = kernel.container.resolve(tokens.uiDesktop) as DesktopController;

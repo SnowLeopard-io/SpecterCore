@@ -1,8 +1,8 @@
 {
-  "name": "browser-kernel",
+  "name": "specter-core",
   "version": "0.1.0",
   "private": true,
-  "description": "Browser Kernel - run Windows x86 applications in the browser via WASM + HLE",
+  "description": "SpecterCore - run Windows x86 applications in the browser via WASM + HLE",
   "type": "module",
   "engines": {
     "node": ">=20.19.0"
@@ -14,9 +14,9 @@
     ]
   },
   "scripts": {
-    "dev": "pnpm --filter @bk/app-web dev",
-    "build": "pnpm --filter @bk/app-web build",
-    "preview": "pnpm --filter @bk/app-web preview",
+    "dev": "pnpm --filter @specter-core/app-web dev",
+    "build": "pnpm --filter @specter-core/app-web build",
+    "preview": "pnpm --filter @specter-core/app-web preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",

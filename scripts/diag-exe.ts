@@ -8,7 +8,7 @@
  * the first instructions at the entry point.
  */
 import { readFile } from 'node:fs/promises';
-import type { ApiCallContext, ApiInterceptor, ApiResult } from '@bk/contracts';
+import type { ApiCallContext, ApiInterceptor, ApiResult } from '@specter-core/contracts';
 import {
   ApiInterceptorImpl,
   GuestProcessRunner,
@@ -18,7 +18,7 @@ import {
   WasmRuntimeImpl,
   X86Decoder,
   registerDefaultHandlers,
-} from '@bk/core';
+} from '@specter-core/core';
 
 function traceInterceptor(inner: ApiInterceptor, rt: { getEip(): number }): ApiInterceptor {
   let count = 0;

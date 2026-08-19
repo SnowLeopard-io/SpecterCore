@@ -1,6 +1,6 @@
-# Browser Kernel — Architecture
+# SpecterCore — Architecture
 
-> Browser Kernel 在浏览器中通过 WASM + HLE（高级别模拟）运行 Windows x86 应用。
+> SpecterCore 在浏览器中通过 WASM + HLE（高级别模拟）运行 Windows x86 应用。
 > 本文件描述代码仓库的分层架构、解耦机制与扩展指南。
 
 ## 分层一览
@@ -25,7 +25,7 @@
 ## 三条解耦机制
 
 1. **契约优先（contracts-first）**
-   `@bk/contracts` 只含类型/枚举/常量，零实现。所有包只依赖它（+ `shared`）。
+   `@specter-core/contracts` 只含类型/枚举/常量，零实现。所有包只依赖它（+ `shared`）。
    任一层换实现（如 `NullGdiBridge` → `CanvasGdiBridge`）都不影响其他层。
 
 2. **DI 令牌（tokens）**
@@ -58,13 +58,13 @@ await kernel.stop();   // 逆序 stop → 清空容器与事件总线
 契约即端口，浏览器实现与测试实现都是适配器，可互换：
 
 - `FileStore`（`contracts/host.ts`）
-  - 浏览器适配器：`OpfsFileStore`（`@bk/host`）
-  - 测试适配器：`MemoryFileStore`（`@bk/host`，纯内存）
+  - 浏览器适配器：`OpfsFileStore`（`@specter-core/host`）
+  - 测试适配器：`MemoryFileStore`（`@specter-core/host`，纯内存）
   - 上层 `FileSystemBridgeImpl` 完全不知道底层是哪种。
 
 ## Win32 语义桥接
 
-`@bk/bridges/fs.ts` 是 P0 里最完整的一条链路：
+`@specter-core/bridges/fs.ts` 是 P0 里最完整的一条链路：
 
 ```
 CreateFile/ReadFile/WriteFile/SetFilePointer/FindFirstFile/…
@@ -80,7 +80,7 @@ CreateFile/ReadFile/WriteFile/SetFilePointer/FindFirstFile/…
 | 新的文件后端 | 实现 `FileStore`，注册到 `tokens.hostFileStore` |
 | 新的图形后端 | 实现 `GdiBridge`，注册到 `tokens.bridgeGdi` |
 | 新的 USB 类驱动 | 实现 `UsbDriver`，`registry.register(driver)` |
-| 新的桌面应用 | 在 `@bk/ui/src/apps.ts` 加一个 `AppDefinition` |
+| 新的桌面应用 | 在 `@specter-core/ui/src/apps.ts` 加一个 `AppDefinition` |
 | 新的 Windows API | `interceptor.hook('module.dll','Proc',handler)` |
 | 替换任意层实现 | 写自己的 Plugin 注册同令牌即可覆盖（后注册覆盖） |
 

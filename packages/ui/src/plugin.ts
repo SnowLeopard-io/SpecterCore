@@ -1,5 +1,5 @@
-import type { Plugin, PluginContext } from '@bk/contracts';
-import { tokens } from '@bk/contracts';
+import type { Plugin, PluginContext } from '@specter-core/contracts';
+import { tokens } from '@specter-core/contracts';
 import { WindowManagerImpl } from './window-manager';
 import { DesktopControllerImpl } from './desktop-controller';
 

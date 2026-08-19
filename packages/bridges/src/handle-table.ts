@@ -1,4 +1,4 @@
-import type { FileHandleRecord } from '@bk/contracts';
+import type { FileHandleRecord } from '@specter-core/contracts';
 
 /**
  * 文件句柄表：维护 Windows 语义的打开文件记录。

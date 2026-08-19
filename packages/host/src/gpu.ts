@@ -1,4 +1,4 @@
-import type { Dispose, GpuAdapter, GpuAdapterInfo } from '@bk/contracts';
+import type { Dispose, GpuAdapter, GpuAdapterInfo } from '@specter-core/contracts';
 
 /**
  * WebGPU 适配器：初始化设备，暴露适配器信息与帧循环。

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
-import type { DirEntry, FileStore } from '@bk/contracts';
-import { decodeText } from '@bk/shared';
+import type { DirEntry, FileStore } from '@specter-core/contracts';
+import { decodeText } from '@specter-core/shared';
 import { useUi } from '../context';
 import { collectDropFiles, importFiles } from '../import-files';
 import { downloadBytes } from '../download';
@@ -260,7 +260,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
 
   return (
     <div
-      className="bk-explorer"
+      className="sc-explorer"
       onDragEnter={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -277,21 +277,21 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
       }}
       onDrop={onDrop}
     >
-      <div className="bk-explorer-toolbar">
-        <button className="bk-explorer-btn" disabled={!canBack} onClick={back} aria-label="Back">
+      <div className="sc-explorer-toolbar">
+        <button className="sc-explorer-btn" disabled={!canBack} onClick={back} aria-label="Back">
           ◀
         </button>
-        <button className="bk-explorer-btn" disabled={!canUp} onClick={up} aria-label="Up">
+        <button className="sc-explorer-btn" disabled={!canUp} onClick={up} aria-label="Up">
           ▲
         </button>
-        <button className="bk-explorer-btn" onClick={() => load(path)} aria-label="Refresh">
+        <button className="sc-explorer-btn" onClick={() => load(path)} aria-label="Refresh">
           ↻
         </button>
-        <button className="bk-explorer-btn" onClick={() => void newFolder()} aria-label="New folder">
+        <button className="sc-explorer-btn" onClick={() => void newFolder()} aria-label="New folder">
           📁+
         </button>
         <button
-          className="bk-explorer-btn"
+          className="sc-explorer-btn"
           disabled={!selected}
           onClick={() => void deleteSelected()}
           aria-label="Delete"
@@ -299,23 +299,23 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
           🗑
         </button>
         <button
-          className="bk-explorer-btn"
+          className="sc-explorer-btn"
           disabled={!selected || entries.find((e) => e.name === selected)?.kind !== 'file'}
           onClick={() => void downloadSelected()}
           aria-label="Download"
         >
           ⬇
         </button>
-        <div className="bk-explorer-address">
-          <span className="bk-explorer-crumb" onClick={() => load('')}>
+        <div className="sc-explorer-address">
+          <span className="sc-explorer-crumb" onClick={() => load('')}>
             C:
           </span>
           {segments.map((seg, i) => {
             const crumbPath = segments.slice(0, i + 1).join('/');
             return (
               <span key={crumbPath}>
-                <span className="bk-explorer-sep">›</span>
-                <span className="bk-explorer-crumb" onClick={() => load(crumbPath)}>
+                <span className="sc-explorer-sep">›</span>
+                <span className="sc-explorer-crumb" onClick={() => load(crumbPath)}>
                   {seg}
                 </span>
               </span>
@@ -324,48 +324,48 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
         </div>
       </div>
 
-      {error && <div className="bk-explorer-error">{error}</div>}
+      {error && <div className="sc-explorer-error">{error}</div>}
 
-      <div className="bk-explorer-list">
-        {loading && <div className="bk-explorer-empty">Loading…</div>}
+      <div className="sc-explorer-list">
+        {loading && <div className="sc-explorer-empty">Loading…</div>}
         {!loading && !fs && (
-          <div className="bk-explorer-empty">No virtual disk available in this environment.</div>
+          <div className="sc-explorer-empty">No virtual disk available in this environment.</div>
         )}
         {!loading && fs && entries.length === 0 && (
-          <div className="bk-explorer-empty">This folder is empty.</div>
+          <div className="sc-explorer-empty">This folder is empty.</div>
         )}
         {!loading &&
           entries.map((entry) => (
             <div
               key={entry.name}
-              className={`bk-explorer-row ${selected === entry.name ? 'selected' : ''}`}
+              className={`sc-explorer-row ${selected === entry.name ? 'selected' : ''}`}
               onClick={() => setSelected(entry.name)}
               onDoubleClick={() => openEntry(entry)}
             >
-              <span className="bk-explorer-icon">{iconFor(entry)}</span>
-              <span className="bk-explorer-name">{entry.name}</span>
-              <span className="bk-explorer-size">
+              <span className="sc-explorer-icon">{iconFor(entry)}</span>
+              <span className="sc-explorer-name">{entry.name}</span>
+              <span className="sc-explorer-size">
                 {entry.kind === 'directory' ? '' : formatSize(entry.size)}
               </span>
-              <span className="bk-explorer-type">{entry.kind === 'directory' ? 'Folder' : 'File'}</span>
+              <span className="sc-explorer-type">{entry.kind === 'directory' ? 'Folder' : 'File'}</span>
             </div>
           ))}
       </div>
 
       {preview && (
-        <div className="bk-explorer-preview">
-          <div className="bk-explorer-preview-head">
+        <div className="sc-explorer-preview">
+          <div className="sc-explorer-preview-head">
             <span>{preview.name}</span>
-            <span className="bk-explorer-preview-actions">
-              <button className="bk-explorer-btn" onClick={() => void downloadPreview()} aria-label="Download">
+            <span className="sc-explorer-preview-actions">
+              <button className="sc-explorer-btn" onClick={() => void downloadPreview()} aria-label="Download">
                 ⬇
               </button>
-              <button className="bk-explorer-btn" onClick={() => setPreview(null)} aria-label="Close preview">
+              <button className="sc-explorer-btn" onClick={() => setPreview(null)} aria-label="Close preview">
                 ✕
               </button>
             </span>
           </div>
-          <pre className="bk-explorer-preview-body">
+          <pre className="sc-explorer-preview-body">
             {preview.text}
             {preview.truncated && '\n… (truncated)'}
           </pre>
@@ -373,7 +373,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
       )}
 
       {dropActive && (
-        <div className="bk-explorer-drop">Drop files to import into this folder</div>
+        <div className="sc-explorer-drop">Drop files to import into this folder</div>
       )}
     </div>
   );

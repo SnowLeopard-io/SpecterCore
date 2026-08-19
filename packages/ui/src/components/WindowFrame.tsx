@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
-import type { WindowHandle } from '@bk/contracts';
+import type { WindowHandle } from '@specter-core/contracts';
 import { useUi } from '../context';
 import type { UiController } from '../types';
 
@@ -26,7 +26,7 @@ const MaximizeIcon = (
 const RestoreIcon = (
   <svg viewBox="0 0 12 12" aria-hidden>
     <rect x="2.5" y="2.5" width="5.5" height="5.5" fill="none" stroke="currentColor" strokeWidth="1.1" />
-    <rect x="4" y="4" width="5.5" height="5.5" fill="var(--bk-titlebar)" stroke="currentColor" strokeWidth="1.1" />
+    <rect x="4" y="4" width="5.5" height="5.5" fill="var(--sc-titlebar)" stroke="currentColor" strokeWidth="1.1" />
   </svg>
 );
 
@@ -59,7 +59,7 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
     void controller.focus(win.id);
     // Clicks on caption buttons (min/max/close) must not start a drag or
     // capture the pointer, otherwise their click events get swallowed.
-    if ((e.target as HTMLElement).closest('.bk-title-controls')) return;
+    if ((e.target as HTMLElement).closest('.sc-title-controls')) return;
     if (isMaximized) return;
     setDragging(true);
     setDragStart({ x: e.clientX - win.bounds.x, y: e.clientY - win.bounds.y });
@@ -80,28 +80,28 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
 
   return (
     <div
-      className={`bk-window ${focused ? 'focused' : ''} ${isMaximized ? 'maximized' : ''}`}
+      className={`sc-window ${focused ? 'focused' : ''} ${isMaximized ? 'maximized' : ''}`}
       style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex: win.zIndex }}
       onPointerDown={() => void controller.focus(win.id)}
     >
       <div
-        className="bk-titlebar"
+        className="sc-titlebar"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
       >
-        <span className="bk-title-icon">{win.options.icon ?? '▣'}</span>
-        <span className="bk-title">{win.title}</span>
-        <span className="bk-title-controls">
+        <span className="sc-title-icon">{win.options.icon ?? '▣'}</span>
+        <span className="sc-title">{win.title}</span>
+        <span className="sc-title-controls">
           {win.options.minimizable !== false && (
-            <button className="bk-caption-btn" aria-label="Minimize" onClick={() => void controller.minimize(win.id)}>
+            <button className="sc-caption-btn" aria-label="Minimize" onClick={() => void controller.minimize(win.id)}>
               {MinimizeIcon}
             </button>
           )}
           {win.options.maximizable !== false && (
             <button
-              className="bk-caption-btn"
+              className="sc-caption-btn"
               aria-label={isMaximized ? 'Restore' : 'Maximize'}
               onClick={() => void (isMaximized ? controller.restore(win.id) : controller.maximize(win.id))}
             >
@@ -109,16 +109,16 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
             </button>
           )}
           {win.options.closable !== false && (
-            <button className="bk-caption-btn close" aria-label="Close" onClick={() => void controller.close(win.id)}>
+            <button className="sc-caption-btn close" aria-label="Close" onClick={() => void controller.close(win.id)}>
               {CloseIcon}
             </button>
           )}
         </span>
       </div>
-      <div className="bk-window-body">{renderContent()}</div>
+      <div className="sc-window-body">{renderContent()}</div>
       {win.options.resizable !== false && !isMaximized && (
         <div
-          className="bk-resizer"
+          className="sc-resizer"
           onPointerDown={(e) => {
             e.stopPropagation();
             const startX = e.clientX;

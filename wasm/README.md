@@ -13,10 +13,10 @@ Windows compatibility core and device drivers. It is **not yet compiled**
 
 | Module | Package | Contract | Milestone |
 | ------ | ------- | -------- | --------- |
-| x86 JIT translator (i386 → WASM) | `@bk/core` JitEngine | `contracts/core/jit.ts` | P1 |
-| PE loader + IAT rewriting | `@bk/core` PeLoader | `contracts/core/pe.ts` | P1 |
-| API marshalling (WASM → TS) | `@bk/core` ApiInterceptor | `contracts/core/api.ts` | P1 |
-| Wine HID / mass-storage drivers | `@bk/drivers` | `contracts/drivers.ts` | P6 |
+| x86 JIT translator (i386 → WASM) | `@specter-core/core` JitEngine | `contracts/core/jit.ts` | P1 |
+| PE loader + IAT rewriting | `@specter-core/core` PeLoader | `contracts/core/pe.ts` | P1 |
+| API marshalling (WASM → TS) | `@specter-core/core` ApiInterceptor | `contracts/core/api.ts` | P1 |
+| Wine HID / mass-storage drivers | `@specter-core/drivers` | `contracts/drivers.ts` | P6 |
 
 ## Build layout (proposed)
 
@@ -34,7 +34,7 @@ wasm/
 - The JIT produces `WebAssembly.Module` instances that execute inside the
   `WasmRuntime` linear memory (`contracts/core/jit.ts`).
 - Trapped API calls are marshalled into `ApiCallContext` and dispatched by the
-  `@bk/core` interceptor.
+  `@specter-core/core` interceptor.
 - Drivers speak the IRP/URB contract in `contracts/drivers.ts` and reach the
   browser through the WASI-USB bridge (`contracts/bridge/usb.ts`).
 

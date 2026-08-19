@@ -91,22 +91,22 @@ export function ImageViewerApp({ initialFile }: ImageViewerProps) {
   };
 
   return (
-    <div className="bk-image-viewer">
-      <div className="bk-image-toolbar">
+    <div className="sc-image-viewer">
+      <div className="sc-image-toolbar">
         <button
-          className="bk-image-nav"
+          className="sc-image-nav"
           disabled={index <= 0}
           onClick={() => step(-1)}
           aria-label="Previous image"
         >
           ◀
         </button>
-        <span className="bk-image-name">{name}</span>
-        <span className="bk-image-counter">
+        <span className="sc-image-name">{name}</span>
+        <span className="sc-image-counter">
           {index >= 0 ? `${index + 1} / ${siblings.length}` : ''}
         </span>
         <button
-          className="bk-image-nav"
+          className="sc-image-nav"
           disabled={index < 0 || index >= siblings.length - 1}
           onClick={() => step(1)}
           aria-label="Next image"
@@ -114,11 +114,11 @@ export function ImageViewerApp({ initialFile }: ImageViewerProps) {
           ▶
         </button>
       </div>
-      <div className="bk-image-stage">
-        {error && <div className="bk-image-error">{error}</div>}
-        {!error && url && <img className="bk-image-img" src={url} alt={name} draggable={false} />}
+      <div className="sc-image-stage">
+        {error && <div className="sc-image-error">{error}</div>}
+        {!error && url && <img className="sc-image-img" src={url} alt={name} draggable={false} />}
         {!error && !url && (
-          <div className="bk-image-empty">Open an image from the virtual disk</div>
+          <div className="sc-image-empty">Open an image from the virtual disk</div>
         )}
       </div>
     </div>

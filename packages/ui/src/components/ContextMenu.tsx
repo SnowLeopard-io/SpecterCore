@@ -11,14 +11,14 @@ interface ContextMenuProps {
 /** Desktop right-click context menu (Windows 11 style). */
 export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onWipe, onClose }: ContextMenuProps) {
   return (
-    <div className="bk-context-menu" style={{ left: x, top: y }}>
+    <div className="sc-context-menu" style={{ left: x, top: y }}>
       <button
         onClick={() => {
           onOpenExplorer();
           onClose();
         }}
       >
-        <span className="bk-context-icon">📂</span> Open File Explorer
+        <span className="sc-context-icon">📂</span> Open File Explorer
       </button>
       <button
         onClick={() => {
@@ -26,7 +26,7 @@ export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onWi
           onClose();
         }}
       >
-        <span className="bk-context-icon">📁</span> New Folder
+        <span className="sc-context-icon">📁</span> New Folder
       </button>
       <hr />
       <button
@@ -35,20 +35,20 @@ export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onWi
           onClose();
         }}
       >
-        <span className="bk-context-icon">↻</span> Refresh
+        <span className="sc-context-icon">↻</span> Refresh
       </button>
       <hr />
       <button
-        className="bk-context-danger"
+        className="sc-context-danger"
         onClick={() => {
           onWipe();
           onClose();
         }}
       >
-        <span className="bk-context-icon">🗑</span> Wipe Virtual Disk
+        <span className="sc-context-icon">🗑</span> Wipe Virtual Disk
       </button>
       <button onClick={onClose}>
-        <span className="bk-context-icon">⚙</span> Properties
+        <span className="sc-context-icon">⚙</span> Properties
       </button>
     </div>
   );

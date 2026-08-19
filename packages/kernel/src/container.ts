@@ -1,4 +1,4 @@
-import type { Factory, IContainer, RegistrationOptions, Token } from '@bk/contracts';
+import type { Factory, IContainer, RegistrationOptions, Token } from '@specter-core/contracts';
 
 export class ContainerError extends Error {
   constructor(message: string) {

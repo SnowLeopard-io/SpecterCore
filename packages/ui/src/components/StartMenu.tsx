@@ -1,4 +1,4 @@
-import type { DesktopAppInfo } from '@bk/contracts';
+import type { DesktopAppInfo } from '@specter-core/contracts';
 
 interface StartMenuProps {
   open: boolean;
@@ -31,28 +31,28 @@ const PowerIcon = (
 export function StartMenu({ open, apps, onLaunch, onShutdown }: StartMenuProps) {
   if (!open) return null;
   return (
-    <div className="bk-start-menu">
-      <div className="bk-start-search">
+    <div className="sc-start-menu">
+      <div className="sc-start-search">
         {SearchIcon}
         <span>Search for apps, settings and documents</span>
       </div>
 
-      <div className="bk-start-section-title">Pinned</div>
-      <div className="bk-start-grid">
+      <div className="sc-start-section-title">Pinned</div>
+      <div className="sc-start-grid">
         {apps.map((app) => (
-          <button key={app.appId} className="bk-start-tile" onClick={() => onLaunch(app.appId)} title={app.description}>
-            <span className="bk-start-tile-icon">{app.icon}</span>
-            <span className="bk-start-tile-label">{app.name}</span>
+          <button key={app.appId} className="sc-start-tile" onClick={() => onLaunch(app.appId)} title={app.description}>
+            <span className="sc-start-tile-icon">{app.icon}</span>
+            <span className="sc-start-tile-label">{app.name}</span>
           </button>
         ))}
       </div>
 
-      <div className="bk-start-footer">
-        <button className="bk-start-user">
-          <span className="bk-start-avatar">BK</span>
-          <span>Browser Kernel</span>
+      <div className="sc-start-footer">
+        <button className="sc-start-user">
+          <span className="sc-start-avatar">BK</span>
+          <span>SpecterCore</span>
         </button>
-        <button className="bk-start-power" aria-label="Shut down" onClick={onShutdown}>
+        <button className="sc-start-power" aria-label="Shut down" onClick={onShutdown}>
           {PowerIcon}
         </button>
       </div>

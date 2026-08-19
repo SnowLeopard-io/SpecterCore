@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DirEntry, FileOpenMode, FileStat, FileStore, OpenedFile } from '@bk/contracts';
+import type { DirEntry, FileOpenMode, FileStat, FileStore, OpenedFile } from '@specter-core/contracts';
 import {
   PROGRAM_FILES,
   REGISTRY_PATH,
@@ -10,7 +10,7 @@ import {
   uninstallPackage,
 } from './installer';
 
-/** 极简内存 FileStore：仅覆盖安装管道所需语义（独立于 @bk/host 的实现）。 */
+/** 极简内存 FileStore：仅覆盖安装管道所需语义（独立于 @specter-core/host 的实现）。 */
 class FakeStore implements FileStore {
   readonly name = 'fake';
   private readonly files = new Map<string, Uint8Array>();

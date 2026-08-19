@@ -8,11 +8,11 @@ import type {
   ThreadInfo,
   WaitResult,
   WorkerPool,
-} from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
-import { basename, nextId } from '@bk/shared';
-import type { KernelObjectManager } from '@bk/contracts';
-import type { MemoryManager } from '@bk/contracts';
+} from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
+import { basename, nextId } from '@specter-core/shared';
+import type { KernelObjectManager } from '@specter-core/contracts';
+import type { MemoryManager } from '@specter-core/contracts';
 
 interface ProcessRecord {
   info: ProcessInfo;

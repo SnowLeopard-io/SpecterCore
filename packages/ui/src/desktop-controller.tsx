@@ -11,23 +11,23 @@ import type {
   SystemInfo,
   WindowContent,
   WindowManager,
-} from '@bk/contracts';
+} from '@specter-core/contracts';
 import type { ReactNode } from 'react';
-import { tokens } from '@bk/contracts';
+import { tokens } from '@specter-core/contracts';
 import {
   appForFile,
   installPackage as installPkg,
   listInstalledApps as listRegistryApps,
   toStorePath,
   uninstallPackage as uninstallPkg,
-} from '@bk/shared';
+} from '@specter-core/shared';
 import {
   GuestProcessRunner,
   JitEngineImpl,
   WasmRuntimeImpl,
-} from '@bk/core';
+} from '@specter-core/core';
 import { createRoot } from 'react-dom/client';
-import { probeCapabilities } from '@bk/host';
+import { probeCapabilities } from '@specter-core/host';
 import { UiContext } from './context';
 import { Desktop } from './components/Desktop';
 import { DEFAULT_APPS } from './apps';
@@ -399,9 +399,9 @@ export class DesktopControllerImpl implements DesktopController {
         height: 220,
         resizable: false,
         content: reactContent(
-          <div className="bk-run-stage">
-            <div className="bk-run-title">Cannot start {name}</div>
-            <pre className="bk-run-note center" style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>
+          <div className="sc-run-stage">
+            <div className="sc-run-title">Cannot start {name}</div>
+            <pre className="sc-run-note center" style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>
               {message}
             </pre>
           </div>,

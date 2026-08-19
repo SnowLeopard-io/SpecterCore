@@ -8,7 +8,7 @@
  * into EAX (design 4.2.6).
  */
 
-import type { ApiInterceptor } from '@bk/contracts';
+import type { ApiInterceptor } from '@specter-core/contracts';
 import type { ApiStub } from '../pe/mapper';
 import type { TrapHandler } from './executor';
 import type { WasmRuntimeImpl } from './runtime';

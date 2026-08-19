@@ -7,8 +7,8 @@
  * INT vector; it may rewrite EIP/registers before execution resumes.
  */
 
-import type { JitEngine } from '@bk/contracts';
-import { BlockStatus } from '@bk/contracts';
+import type { JitEngine } from '@specter-core/contracts';
+import { BlockStatus } from '@specter-core/contracts';
 import { STATUS_FAULT, STATUS_TRAP } from './cpu';
 import { IncompleteBlockError } from './engine';
 import type { WasmRuntimeImpl } from './runtime';

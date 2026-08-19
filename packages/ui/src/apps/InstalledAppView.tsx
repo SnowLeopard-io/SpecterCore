@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import type { InstalledApp } from '@bk/contracts';
-import { decodeText, extractPeIcon } from '@bk/shared';
+import type { InstalledApp } from '@specter-core/contracts';
+import { decodeText, extractPeIcon } from '@specter-core/shared';
 import { useUi } from '../context';
 
 /** 读取安装目录内的文本文件（仅演示用途）。 */
@@ -85,38 +85,38 @@ export function InstalledAppView({ app }: InstalledAppViewProps) {
   }, []);
 
   return (
-    <div className="bk-installed">
-      <div className="bk-installed-head">
-        <span className="bk-installed-icon">
-          {exeIcon ? <img className="bk-installed-exe-icon" src={exeIcon} alt="" /> : app.icon}
+    <div className="sc-installed">
+      <div className="sc-installed-head">
+        <span className="sc-installed-icon">
+          {exeIcon ? <img className="sc-installed-exe-icon" src={exeIcon} alt="" /> : app.icon}
         </span>
         <div>
-          <div className="bk-installed-name">{app.name}</div>
-          <div className="bk-installed-version">Version {app.version}</div>
+          <div className="sc-installed-name">{app.name}</div>
+          <div className="sc-installed-version">Version {app.version}</div>
         </div>
       </div>
-      <div className="bk-installed-desc">{app.description}</div>
-      <div className="bk-installed-meta">
+      <div className="sc-installed-desc">{app.description}</div>
+      <div className="sc-installed-meta">
         <div>
-          <span className="bk-installed-meta-label">Installed to</span>
-          <span className="bk-installed-meta-value">C:\{app.installDir}</span>
+          <span className="sc-installed-meta-label">Installed to</span>
+          <span className="sc-installed-meta-value">C:\{app.installDir}</span>
         </div>
         <div>
-          <span className="bk-installed-meta-label">Registered</span>
-          <span className="bk-installed-meta-value">
+          <span className="sc-installed-meta-label">Registered</span>
+          <span className="sc-installed-meta-value">
             {new Date(app.installedAt).toLocaleString()}
           </span>
         </div>
       </div>
       {readme !== null && (
-        <pre className="bk-installed-readme">
-          <span className="bk-installed-readme-title">README.txt</span>
+        <pre className="sc-installed-readme">
+          <span className="sc-installed-readme-title">README.txt</span>
           {readme}
         </pre>
       )}
       {hasExe && (
-        <div className="bk-installed-pe">
-          <div className="bk-installed-pe-title">⚙️ Native executable payload</div>
+        <div className="sc-installed-pe">
+          <div className="sc-installed-pe-title">⚙️ Native executable payload</div>
           <p>
             This package contains a real Windows .exe, copied byte-for-byte to the virtual
             disk and registered in the Start Menu. The PE execution engine (core/pe + core/jit)
@@ -125,7 +125,7 @@ export function InstalledAppView({ app }: InstalledAppViewProps) {
           </p>
         </div>
       )}
-      <div className="bk-installed-hint">
+      <div className="sc-installed-hint">
         This window is the app&apos;s entry, launched from the Start Menu after installation.
       </div>
     </div>

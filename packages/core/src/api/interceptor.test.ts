@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ApiHost, ApiInterceptor } from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
+import type { ApiHost, ApiInterceptor } from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
 import { ApiInterceptorImpl } from './interceptor';
 import { registerDefaultHandlers } from './handlers';
 

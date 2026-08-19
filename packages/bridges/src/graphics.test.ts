@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Color } from '@bk/contracts';
+import type { Color } from '@specter-core/contracts';
 import { CanvasGdiBridge, NullGdiBridge } from './graphics';
 
 const red: Color = { r: 255, g: 0, b: 0, a: 255 };

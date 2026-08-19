@@ -6,9 +6,9 @@
  * 每次输出 ops/sec 与 ms/op，作为性能回归的基准线（CI 中下降 >5% 应阻断）。
  * 目前覆盖图形桥接 3.2 的关键热路径；后续加入 JIT 翻译吞吐量、系统调用延迟等。
  */
-import { GdiSurface, ropIndex, applyRopPixels, toPixel } from '@bk/bridges';
-import { Rop3 } from '@bk/contracts';
-import type { Color } from '@bk/contracts';
+import { GdiSurface, ropIndex, applyRopPixels, toPixel } from '@specter-core/bridges';
+import { Rop3 } from '@specter-core/contracts';
+import type { Color } from '@specter-core/contracts';
 
 const ITERS = 50;
 const N = 200000;

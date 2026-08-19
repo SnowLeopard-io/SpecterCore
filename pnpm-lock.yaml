@@ -53,25 +53,25 @@ importers:
 
   apps/web:
     dependencies:
-      '@bk/bridges':
+      '@specter-core/bridges':
         specifier: workspace:*
         version: link:../../packages/bridges
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
-      '@bk/core':
+      '@specter-core/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@bk/drivers':
+      '@specter-core/drivers':
         specifier: workspace:*
         version: link:../../packages/drivers
-      '@bk/host':
+      '@specter-core/host':
         specifier: workspace:*
         version: link:../../packages/host
-      '@bk/kernel':
+      '@specter-core/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
-      '@bk/ui':
+      '@specter-core/ui':
         specifier: workspace:*
         version: link:../../packages/ui
       react:
@@ -96,17 +96,17 @@ importers:
 
   packages/bridges:
     dependencies:
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@bk/kernel':
+      '@specter-core/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@bk/shared':
+      '@specter-core/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
-      '@bk/host':
+      '@specter-core/host':
         specifier: workspace:*
         version: link:../host
 
@@ -114,67 +114,67 @@ importers:
 
   packages/core:
     dependencies:
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@bk/kernel':
+      '@specter-core/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@bk/shared':
+      '@specter-core/shared':
         specifier: workspace:*
         version: link:../shared
 
   packages/drivers:
     dependencies:
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@bk/kernel':
+      '@specter-core/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@bk/shared':
+      '@specter-core/shared':
         specifier: workspace:*
         version: link:../shared
 
   packages/host:
     dependencies:
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@bk/kernel':
+      '@specter-core/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@bk/shared':
+      '@specter-core/shared':
         specifier: workspace:*
         version: link:../shared
 
   packages/kernel:
     dependencies:
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts
 
   packages/shared:
     dependencies:
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts
 
   packages/ui:
     dependencies:
-      '@bk/contracts':
+      '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts
-      '@bk/core':
+      '@specter-core/core':
         specifier: workspace:*
         version: link:../core
-      '@bk/host':
+      '@specter-core/host':
         specifier: workspace:*
         version: link:../host
-      '@bk/kernel':
+      '@specter-core/kernel':
         specifier: workspace:*
         version: link:../kernel
-      '@bk/shared':
+      '@specter-core/shared':
         specifier: workspace:*
         version: link:../shared
       react:

@@ -1,6 +1,6 @@
 # 进度 / 交接文档 (PROGRESS)
 
-> **给下一个 agent 的交接入口。** 目标：让 **Windows exe** 在 Browser Kernel 的 JIT 里跑起来，最终在 L6 桌面（apps/web）里加载并运行（含控制台输出）。
+> **给下一个 agent 的交接入口。** 目标：让 **Windows exe** 在 SpecterCore 的 JIT 里跑起来，最终在 L6 桌面（apps/web）里加载并运行（含控制台输出）。
 > 读完本文件后请读 `packages/core/src/{pe, jit, process, api}/`、`packages/ui/src/` 与 `packages/contracts/src/`。
 > **2026-08-19 交接（Step 13 进行中）：cmd.exe 攻坚——定位并修复了 Step 12 遗留「最后 1 次 cookie FAIL」的两个根因：①`emitXchg`（codegen.ts）把 a 旧值存 L_TMP 但 storeOperand 内部第一步就覆盖 L_TMP → `xchg esp,eax` 静默失效 → __chkstk 未分配栈 → `push ebx` 覆盖 [ebp-4] cookie（**0x40b4c8 FAIL 真正根因**）②`0F 1F /r` 多字节 NOP 不消费 ModRM（x86-decoder.ts）→ 0x40eb20 解码错位 fault。修复后 0x40b4c8/0x40bba9/0x414aa9/0x40b6e3 cookie 全 OK，cmd 推进到 `ApiSetQueryApiSetPresence → RtlCreateUnicodeStringFromAsciiz → 0x42d39c`。当前卡点：**0x42d47a cookie FAIL（ebp=0x7000000）——ApiSetQueryApiSetPresence（无 handler 无 argCount）默认处理向 present 指针（=0x41efeb 帧 [ebp-1]=0x7fffe63）写数据，4 字节覆盖相邻 [ebp]=0x7fffe64 槽（保存的调用者 ebp）→ leave 后 ebp=0x07000000 → 后续全错位**。下一步：查 dispatcher 默认行为确认 → 给 ApiSetQueryApiSetPresence 加 handler（present 只写 1 字节）+ 补 rtlcreateunicodestringfromasciiz argCount:2 → cmd 应能进入 dir 执行。⚠️ 本会话有同事并行修改同一工作区（以文件实际内容为准，提交前 git status 确认）。diag-trap 留了 [ck3]/[ck4] 断点供定位 0x42d47a（用完删）。**
 
@@ -13,9 +13,9 @@
 
 ## 已完成里程碑（历史，可复现）
 
-- 32 位 headless 闭环：`sample/hello.exe` 打印 `hello from browser-kernel!` 退出码 7。✓
+- 32 位 headless 闭环：`sample/hello.exe` 打印 `hello from specter-core!` 退出码 7。✓
 - x64 headless 闭环：`sample/hello-x64.exe`（自造 PE32+）打印 x64 消息。✓
-- L6 桌面集成：`apps/web` 的 RunExecutableApp 真实执行 + 控制台输出（`pnpm --filter @bk/app-web build` ✓）。
+- L6 桌面集成：`apps/web` 的 RunExecutableApp 真实执行 + 控制台输出（`pnpm --filter @specter-core/app-web build` ✓）。
 - 真实 Inno 安装包（TraeWork_CN-Setup-x64.exe，32 位）从秒挂推进到 LZMA 解压（见 Step 3/4 历史）。
 - 真实 notepad.exe（SysWOW64 x86）：delay-load 收尾打通 → cookie 校验通过 → **干净退出**（`status=exit eip=0x0`，`_o_exit(0)`），见 Step 6。✓
 - 真实 notepad.exe：**GUI 假句柄层 + WinRT/WIP 跳过 + __chkstk/XADD 修复**，推进到"单实例互斥体检查"（见 Step 7）。✓（部分）
@@ -28,7 +28,7 @@
 - 嵌套执行（SEH handler / _initterm / 任意 guest 函数调用）统一用嵌套 Executor + sentinel `int 0x2d` 停，**必须 snapshot/restore 全寄存器含 EIP**。
 - `__bk_seh_debug` 全局开关；`[seh]` 日志含每次 RaiseException/RtlUnwind 的链遍历。
 - **运行环境**：`pnpm` 坏了（corepack 路径转义），用 managed node + esbuild 直跑（见下）。
-- `node_modules/@bk/*` 必须是 junction（`scripts/fix-bk-links.py`），改 `packages/*` 后行为没变先查这个。
+- `node_modules/@specter-core/*` 必须是 junction（`scripts/fix-sc-links.py`），改 `packages/*` 后行为没变先查这个。
 - **int3（0xCC）填充区会被 executor 当普通代码穿过**（见 Step 6 bug 3）：exe 若"执行"到 int3 填充区会继续跑而不是 fault，掩盖真实错误。
 - **虚拟盘（FileStore，浏览器=OPFS，node=MemoryFileStore）**：`stat`/`openFile('read')` 遇缺失目录树返回 null / 抛错（Step 10 已修），绝不隐式创建；'write' 模式不创建文件（要 'create'）；createDirectory 非幂等（node 版）。内置工具经 `packages/ui/src/builtin-win.ts` 懒预置（bootstrap + launchGuestWindow 双调用点）。
 - **UI 层（packages/ui）**：DesktopController（launch 对内置 guest 应用走 launchGuestWindow 独立窗口分支）→ WindowManager（L6 原生窗口）→ GuestWindowView（菜单栏+编辑区，strip &）。内置 notepad 在 apps.tsx 的 render 是占位 null，真实入口是 launchGuestWindow。
@@ -391,14 +391,14 @@ notepad.exe（SysWOW64 x86）**首次达到完整生命周期闭环**：
 - 可选：给 EDIT 控件加 WM_PAINT 宿主渲染（文字可见）；或先验证一个"自己画窗口"的 exe（WriteFile/TextOutW 路径）。
 
 ### Layer 3 完成记录（L6 桌面集成，2026-08-19）
-- **RunExecutableApp.tsx**：`run()` 保存 `guestResult`（state）；running 阶段控制台下方渲染 **Guest Window 面板**（`.bk-guest`）：
-  - 每个顶层窗口（parent===0）一张 Windows 风格窗口卡（`.bk-win`）：标题栏（类名 — 文本 + HWND）、内容区（paintCommands 按坐标绝对定位渲染：text→span、fillrect/rect→div；Edit 类窗口显示文本；无绘制显示 "no paint commands"）。
-  - 底部窗口清单（`.bk-guest-list`）：hwnd/className/wndProc/text 逐行列出（含子窗口）。
+- **RunExecutableApp.tsx**：`run()` 保存 `guestResult`（state）；running 阶段控制台下方渲染 **Guest Window 面板**（`.sc-guest`）：
+  - 每个顶层窗口（parent===0）一张 Windows 风格窗口卡（`.sc-win`）：标题栏（类名 — 文本 + HWND）、内容区（paintCommands 按坐标绝对定位渲染：text→span、fillrect/rect→div；Edit 类窗口显示文本；无绘制显示 "no paint commands"）。
+  - 底部窗口清单（`.sc-guest-list`）：hwnd/className/wndProc/text 逐行列出（含子窗口）。
   - paint 命令只画在第一个顶层窗口（无 hdc→hwnd 归属映射）。
-- **styles.css**：`.bk-guest*`/`.bk-win*`/`.bk-paint*` 一套 Windows 11 风格（圆角、阴影、标题栏、等宽字体）。
+- **styles.css**：`.sc-guest*`/`.sc-win*`/`.sc-paint*` 一套 Windows 11 风格（圆角、阴影、标题栏、等宽字体）。
 - **修复 dispatcher maxArgs 8→16**（trap-dispatcher 构造，guest-process run()）：CreateWindowExW 是 12 参 stdcall，hWndParent 在 rawArgs[8]（第 9 参）——原 8 槽拿不到，导致 Edit 控件 parent 误报 0。修复后窗口树正确：`0x10002 class="Edit" parent=0x10001`。
 - **验证**：notepad `status=exit eip=0x0` cleanExit ✓；窗口树 `[win] 0x10001 class="Notepad" wndProc=0x40e9c0 parent=0x0` + `[win] 0x10002 class="Edit" parent=0x10001` ✓；apps/web vite build ✓（132 modules，425 kB JS）；preview http://localhost:4173 ✓。回归：typecheck ✓、vitest 189/189 ✓、lint 0/0 ✓。
-- 注：vite build 前须手动 `rm -rf dist`（沙箱 safe-delete 会拦 vite 的 emptyDir trash 操作）；`node_modules/@bk` 需 junction（scripts/fix-bk-links.py）。
+- 注：vite build 前须手动 `rm -rf dist`（沙箱 safe-delete 会拦 vite 的 emptyDir trash 操作）；`node_modules/@specter-core` 需 junction（scripts/fix-sc-links.py）。
 
 ### 下一步（候选）
 - **EDIT 控件宿主 WM_PAINT**：给 Edit 类窗口在 guest 侧画文字（WndProc 模拟）或宿主侧直接把 `text` 渲染到窗口卡内容区（当前已显示文本，但非位图级）。
@@ -417,7 +417,7 @@ notepad.exe（SysWOW64 x86）**首次达到完整生命周期闭环**：
 
 ## 一句话现状
 
-浏览器里点开始菜单 **Notepad (Windows)** → **直接弹出独立 notepad 窗口**（L6 原生窗口，无中间应用壳）：真实 MUI 字符串标题、真实 RT_MENU 菜单栏（File/Edit，无 & 符号）、白色可输入编辑区、输入回流 guest EDIT 控件、菜单项点击发真实 WM_COMMAND（ID 来自 MUI）。F12 控制台确认 `[bk] merged 13 MUI resources (C:/Windows/SysWOW64/en-US/notepad.exe.mui)`。
+浏览器里点开始菜单 **Notepad (Windows)** → **直接弹出独立 notepad 窗口**（L6 原生窗口，无中间应用壳）：真实 MUI 字符串标题、真实 RT_MENU 菜单栏（File/Edit，无 & 符号）、白色可输入编辑区、输入回流 guest EDIT 控件、菜单项点击发真实 WM_COMMAND（ID 来自 MUI）。F12 控制台确认 `[specter-core] merged 13 MUI resources (C:/Windows/SysWOW64/en-US/notepad.exe.mui)`。
 
 ## 架构：内置工具全链路（新 agent 必读）
 
@@ -442,7 +442,7 @@ onMessageWait → 把 guest 顶层窗口创建为 L6 独立窗口（WindowManage
 - 修复：opfs.ts `stat`/`resolveHandle` 缺失目录返回 null；`openFile('read')` 不再隐式创建文件（原 resolveHandle(..., true) 无条件 create，读到空文件 → "not a PE file"）；launchGuestWindow 全程 try/catch → `showGuestError` 弹友好错误窗口。
 
 ### 2. 点不开图标（根因 2：预置时序不可靠）→ 懒预置
-- `ensureBuiltinWinFiles` 提取为共享模块 `packages/ui/src/builtin-win.ts`（@bk/ui 导出），bootstrap.ts 和 launchGuestWindow 都调用（幂等：stat 非空文件即跳过，空/缺失重写，fetch 失败记录 warn）。
+- `ensureBuiltinWinFiles` 提取为共享模块 `packages/ui/src/builtin-win.ts`（@specter-core/ui 导出），bootstrap.ts 和 launchGuestWindow 都调用（幂等：stat 非空文件即跳过，空/缺失重写，fetch 失败记录 warn）。
 - 校验：跳过条件带 `kind==='file' && size>0`，杜绝旧 openFile bug 留下的空文件永久占位。
 
 ### 3. "not a PE file"
@@ -474,7 +474,7 @@ onMessageWait → 把 guest 顶层窗口创建为 L6 独立窗口（WindowManage
 ## 验证状态
 
 - **probe-mui.ts**（scripts/，node 模拟浏览器完整路径：MemoryFileStore 虚拟盘 + readFile）→ `muiLoaded=true`、`merged 13 MUI resources`、File 菜单完整真实（1:&New, 8:New &Window, 2:&Open, 3:&Save, 4:Save &As, 5:Page Setup, 6:&Print, 7:E&xit）、Edit 含全部真实项。跑法：`"$N" node_modules/esbuild/bin/esbuild scripts/probe-mui.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/probe-mui.mjs && "$N" node_modules/.cache/probe-mui.mjs 2>&1 | grep -E "\[probe\]|\[bk\]"`。
-- 浏览器日志：`[browser-kernel] provisioned Windows/SysWOW64/notepad.exe (307712 bytes)` ×3 + `builtin win files ready`；运行后 `[bk] merged 13 MUI resources`。
+- 浏览器日志：`[specter-core] provisioned Windows/SysWOW64/notepad.exe (307712 bytes)` ×3 + `builtin win files ready`；运行后 `[specter-core] merged 13 MUI resources`。
 - 回归：typecheck ✓、vitest **189/189** ✓、lint 0/0 ✓、build ✓（历轮 index-Da0IRqmJ → … → CPICXGIS → DqK7bcyX）。
 - **构建注意**：vite build 前必须手动 `rm -rf dist`（沙箱 safe-delete 拦 emptyDir trash）；构建要等 `tail -3 /tmp/build.log` 确认成功，preview 404 = dist 被删构建没完成（多次踩坑）。
 
@@ -795,6 +795,14 @@ Step 13 遗留的 0x42d47a cookie FAIL（ebp=0x7000000）已彻底解决，**真
 ## 未解 / 注意点（继承 + 新增）
 
 - **当前卡点**：0x40baa6 fastcall 函数 0x40b743 的 ecx 参数（0xfffffff4 伪句柄）被当指针。需定位调用者。
+- **【更新】当前卡点精确定位**：0x40baa6 `cmp [edi], ebx` 中 edi=0xfffffff4（STD_ERROR_HANDLE）。根因链：
+  1. `0x40ba01 call 0x42d39c`（字符串处理函数）返回 eax=0（NULL）。
+  2. 0x42d39c 走 ApiSetQueryApiSetPresence=TRUE 分支（0x42d3cd），调用延迟导入 `[0x453020]`（IAT 初始值=0x41f035 thunk），该 API 返回 0 → esi=0 → 0x42d3fd je → 返回 NULL。
+  3. 返回 NULL 后走错误路径：0x40ba33 je 0x40ba4f → 0x40ba52 call 0x40a1c7(ebx, 8) → 0x40a1c7 内部调用 0x40a1f5，修改 edi=0xfffffff4, ebx=0xfffffff5。
+  4. 后续 0x40baab `cmp [edi], ebx` 把 edi=0xfffffff4 当指针 → OOB fault。
+  - **待解决**：`[0x453020]` 延迟导入 API 名称未知（ResolveDelayLoadedAPI 无 [delayload] 日志，可能 IAT 已预解析或嵌套执行不触发 onStep）。需反汇编 0x41d8e2（__delayLoadHelper2）或在 ResolveDelayLoadedAPI 加断点确认 API 名称，然后实现 handler 使其返回非零。
+  - **替代方案**：若 ApiSetQueryApiSetPresence 返回 FALSE（present=0），0x42d39c 走 RtlCreateUnicodeStringFromAsciiz 分支（0x42d3df），已实现 handler。可尝试把 present 改成 0 看是否绕过。
+- **onStep 签名扩展**：executor.ts 和 guest-process.ts 的 `onStep` 从 `(eip)` 改为 `(eip, runtime)`，方便调试时读寄存器。可保留（向后兼容，runtime 是新增参数）。
 - **longjmp jmp_buf 布局**：当前假设 [0..20]=Ebp/Ebx/Edi/Esi/Esp/Eip 但读到全 0。MSVC 可能用 _setjmp3，jmp_buf 前部有 Registration/TryLevel/Cookie 等字段。cmd /c 模式可能不调用 setjmp（jmp_buf 零初始化）。Bug 6 修复后 cmd 不再走 longjmp 路径，暂不阻塞。
 - **内置 Command Prompt 应用**（独立窗口 + stdin/stdout 桥接）尚未实现（Step 11 下一步）。
 - **GetOpenFileNameW 文件对话框桥接**（notepad Open/Save）未实现。

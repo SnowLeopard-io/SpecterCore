@@ -1,4 +1,4 @@
-import type { Plugin } from '@bk/contracts';
+import type { Plugin } from '@specter-core/contracts';
 
 export class PluginRegistryError extends Error {
   constructor(message: string) {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { extractPeIcon, parsePe, toStorePath } from '@bk/shared';
-import { tokens } from '@bk/contracts';
+import { extractPeIcon, parsePe, toStorePath } from '@specter-core/shared';
+import { tokens } from '@specter-core/contracts';
 import {
   GuestProcessRunner,
   JitEngineImpl,
@@ -9,7 +9,7 @@ import {
   X86Decoder,
   type GuestMenuSection,
   type GuestProcessResult,
-} from '@bk/core';
+} from '@specter-core/core';
 import { useUi } from '../context';
 import { setGuestText, useGuestText } from '../guest-text';
 
@@ -108,23 +108,23 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
     (s) => s.items.length > 0 && !s.title.includes('\t') && /^[A-Za-z&]/.test(s.title),
   );
   return (
-    <div className="bk-gwin">
+    <div className="sc-gwin">
       {sections.length > 0 && (
-        <div className="bk-gwin-menubar">
+        <div className="sc-gwin-menubar">
         {sections.map((s) => (
-          <div className={`bk-gwin-menu ${openMenu === s.title ? 'open' : ''}`} key={s.title}>
+          <div className={`sc-gwin-menu ${openMenu === s.title ? 'open' : ''}`} key={s.title}>
             <span
-              className="bk-gwin-menu-title"
+              className="sc-gwin-menu-title"
               onClick={() => setOpenMenu(openMenu === s.title ? null : s.title)}
             >
               {stripAmps(s.title)}
             </span>
             {openMenu === s.title && (
-              <div className="bk-gwin-menu-pop">
+              <div className="sc-gwin-menu-pop">
                 {s.items.map((it) => (
                   <button
                     key={`${s.title}-${it.id}-${it.label}`}
-                    className="bk-gwin-menu-item"
+                    className="sc-gwin-menu-item"
                     onClick={() => {
                       setOpenMenu(null);
                       runner.postMessage({ hwnd, msg: 0x0111 /* WM_COMMAND */, wParam: it.id, lParam: 0 });
@@ -140,7 +140,7 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
         </div>
       )}
       <textarea
-        className="bk-gwin-edit"
+        className="sc-gwin-edit"
         value={text}
         onChange={(e) => {
           const t = e.target.value;
@@ -377,43 +377,43 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
   };
 
   return (
-    <div className="bk-run">
+    <div className="sc-run">
       {phase === 'confirm' && (
         <>
-          <div className="bk-run-head">
-            <span className="bk-run-icon">
+          <div className="sc-run-head">
+            <span className="sc-run-icon">
               {iconUrl ? <img src={iconUrl} alt="" /> : '⚠️'}
             </span>
             <div>
-              <div className="bk-run-title">Open File — Security Warning</div>
-              <div className="bk-run-subtitle">Do you want to run this file?</div>
+              <div className="sc-run-title">Open File — Security Warning</div>
+              <div className="sc-run-subtitle">Do you want to run this file?</div>
             </div>
           </div>
-          <div className="bk-run-file">
-            <span className="bk-run-name">{name}</span>
+          <div className="sc-run-file">
+            <span className="sc-run-name">{name}</span>
             {pe && (
-              <span className="bk-run-meta">
+              <span className="sc-run-meta">
                 {pe.arch} · {pe.subsystem} · {pe.sections} section(s)
               </span>
             )}
-            {!pe && <span className="bk-run-meta">PE header not recognized</span>}
+            {!pe && <span className="sc-run-meta">PE header not recognized</span>}
           </div>
-          <p className="bk-run-note">
+          <p className="sc-run-note">
             Running executes the program inside the browser sandbox with the core
             PE loader and the x86/x64 JIT engine. Program output is rendered live
             in the console below.
           </p>
-          <div className="bk-run-actions">
-            <button className="bk-nt-btn" onClick={pickLocal}>
+          <div className="sc-run-actions">
+            <button className="sc-nt-btn" onClick={pickLocal}>
               Open local .exe…
             </button>
-            <button className="bk-nt-btn" onClick={() => setPhase('cancelled')}>
+            <button className="sc-nt-btn" onClick={() => setPhase('cancelled')}>
               Cancel
             </button>
-            <button className="bk-nt-btn" onClick={install} disabled={!initialFile}>
+            <button className="sc-nt-btn" onClick={install} disabled={!initialFile}>
               Install
             </button>
-            <button className="bk-nt-btn primary" onClick={() => void run()} disabled={!source}>
+            <button className="sc-nt-btn primary" onClick={() => void run()} disabled={!source}>
               Run
             </button>
           </div>
@@ -421,8 +421,8 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
       )}
 
       {phase === 'running' && (
-        <div className="bk-run-running">
-          <div className="bk-tabs">
+        <div className="sc-run-running">
+          <div className="sc-tabs">
             <button className={tab === 'console' ? 'active' : ''} onClick={() => setTab('console')}>
               Console
             </button>
@@ -432,16 +432,16 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
           </div>
 
           {tab === 'console' ? (
-            <div className="bk-console">
-              <div className="bk-console-head">
-                <span className="bk-console-dot" />
-                <span className="bk-console-title">{name}</span>
+            <div className="sc-console">
+              <div className="sc-console-head">
+                <span className="sc-console-dot" />
+                <span className="sc-console-title">{name}</span>
               </div>
-              <div className="bk-console-body" ref={bodyRef}>
+              <div className="sc-console-body" ref={bodyRef}>
                 {output === '' && !status ? (
-                  <div className="bk-console-empty">running…</div>
+                  <div className="sc-console-empty">running…</div>
                 ) : (
-                  <pre className="bk-console-pre">
+                  <pre className="sc-console-pre">
                     {output}
                     {status}
                   </pre>
@@ -449,20 +449,20 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
               </div>
             </div>
           ) : interacting ? (
-            <div className="bk-run-stage">
-              <div className="bk-run-title">Guest window is open on the desktop</div>
-              <p className="bk-run-note center">
+            <div className="sc-run-stage">
+              <div className="sc-run-title">Guest window is open on the desktop</div>
+              <p className="sc-run-note center">
                 notepad runs as a real desktop window — type in its editor, use its menu,
                 or close it to exit the process.
               </p>
             </div>
           ) : (
-            <div className="bk-guest">
-              <div className="bk-guest-head">
-                <span className="bk-console-dot" />
-                <span className="bk-console-title">Guest Window (GUI bridge)</span>
+            <div className="sc-guest">
+              <div className="sc-guest-head">
+                <span className="sc-console-dot" />
+                <span className="sc-console-title">Guest Window (GUI bridge)</span>
               </div>
-              <div className="bk-guest-stage">
+              <div className="sc-guest-stage">
                 {(() => {
                   const wins = liveWindows.length > 0 ? liveWindows : (guestResult?.windows ?? []);
                   return wins
@@ -470,15 +470,15 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
                     .map((w, idx) => {
                       const edit = wins.find((c) => c.parent === w.hwnd && c.className.toLowerCase() === 'edit');
                       return (
-                        <div className="bk-win" key={w.hwnd}>
-                          <div className="bk-win-title">
-                            <span className="bk-win-name">
+                        <div className="sc-win" key={w.hwnd}>
+                          <div className="sc-win-title">
+                            <span className="sc-win-name">
                               {w.className}
                               {w.text ? ` — ${w.text}` : ''}
                             </span>
-                            <span className="bk-win-id">0x{w.hwnd.toString(16)}</span>
+                            <span className="sc-win-id">0x{w.hwnd.toString(16)}</span>
                             <button
-                              className="bk-win-close"
+                              className="sc-win-close"
                               title="Close window (WM_CLOSE)"
                               onClick={() => {
                                 runnerRef.current?.postMessage({ hwnd: w.hwnd, msg: 0x0010 /* WM_CLOSE */, wParam: 0, lParam: 0 });
@@ -487,12 +487,12 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
                               ✕
                             </button>
                           </div>
-                          <div className="bk-win-body">
+                          <div className="sc-win-body">
                             {idx === 0 &&
                               (guestResult?.paintCommands ?? []).map((p, i) => (
                                 <span
                                   key={i}
-                                  className={`bk-paint bk-paint-${p.op}`}
+                                  className={`sc-paint sc-paint-${p.op}`}
                                   style={{ left: p.x, top: p.y, width: p.w, height: p.h }}
                                 >
                                   {p.text}
@@ -500,7 +500,7 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
                               ))}
                             {edit ? (
                               <div
-                                className="bk-win-edit"
+                                className="sc-win-edit"
                                 contentEditable={interacting}
                                 suppressContentEditableWarning
                                 onInput={(e) => {
@@ -511,12 +511,12 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
                                 }}
                               >
                                 {editText}
-                                {!interacting && <span className="bk-win-caret" />}
+                                {!interacting && <span className="sc-win-caret" />}
                               </div>
                             ) : (
                               idx === 0 &&
                               (guestResult?.paintCommands.length ?? 0) === 0 && (
-                                <div className="bk-win-empty">no paint commands</div>
+                                <div className="sc-win-empty">no paint commands</div>
                               )
                             )}
                           </div>
@@ -527,19 +527,19 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
                 {(() => {
                   const wins = liveWindows.length > 0 ? liveWindows : (guestResult?.windows ?? []);
                   return wins.filter((w) => w.parent === 0).length === 0 && (
-                    <div className="bk-win-empty">no top-level windows</div>
+                    <div className="sc-win-empty">no top-level windows</div>
                   );
                 })()}
               </div>
-              <div className="bk-guest-list">
+              <div className="sc-guest-list">
                 {(() => {
                   const wins = liveWindows.length > 0 ? liveWindows : (guestResult?.windows ?? []);
                   return wins.map((w) => (
-                    <div className="bk-guest-item" key={w.hwnd}>
-                      <span className="bk-guest-hwnd">0x{w.hwnd.toString(16)}</span>
-                      <span className="bk-guest-class">{w.className}</span>
-                      <span className="bk-guest-proc">wndProc=0x{w.wndProc.toString(16)}</span>
-                      <span className="bk-guest-text">"{w.text}"</span>
+                    <div className="sc-guest-item" key={w.hwnd}>
+                      <span className="sc-guest-hwnd">0x{w.hwnd.toString(16)}</span>
+                      <span className="sc-guest-class">{w.className}</span>
+                      <span className="sc-guest-proc">wndProc=0x{w.wndProc.toString(16)}</span>
+                      <span className="sc-guest-text">"{w.text}"</span>
                     </div>
                   ));
                 })()}
@@ -550,23 +550,23 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
       )}
 
       {phase === 'installing' && (
-        <div className="bk-run-stage">
-          <div className="bk-installer-spinner" />
-          <span className="bk-run-title">Opening installer for {name}…</span>
+        <div className="sc-run-stage">
+          <div className="sc-installer-spinner" />
+          <span className="sc-run-title">Opening installer for {name}…</span>
         </div>
       )}
 
       {phase === 'cancelled' && (
-        <div className="bk-run-stage">
-          <div className="bk-run-title">Launch cancelled</div>
-          <p className="bk-run-note center">Nothing was executed or changed.</p>
+        <div className="sc-run-stage">
+          <div className="sc-run-title">Launch cancelled</div>
+          <p className="sc-run-note center">Nothing was executed or changed.</p>
         </div>
       )}
 
       {phase === 'error' && (
-        <div className="bk-run-stage">
-          <div className="bk-run-title">Cannot open {name}</div>
-          <p className="bk-run-note center">{error}</p>
+        <div className="sc-run-stage">
+          <div className="sc-run-title">Cannot open {name}</div>
+          <p className="sc-run-note center">{error}</p>
         </div>
       )}
     </div>

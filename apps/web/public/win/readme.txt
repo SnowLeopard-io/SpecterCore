@@ -1,4 +1,4 @@
-Browser Kernel (bk) — virtual disk sample document.
+SpecterCore (bk) — virtual disk sample document.
 
 This file ships with the built-in Windows tools and lives on the
 virtual disk at Users/Public/Documents/readme.txt. Open it with

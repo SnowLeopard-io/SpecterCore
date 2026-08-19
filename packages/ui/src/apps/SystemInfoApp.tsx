@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { SystemInfo } from '@bk/contracts';
+import type { SystemInfo } from '@specter-core/contracts';
 import { useUi } from '../context';
 
 function fmtBytes(bytes: number): string {
@@ -23,11 +23,11 @@ export function SystemInfoApp() {
     };
   }, [controller]);
 
-  if (!info) return <div className="bk-app-body">Loading system info...</div>;
+  if (!info) return <div className="sc-app-body">Loading system info...</div>;
 
   return (
-    <div className="bk-app-body bk-sysinfo">
-      <h3>About Browser Kernel</h3>
+    <div className="sc-app-body sc-sysinfo">
+      <h3>About SpecterCore</h3>
       <dl>
         <dt>Kernel version</dt>
         <dd>{info.version}</dd>
@@ -41,7 +41,7 @@ export function SystemInfoApp() {
         <dd>{info.capabilities.length > 0 ? info.capabilities.join(', ') : '(not available)'}</dd>
       </dl>
       <h3>Processes</h3>
-      <ul className="bk-sysinfo-list">
+      <ul className="sc-sysinfo-list">
         {info.processes.map((p) => (
           <li key={p.pid}>
             <b>{p.name}</b> pid={p.pid} state={p.state} threads={p.threadCount} memory={fmtBytes(p.memoryBytes)}

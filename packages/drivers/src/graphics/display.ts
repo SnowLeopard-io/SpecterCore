@@ -1,4 +1,4 @@
-import type { DisplayDriver, DisplayMode, Dispose } from '@bk/contracts';
+import type { DisplayDriver, DisplayMode, Dispose } from '@specter-core/contracts';
 
 /**
  * WebGPU-backed display driver (design doc 5.2). Placeholder until P5;

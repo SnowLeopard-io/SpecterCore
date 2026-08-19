@@ -7,7 +7,7 @@
  * unsupported opcodes into faulting blocks that the dispatcher reports.
  */
 
-import type { BasicBlock, CompiledBlock, JitEngine, JitStats, WasmRuntime } from '@bk/contracts';
+import type { BasicBlock, CompiledBlock, JitEngine, JitStats, WasmRuntime } from '@specter-core/contracts';
 import { X86Decoder, UnsupportedError } from './x86-decoder';
 import { buildBlockFunction } from './codegen';
 import { WasmModuleBuilder } from './wasm-encoder';

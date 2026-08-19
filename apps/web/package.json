@@ -1,22 +1,22 @@
 {
-  "name": "@bk/app-web",
+  "name": "@specter-core/app-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Browser Kernel - web entry (Vite)",
+  "description": "SpecterCore - web entry (Vite)",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@bk/bridges": "workspace:*",
-    "@bk/contracts": "workspace:*",
-    "@bk/core": "workspace:*",
-    "@bk/drivers": "workspace:*",
-    "@bk/host": "workspace:*",
-    "@bk/kernel": "workspace:*",
-    "@bk/ui": "workspace:*",
+    "@specter-core/bridges": "workspace:*",
+    "@specter-core/contracts": "workspace:*",
+    "@specter-core/core": "workspace:*",
+    "@specter-core/drivers": "workspace:*",
+    "@specter-core/host": "workspace:*",
+    "@specter-core/kernel": "workspace:*",
+    "@specter-core/ui": "workspace:*",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

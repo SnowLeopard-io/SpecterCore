@@ -1,5 +1,5 @@
-import type { Dispose, WindowHandle, WindowManager, WindowOptions } from '@bk/contracts';
-import { nextStringId } from '@bk/shared';
+import type { Dispose, WindowHandle, WindowManager, WindowOptions } from '@specter-core/contracts';
+import { nextStringId } from '@specter-core/shared';
 
 export interface WindowManagerOptions {
   defaultWindowSize?: { width?: number; height?: number };

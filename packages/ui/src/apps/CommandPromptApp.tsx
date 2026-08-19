@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { FileStore } from '@bk/contracts';
-import { CommandInterpreter } from '@bk/shared';
+import type { FileStore } from '@specter-core/contracts';
+import { CommandInterpreter } from '@specter-core/shared';
 import { useUi } from '../context';
 
 interface Line {
@@ -83,19 +83,19 @@ export function CommandPromptApp() {
   const cwd = interpreter?.displayCwd() ?? 'C:\\';
 
   return (
-    <div className="bk-cmd" onClick={() => inputRef.current?.focus()}>
-      <div className="bk-cmd-body" ref={bodyRef}>
+    <div className="sc-cmd" onClick={() => inputRef.current?.focus()}>
+      <div className="sc-cmd-body" ref={bodyRef}>
         {lines.map((l, i) => (
-          <div key={i} className={`bk-cmd-line ${l.kind ?? ''}`}>
+          <div key={i} className={`sc-cmd-line ${l.kind ?? ''}`}>
             {l.text === '' ? ' ' : l.text}
           </div>
         ))}
       </div>
-      <form className="bk-cmd-input-row" onSubmit={onSubmit}>
-        <span className="bk-cmd-prompt">{cwd}</span>
+      <form className="sc-cmd-input-row" onSubmit={onSubmit}>
+        <span className="sc-cmd-prompt">{cwd}</span>
         <input
           ref={inputRef}
-          className="bk-cmd-input"
+          className="sc-cmd-input"
           value={input}
           autoFocus
           spellCheck={false}

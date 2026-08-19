@@ -1,4 +1,4 @@
-import type { DriverRegistry, UsbDeviceInfo, UsbDriver } from '@bk/contracts';
+import type { DriverRegistry, UsbDeviceInfo, UsbDriver } from '@specter-core/contracts';
 
 /**
  * USB driver registry (design doc 5.1).

@@ -1,5 +1,5 @@
-import type { Plugin, PluginContext } from '@bk/contracts';
-import { tokens } from '@bk/contracts';
+import type { Plugin, PluginContext } from '@specter-core/contracts';
+import { tokens } from '@specter-core/contracts';
 import { ObjectManagerImpl } from './process/object-manager';
 import { MemoryManagerImpl } from './process/memory-manager';
 import { ProcessManagerImpl } from './process/process-manager';

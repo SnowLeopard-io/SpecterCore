@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MemoryFileStore } from './memory-store';
-import { isWithin, toStorePath } from '@bk/shared';
+import { isWithin, toStorePath } from '@specter-core/shared';
 
 describe('MemoryFileStore', () => {
   it('creates, reads, writes and appends files', async () => {

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import type { ApiHost, FileSystemBridge, WinError } from '@bk/contracts';
+import type { ApiHost, FileSystemBridge, WinError } from '@specter-core/contracts';
 import { ApiInterceptorImpl } from '../api/interceptor';
 import { registerDefaultHandlers } from '../api/handlers';
 import { PeLoaderImpl } from '../pe/loader';
@@ -15,7 +15,7 @@ const skip = !existsSync(SAMPLE);
 
 /**
  * 9.4 集成测试：把 `sample/hello.exe` 走完 PE 加载 → JIT → API 拦截 →
- * 控制台输出的全链路，验证 "hello from browser-kernel!" 与退出码 7。
+ * 控制台输出的全链路，验证 "hello from specter-core!" 与退出码 7。
  * 其余 7.2 兼容性应用（notepad/cmd 等）在跑通后逐个加入本文件。
  */
 describe.skipIf(skip)('sample/hello.exe（全链路集成，设计文档 9.4）', () => {
@@ -52,7 +52,7 @@ describe.skipIf(skip)('sample/hello.exe（全链路集成，设计文档 9.4）'
     expect(result.status).toBe('exit');
     expect(result.cleanExit).toBe(true);
     expect(result.exitCode).toBe(7);
-    expect(new TextDecoder().decode(result.output)).toBe('hello from browser-kernel!\n');
+    expect(new TextDecoder().decode(result.output)).toBe('hello from specter-core!\n');
     expect(stdout.length).toBeGreaterThan(0);
     expect(result.stubs.map((s) => s.proc)).toEqual([
       'GetTickCount',

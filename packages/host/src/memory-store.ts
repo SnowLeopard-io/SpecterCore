@@ -1,5 +1,5 @@
-import type { DirEntry, FileOpenMode, FileStat, FileStore, OpenedFile } from '@bk/contracts';
-import { isWithin, toStorePath } from '@bk/shared';
+import type { DirEntry, FileOpenMode, FileStat, FileStore, OpenedFile } from '@specter-core/contracts';
+import { isWithin, toStorePath } from '@specter-core/shared';
 
 /**
  * 内存虚拟硬盘：OPFS 的测试/Node 等价适配器。

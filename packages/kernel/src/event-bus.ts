@@ -1,4 +1,4 @@
-import type { Dispose, IEventBus } from '@bk/contracts';
+import type { Dispose, IEventBus } from '@specter-core/contracts';
 
 type Handler<Events, K extends keyof Events> = (payload: Events[K]) => void;
 

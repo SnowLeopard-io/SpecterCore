@@ -1,5 +1,5 @@
-import type { KernelEvents } from '@bk/contracts';
-import { createToken } from '@bk/contracts';
+import type { KernelEvents } from '@specter-core/contracts';
+import { createToken } from '@specter-core/contracts';
 
 export const CONTAINER_TOKEN = createToken<unknown>('kernel.container');
 export const EVENT_BUS_TOKEN = createToken<unknown>('kernel.events');

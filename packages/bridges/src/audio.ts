@@ -1,11 +1,11 @@
-import type { AudioBridge, WaveBufferHeader } from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
+import type { AudioBridge, WaveBufferHeader } from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
 
 const NOT_IMPLEMENTED = E.ERROR_NOT_IMPLEMENTED;
 
 /**
  * Audio bridge placeholder. Real waveOut/DirectSound mixing lands at P4
- * (AudioWorklet in @bk/host).
+ * (AudioWorklet in @specter-core/host).
  */
 export class NullAudioBridge implements AudioBridge {
   private masterVolume = 1;

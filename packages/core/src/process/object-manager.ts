@@ -1,5 +1,5 @@
-import type { KernelObject, KernelObjectManager, SyncObjectKind } from '@bk/contracts';
-import { nextId } from '@bk/shared';
+import type { KernelObject, KernelObjectManager, SyncObjectKind } from '@specter-core/contracts';
+import { nextId } from '@specter-core/shared';
 
 /**
  * Kernel object manager (design doc 4.4).

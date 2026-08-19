@@ -92,18 +92,18 @@ export function MinesweeperApp() {
   };
 
   return (
-    <div className="bk-app-body bk-mines">
-      <div className="bk-mines-header">
+    <div className="sc-app-body sc-mines">
+      <div className="sc-mines-header">
         <span>Mines: {MINES}</span>
         <button onClick={reset}>New</button>
         <span>Hidden: {remaining}</span>
       </div>
-      <div className="bk-mines-grid" style={{ gridTemplateColumns: `repeat(${SIZE}, 28px)` }}>
+      <div className="sc-mines-grid" style={{ gridTemplateColumns: `repeat(${SIZE}, 28px)` }}>
         {board.map((row, r) =>
           row.map((cell, c) => (
             <button
               key={`${r}-${c}`}
-              className={`bk-mines-cell ${cell.revealed ? 'revealed' : ''} ${cell.mine && cell.revealed ? 'mine' : ''}`}
+              className={`sc-mines-cell ${cell.revealed ? 'revealed' : ''} ${cell.mine && cell.revealed ? 'mine' : ''}`}
               onClick={() => onCell(r, c)}
               onContextMenu={(e) => {
                 e.preventDefault();

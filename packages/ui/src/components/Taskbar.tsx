@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { WindowHandle } from '@bk/contracts';
+import type { WindowHandle } from '@specter-core/contracts';
 import { useUi } from '../context';
 
 interface TaskbarProps {
@@ -74,23 +74,23 @@ export function Taskbar({ windows, openStart, onToggleStart }: TaskbarProps) {
   };
 
   return (
-    <div className="bk-taskbar">
-      <div className="bk-taskbar-cluster">
+    <div className="sc-taskbar">
+      <div className="sc-taskbar-cluster">
         <button
-          className={`bk-task-btn start ${openStart ? 'open' : ''}`}
+          className={`sc-task-btn start ${openStart ? 'open' : ''}`}
           aria-label="Start"
           onClick={onToggleStart}
         >
           {WindowsLogo}
         </button>
-        <button className="bk-task-btn" aria-label="Search">
+        <button className="sc-task-btn" aria-label="Search">
           {SearchIcon}
         </button>
-        <span className="bk-task-sep" />
+        <span className="sc-task-sep" />
         {windows.map((win) => (
           <button
             key={win.id}
-            className={`bk-task-btn ${win.state !== 'minimized' ? 'active' : ''}`}
+            className={`sc-task-btn ${win.state !== 'minimized' ? 'active' : ''}`}
             aria-label={win.title}
             title={win.title}
             onClick={() => focusOrRestore(win)}
@@ -100,11 +100,11 @@ export function Taskbar({ windows, openStart, onToggleStart }: TaskbarProps) {
         ))}
       </div>
 
-      <div className="bk-tray">
-        <span className="bk-tray-icon">{WifiIcon}</span>
-        <span className="bk-tray-icon">{VolumeIcon}</span>
-        <span className="bk-tray-icon">{BatteryIcon}</span>
-        <span className="bk-tray-clock">
+      <div className="sc-tray">
+        <span className="sc-tray-icon">{WifiIcon}</span>
+        <span className="sc-tray-icon">{VolumeIcon}</span>
+        <span className="sc-tray-icon">{BatteryIcon}</span>
+        <span className="sc-tray-clock">
           {clock.split('\n').map((line, i) => (
             <span key={i} style={i === 0 ? { fontWeight: 600 } : { fontSize: 11 }}>
               {line}

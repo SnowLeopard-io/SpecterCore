@@ -2,14 +2,14 @@
  * PE32 loader (design doc 4.2.1).
  *
  * Parses MZ/PE headers, the section table, import/export directories and the
- * resource tree. Icon extraction reuses `@bk/shared`'s `extractPeIcon`. The
+ * resource tree. Icon extraction reuses `@specter-core/shared`'s `extractPeIcon`. The
  * returned `PeImage` is consumed by `pe/mapper.ts` to map sections into the
  * WASM linear memory and rewrite the IAT (design 4.2.2).
  */
 
-import type { PeExport, PeImage, PeImport, PeImportFunction, PeLoader, PeSection } from '@bk/contracts';
-import { PE_MAGIC } from '@bk/contracts';
-import { extractPeIcon } from '@bk/shared';
+import type { PeExport, PeImage, PeImport, PeImportFunction, PeLoader, PeSection } from '@specter-core/contracts';
+import { PE_MAGIC } from '@specter-core/contracts';
+import { extractPeIcon } from '@specter-core/shared';
 
 function readU16(data: Uint8Array, offset: number): number {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(offset, true);

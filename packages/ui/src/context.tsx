@@ -1,6 +1,6 @@
 import { createContext, useContext } from 'react';
-import type { KernelRuntime } from '@bk/contracts';
-import type { DesktopController } from '@bk/contracts';
+import type { KernelRuntime } from '@specter-core/contracts';
+import type { DesktopController } from '@specter-core/contracts';
 
 export interface UiContextValue {
   kernel: KernelRuntime;

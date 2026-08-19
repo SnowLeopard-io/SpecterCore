@@ -10,7 +10,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { ApiHost, FileSystemBridge, WinError } from '@bk/contracts';
+import type { ApiHost, FileSystemBridge, WinError } from '@specter-core/contracts';
 import {
   ApiInterceptorImpl,
   GuestProcessRunner,
@@ -21,9 +21,9 @@ import {
   REG32_LIST,
   WasmRuntimeImpl,
   X86Decoder,
-} from '@bk/core';
-import type { ApiCallContext, ApiResult, Instruction, MemOperand } from '@bk/core';
-import { normalizeApiSetModule } from '@bk/core';
+} from '@specter-core/core';
+import type { ApiCallContext, ApiResult, Instruction, MemOperand } from '@specter-core/core';
+import { normalizeApiSetModule } from '@specter-core/core';
 
 /** Logs every API trap so we can see what the guest queried before the fault. */
 class LoggingInterceptor extends ApiInterceptorImpl {
@@ -286,13 +286,6 @@ async function main(): Promise<void> {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
       if (trace.length > 64) trace.shift();
-      // [diag3] Temporary: trace edi around call [0x45015c] at 0x40ba5d
-      if (eip === 0x40ba5d || eip === 0x40ba63 || eip === 0x40baa6) {
-        const edi = rt.getReg('edi');
-        const ebx = rt.getReg('ebx');
-        const eax = rt.getReg('eax');
-        console.error(`[diag3] eip=0x${eip.toString(16)} edi=0x${(edi >>> 0).toString(16)} ebx=0x${(ebx >>> 0).toString(16)} eax=0x${(eax >>> 0).toString(16)}`);
-      }
     },
     onFault: (rt, res) => {
       console.error('[trace] last blocks:');

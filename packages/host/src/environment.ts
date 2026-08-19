@@ -1,4 +1,4 @@
-import type { BrowserCapabilities, EnvironmentProbe } from '@bk/contracts';
+import type { BrowserCapabilities, EnvironmentProbe } from '@specter-core/contracts';
 
 /**
  * 浏览器环境能力探测。

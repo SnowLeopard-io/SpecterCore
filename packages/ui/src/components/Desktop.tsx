@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent, ReactNode } from 'react';
-import type { DesktopController, WindowHandle } from '@bk/contracts';
+import type { DesktopController, WindowHandle } from '@specter-core/contracts';
 import { useUi } from '../context';
 import { WindowFrame } from './WindowFrame';
 import { Taskbar } from './Taskbar';
@@ -120,16 +120,16 @@ export function Desktop({ controller }: DesktopProps) {
   const renderContent = (win: WindowHandle): ReactNode => {
     const content = win.options.content;
     if (content) return content.render(uiController) as ReactNode;
-    return <div className="bk-window-empty">No content for "{win.title}"</div>;
+    return <div className="sc-window-empty">No content for "{win.title}"</div>;
   };
 
   const isBackground = (target: EventTarget | null): boolean => {
     const el = target as HTMLElement | null;
     if (!el || !el.classList) return false;
     return (
-      el.classList.contains('bk-desktop') ||
-      el.classList.contains('bk-wallpaper') ||
-      el.classList.contains('bk-desktop-icons')
+      el.classList.contains('sc-desktop') ||
+      el.classList.contains('sc-wallpaper') ||
+      el.classList.contains('sc-desktop-icons')
     );
   };
 
@@ -144,7 +144,7 @@ export function Desktop({ controller }: DesktopProps) {
     e.stopPropagation();
     const el = e.target as HTMLElement | null;
     // 窗口内容由各应用自行处理（如文件资源管理器导入到当前目录）。
-    if (el && el.closest('.bk-window')) return;
+    if (el && el.closest('.sc-window')) return;
     dragDepth.current = 0;
     setDropActive(false);
     if (!fs) return;
@@ -162,7 +162,7 @@ export function Desktop({ controller }: DesktopProps) {
 
   return (
     <div
-      className="bk-desktop"
+      className="sc-desktop"
       onContextMenu={(e) => {
         e.preventDefault();
         setStartOpen(false);
@@ -189,18 +189,18 @@ export function Desktop({ controller }: DesktopProps) {
       }}
       onDrop={onDesktopDrop}
     >
-      <div className="bk-wallpaper" />
-      <div className="bk-desktop-icons">
+      <div className="sc-wallpaper" />
+      <div className="sc-desktop-icons">
         {apps.map((app) => (
           <button
             key={app.appId}
-            className={`bk-desktop-icon ${selectedApp === app.appId ? 'selected' : ''}`}
+            className={`sc-desktop-icon ${selectedApp === app.appId ? 'selected' : ''}`}
             title={app.description}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={() => launch(app.appId)}
           >
-            <span className="bk-desktop-icon-img">{app.icon}</span>
-            <span className="bk-desktop-icon-label">{app.name}</span>
+            <span className="sc-desktop-icon-img">{app.icon}</span>
+            <span className="sc-desktop-icon-label">{app.name}</span>
           </button>
         ))}
         {desktopItems.map((item, i) => {
@@ -210,7 +210,7 @@ export function Desktop({ controller }: DesktopProps) {
           return (
             <button
               key={key}
-              className={`bk-desktop-icon ${selectedApp === key ? 'selected' : ''}`}
+              className={`sc-desktop-icon ${selectedApp === key ? 'selected' : ''}`}
               title={isDir ? `Open ${item.name}` : item.name}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={() => setSelectedApp(key)}
@@ -219,8 +219,8 @@ export function Desktop({ controller }: DesktopProps) {
                 else void controller.openFile(full);
               }}
             >
-              <span className="bk-desktop-icon-img">{isDir ? '📁' : desktopFileIcon(item.name)}</span>
-              <span className="bk-desktop-icon-label">{item.name}</span>
+              <span className="sc-desktop-icon-img">{isDir ? '📁' : desktopFileIcon(item.name)}</span>
+              <span className="sc-desktop-icon-label">{item.name}</span>
             </button>
           );
         })}
@@ -263,8 +263,8 @@ export function Desktop({ controller }: DesktopProps) {
       />
 
       {dropActive && (
-        <div className="bk-drop-overlay">
-          <div className="bk-drop-overlay-inner">Drop files to add them to the desktop</div>
+        <div className="sc-drop-overlay">
+          <div className="sc-drop-overlay-inner">Drop files to add them to the desktop</div>
         </div>
       )}
 

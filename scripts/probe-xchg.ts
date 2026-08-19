@@ -1,4 +1,4 @@
-import { X86Decoder, WasmRuntimeImpl } from '@bk/core';
+import { X86Decoder, WasmRuntimeImpl } from '@specter-core/core';
 import { buildBlockFunction } from '../packages/core/src/jit/codegen';
 import { WasmModuleBuilder } from '../packages/core/src/jit/wasm-encoder';
 

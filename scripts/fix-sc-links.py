@@ -2,7 +2,7 @@ import os, subprocess, shutil
 
 base = r"C:\Users\HUAWEI\Desktop\windows"
 for p in ["bridges", "core", "drivers", "ui", "shared"]:
-    link = os.path.join(base, "node_modules", "@bk", p)
+    link = os.path.join(base, "node_modules", "@specter-core", p)
     target = os.path.join(base, "packages", p)
     if os.path.exists(link):
         if os.path.islink(link):

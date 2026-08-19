@@ -1,5 +1,5 @@
 /**
- * Headless CLI: run a Windows x86 PE through the Browser Kernel JIT.
+ * Headless CLI: run a Windows x86 PE through the SpecterCore JIT.
  *
  *   pnpm run:exe -- path/to/app.exe
  *
@@ -9,7 +9,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { ApiHost, FileSystemBridge, WinError } from '@bk/contracts';
+import type { ApiHost, FileSystemBridge, WinError } from '@specter-core/contracts';
 import {
   ApiInterceptorImpl,
   GuestProcessRunner,
@@ -19,7 +19,7 @@ import {
   UnsupportedError,
   WasmRuntimeImpl,
   X86Decoder,
-} from '@bk/core';
+} from '@specter-core/core';
 
 /**
  * Minimal read-only fs bridge serving the exe itself — enough for the guest

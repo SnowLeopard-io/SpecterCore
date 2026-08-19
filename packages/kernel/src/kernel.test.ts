@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Plugin } from '@bk/contracts';
+import type { Plugin } from '@specter-core/contracts';
 import { Kernel } from './kernel';
 import { silentLogger } from './logger';
 

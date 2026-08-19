@@ -1,4 +1,4 @@
-import type { Logger } from '@bk/contracts';
+import type { Logger } from '@specter-core/contracts';
 
 export enum LogLevel {
   TRACE = 0,

@@ -1,6 +1,6 @@
 /**
  * L3 x86 JIT 翻译器与 WASM 运行时契约（P1 里程碑实现）。
- * 本包只定义接口；具体翻译器实现位于 @bk/core 的 jit/（当前为 TS 生成
+ * 本包只定义接口；具体翻译器实现位于 @specter-core/core 的 jit/（当前为 TS 生成
  * WASM 字节码，未来可替换为 wasi-sdk / Emscripten 编译产物，见 wasm/README.md）。
  */
 

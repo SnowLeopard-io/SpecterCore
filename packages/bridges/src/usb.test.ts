@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { BulkTransferResult, Dispose, UsbDeviceHandle, UsbDeviceInfo, UsbHostAdapter } from '@bk/contracts';
+import type { BulkTransferResult, Dispose, UsbDeviceHandle, UsbDeviceInfo, UsbHostAdapter } from '@specter-core/contracts';
 import { WasmUsbHostBridge } from './usb';
 
 const DEVICE: UsbDeviceInfo = { deviceId: 1, vendorId: 0x1234, productId: 0x5678, name: 'Test Device' };

@@ -1,6 +1,6 @@
 /** 参数装饰：将纯同步逻辑包装为可安全 await 的形态。 */
 
-import type { Awaitable } from '@bk/contracts';
+import type { Awaitable } from '@specter-core/contracts';
 
 export async function resolveAwaitable<T>(value: Awaitable<T>): Promise<T> {
   return value instanceof Promise ? value : Promise.resolve(value);

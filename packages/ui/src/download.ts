@@ -1,4 +1,4 @@
-import { toArrayBuffer } from '@bk/shared';
+import { toArrayBuffer } from '@specter-core/shared';
 
 /**
  * 把虚拟盘里的字节下载到真实磁盘（浏览器下载），用于导出/检查文件内容。

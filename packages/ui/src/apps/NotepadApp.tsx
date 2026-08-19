@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import type { FileStore } from '@bk/contracts';
-import { decodeText } from '@bk/shared';
+import type { FileStore } from '@specter-core/contracts';
+import { decodeText } from '@specter-core/shared';
 import { useUi } from '../context';
 import { downloadBytes } from '../download';
 
@@ -196,30 +196,30 @@ export function NotepadApp({ initialFile }: NotepadProps) {
   const title = currentPath ? `Notepad — ${currentPath.split('/').pop()}` : 'Notepad';
 
   return (
-    <div className="bk-app-body bk-nt">
-      <div className="bk-nt-menubar" ref={menuRef}>
+    <div className="sc-app-body sc-nt">
+      <div className="sc-nt-menubar" ref={menuRef}>
         {(Object.keys(menus) as MenuName[]).map((name) => (
-          <div key={name} className="bk-nt-menu">
+          <div key={name} className="sc-nt-menu">
             <button
-              className={`bk-nt-menu-title ${openMenu === name ? 'open' : ''}`}
+              className={`sc-nt-menu-title ${openMenu === name ? 'open' : ''}`}
               onClick={() => toggle(name)}
             >
               {menus[name].title}
             </button>
             {openMenu === name && (
-              <div className="bk-nt-dropdown">
+              <div className="sc-nt-dropdown">
                 {menus[name].items.map((item) => (
                   <button
                     key={item.label}
-                    className="bk-nt-item"
+                    className="sc-nt-item"
                     disabled={item.disabled}
                     onClick={() => {
                       setOpenMenu(null);
                       item.run();
                     }}
                   >
-                    <span className="bk-nt-item-label">{item.label}</span>
-                    {item.shortcut && <span className="bk-nt-item-shortcut">{item.shortcut}</span>}
+                    <span className="sc-nt-item-label">{item.label}</span>
+                    {item.shortcut && <span className="sc-nt-item-shortcut">{item.shortcut}</span>}
                   </button>
                 ))}
               </div>
@@ -228,11 +228,11 @@ export function NotepadApp({ initialFile }: NotepadProps) {
         ))}
       </div>
 
-      {error && <div className="bk-nt-error" onClick={() => setError(null)}>{error}</div>}
+      {error && <div className="sc-nt-error" onClick={() => setError(null)}>{error}</div>}
 
       <textarea
         ref={textareaRef}
-        className="bk-notepad"
+        className="sc-notepad"
         style={{
           // 内联样式：颜色随 JS 打包，不受样式表缓存/加载顺序影响。
           color: '#1b1b1b',
@@ -250,7 +250,7 @@ export function NotepadApp({ initialFile }: NotepadProps) {
         placeholder="Type here… Save with File ▸ Save (Ctrl+S) to the C: virtual disk."
       />
 
-      <div className="bk-nt-statusbar">
+      <div className="sc-nt-statusbar">
         <span>{title}</span>
         <span>{text.length} chars</span>
         <span>{dirty ? '● unsaved' : 'saved'}</span>
@@ -258,12 +258,12 @@ export function NotepadApp({ initialFile }: NotepadProps) {
       </div>
 
       {dialog && (
-        <div className="bk-nt-modal-backdrop" onClick={() => setDialog(null)}>
-          <div className="bk-nt-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="bk-nt-modal-title">{dialog === 'save' ? 'Save As' : 'Open'}</div>
-            <div className="bk-nt-modal-hint">Path on C: (e.g. Documents/notes.txt)</div>
+        <div className="sc-nt-modal-backdrop" onClick={() => setDialog(null)}>
+          <div className="sc-nt-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="sc-nt-modal-title">{dialog === 'save' ? 'Save As' : 'Open'}</div>
+            <div className="sc-nt-modal-hint">Path on C: (e.g. Documents/notes.txt)</div>
             <input
-              className="bk-nt-modal-input"
+              className="sc-nt-modal-input"
               autoFocus
               value={dialogPath}
               onChange={(e) => setDialogPath(e.target.value)}
@@ -272,11 +272,11 @@ export function NotepadApp({ initialFile }: NotepadProps) {
                 if (e.key === 'Escape') setDialog(null);
               }}
             />
-            <div className="bk-nt-modal-actions">
-              <button className="bk-nt-btn" onClick={() => setDialog(null)}>
+            <div className="sc-nt-modal-actions">
+              <button className="sc-nt-btn" onClick={() => setDialog(null)}>
                 Cancel
               </button>
-              <button className="bk-nt-btn primary" onClick={onConfirmDialog}>
+              <button className="sc-nt-btn primary" onClick={onConfirmDialog}>
                 {dialog === 'save' ? 'Save' : 'Open'}
               </button>
             </div>

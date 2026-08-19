@@ -1,5 +1,5 @@
-import type { KernelEvents, Plugin, PluginContext } from '@bk/contracts';
-import { tokens } from '@bk/contracts';
+import type { KernelEvents, Plugin, PluginContext } from '@specter-core/contracts';
+import { tokens } from '@specter-core/contracts';
 import { OpfsFileStore } from './opfs';
 import { MemoryFileStore } from './memory-store';
 import { WebWorkerPool } from './worker-pool';

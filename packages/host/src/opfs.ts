@@ -1,5 +1,5 @@
-import type { DirEntry, FileOpenMode, FileStat, OpenedFile } from '@bk/contracts';
-import { toArrayBufferView, toStorePath } from '@bk/shared';
+import type { DirEntry, FileOpenMode, FileStat, OpenedFile } from '@specter-core/contracts';
+import { toArrayBufferView, toStorePath } from '@specter-core/shared';
 
 /**
  * OPFS 虚拟硬盘实现（L1）。

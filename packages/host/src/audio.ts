@@ -1,4 +1,4 @@
-import type { AudioHostAdapter, AudioHostConfig, AudioPcm } from '@bk/contracts';
+import type { AudioHostAdapter, AudioHostConfig, AudioPcm } from '@specter-core/contracts';
 
 /**
  * 音频宿主适配器：通过 Web Audio 输出 PCM。

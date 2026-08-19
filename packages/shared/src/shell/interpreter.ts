@@ -1,4 +1,4 @@
-import type { FileStore } from '@bk/contracts';
+import type { FileStore } from '@specter-core/contracts';
 import { resolveStorePath, storeToDisplay } from './path';
 import { decodeText } from './text';
 

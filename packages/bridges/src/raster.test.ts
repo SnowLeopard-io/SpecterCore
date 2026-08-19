@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Color } from '@bk/contracts';
-import { Rop2, Rop2Id, Rop3 } from '@bk/contracts';
+import type { Color } from '@specter-core/contracts';
+import { Rop2, Rop2Id, Rop3 } from '@specter-core/contracts';
 import {
   applyRop,
   applyRopPixels,

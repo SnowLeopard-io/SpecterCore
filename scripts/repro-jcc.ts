@@ -1,6 +1,6 @@
 /** What IR does the decoder produce for `3b fb` (cmp edi,ebx)? */
-import { buildBlockFunction, X86Decoder } from '@bk/core';
-import type { Operand } from '@bk/core';
+import { buildBlockFunction, X86Decoder } from '@specter-core/core';
+import type { Operand } from '@specter-core/core';
 
 function fmt(op: Operand | undefined): string {
   if (!op) return '-';

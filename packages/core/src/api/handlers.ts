@@ -1,5 +1,5 @@
-import type { ApiCallContext, ApiHandler, ApiHost, ApiInterceptor, ApiResult } from '@bk/contracts';
-import { CreationDisposition, DesiredAccess, WinError as E } from '@bk/contracts';
+import type { ApiCallContext, ApiHandler, ApiHost, ApiInterceptor, ApiResult } from '@specter-core/contracts';
+import { CreationDisposition, DesiredAccess, WinError as E } from '@specter-core/contracts';
 
 /** Windows pseudo-handles for the standard console streams (winbase.h). */
 export const STD_INPUT_HANDLE = -10;

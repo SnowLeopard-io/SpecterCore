@@ -99,7 +99,7 @@ function buildX64Pe(sections: Section[], entryRva: number, importDir?: { rva: nu
   return img;
 }
 
-const MESSAGE = 'hello from browser-kernel (x64)!\r\n';
+const MESSAGE = 'hello from specter-core (x64)!\r\n';
 
 async function main(): Promise<void> {
   // ---- .data layout (RVA 0x2000) ----

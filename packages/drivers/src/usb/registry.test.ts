@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Irp, UsbDeviceInfo, UsbDriver } from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
+import type { Irp, UsbDeviceInfo, UsbDriver } from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
 import { DriverRegistryImpl } from './registry';
 import { PnPManagerImpl, HidUsbDriver, MassStorageUsbDriver } from './pnp';
 

@@ -7,13 +7,13 @@
  * `xchg esp, eax` + ret-to-relocated-return-address correctly.
  */
 import { readFile } from 'node:fs/promises';
-import { JitEngineImpl, PeLoaderImpl, WasmRuntimeImpl, REG32_LIST } from '@bk/core';
+import { JitEngineImpl, PeLoaderImpl, WasmRuntimeImpl, REG32_LIST } from '@specter-core/core';
 
 const image = new Uint8Array(await readFile('C:/Windows/SysWOW64/cmd.exe'));
 const runtime = new WasmRuntimeImpl();
 const loader = new PeLoaderImpl();
 const pe = await loader.load(image);
-const { mapPeImage } = await import('@bk/core');
+const { mapPeImage } = await import('@specter-core/core');
 mapPeImage(runtime, image, pe);
 
 // stack: top at 0x08000000; emulate "call 0x424c80" -> [esp]=return address
@@ -26,7 +26,7 @@ runtime.setReg('eax', 0x1040); // requested stack size (from 0x40af19)
 runtime.setReg('ecx', 0x11111111); // a recognizable saved value
 
 const jit = new JitEngineImpl(runtime);
-const executor = new (await import('@bk/core')).Executor(runtime, jit, undefined, {
+const executor = new (await import('@specter-core/core')).Executor(runtime, jit, undefined, {
   onStep: (eip) => {
     const e = runtime.getReg('esp');
     const a = runtime.getReg('eax');

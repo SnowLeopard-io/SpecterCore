@@ -1,9 +1,9 @@
 {
-  "name": "@bk/contracts",
+  "name": "@specter-core/contracts",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Browser Kernel - cross-layer interface contracts (single source of truth)",
+  "description": "SpecterCore - cross-layer interface contracts (single source of truth)",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {

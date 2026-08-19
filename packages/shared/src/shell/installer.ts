@@ -1,4 +1,4 @@
-import type { AppPackage, FileStore, InstalledApp } from '@bk/contracts';
+import type { AppPackage, FileStore, InstalledApp } from '@specter-core/contracts';
 
 /**
  * Windows 应用安装底层（installer 核心，完全 UI 无关）。

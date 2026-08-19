@@ -1,4 +1,4 @@
-import type { KernelEvents, KernelOptions, KernelRuntime, Plugin, PluginContext } from '@bk/contracts';
+import type { KernelEvents, KernelOptions, KernelRuntime, Plugin, PluginContext } from '@specter-core/contracts';
 import { Container } from './container';
 import { EventBus } from './event-bus';
 import { ConsoleLogger } from './logger';
@@ -8,7 +8,7 @@ import { KernelError } from './errors';
 const SUPPORTED_ENVIRONMENTS = ['browser', 'worker', 'node', 'test'] as const;
 
 /**
- * Browser Kernel 内核装配器。
+ * SpecterCore 内核装配器。
  *
  * 职责：
  *  - 统一管理插件生命周期（init → start → stop），按依赖拓扑执行；

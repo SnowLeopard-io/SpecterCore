@@ -1,4 +1,4 @@
-import type { FileStore } from '@bk/contracts';
+import type { FileStore } from '@specter-core/contracts';
 
 /**
  * 文件拖入浏览器 → 虚拟磁盘导入。

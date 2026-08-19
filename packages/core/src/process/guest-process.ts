@@ -17,11 +17,14 @@ import type {
   ApiHandler,
   ApiInterceptor,
   ApiResult,
+  Color,
+  GdiBridge,
   JitEngine,
   PeImage,
   PeLoader,
-} from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
+  Rect,
+} from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
 import { STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE } from '../api/handlers';
 import { ApiTrapDispatcher } from '../jit/trap-dispatcher';
 import { Executor, type TrapHandler } from '../jit/executor';
@@ -187,6 +190,16 @@ export interface GuestProcessOptions {
    * Empty by default; cmd.exe needs it to decide interactive vs /c mode.
    */
   commandLine?: string;
+  /**
+   * Optional per-window GDI bridge provider. When it returns a bridge for a
+   * guest hwnd, the guest's GDI calls (GetDC/BeginPaint/TextOutW/FillRect/
+   * LineTo/... /EndPaint) are forwarded to that bridge and rendered to its
+   * canvas — the L6 "image bridge" path (设计文档 3.2). When it returns null
+   * (or is not set), the classic PaintCommand capture is used instead, so
+   * headless/CLI runs keep working unchanged. The bridge instance for a DC is
+   * looked up by DC handle, so a bridge may own multiple DCs.
+   */
+  gdiBridge?: (hwnd: number) => GdiBridge | null;
 }
 
 export class GuestProcessRunner {
@@ -208,6 +221,10 @@ export class GuestProcessRunner {
   private sehDepth = 0;
   /** Set by the RtlUnwind handler when it transfers control (unwind target). */
   private sehTransfer: { eip: number; esp: number } | null = null;
+  /** Optional per-hwnd GDI bridge provider (see GuestProcessOptions.gdiBridge). */
+  private gdiBridgeProvider?: (hwnd: number) => GdiBridge | null;
+  /** DC handle -> owning bridge, for the pixel GDI path (L6 image bridge). */
+  private gdiBridgeByHdc = new Map<number, GdiBridge>();
   /**
    * GUI bridge state (see installGuiBridge): class atom -> window procedure
    * address, fake HWND -> { window procedure, parent } record, and the
@@ -278,6 +295,8 @@ export class GuestProcessRunner {
     this.guiMessageQueue.length = 0;
     this.paintCommands = [];
     this.gdiObjSeq = 0x3000;
+    this.gdiBridgeByHdc.clear();
+    this.gdiBridgeProvider = options.gdiBridge;
     this.interactive = options.interactive ?? false;
     this.quitRequested = false;
     this.pendingMessageResolve = null;
@@ -1596,7 +1615,7 @@ export class GuestProcessRunner {
       }
     }
     if (!mui || mui.byteLength === 0) {
-      console.warn(`[bk] MUI: no satellite found for ${this.modulePath} (candidates: ${candidates.join(', ')})`);
+      console.warn(`[specter-core] MUI: no satellite found for ${this.modulePath} (candidates: ${candidates.join(', ')})`);
       return;
     }
 
@@ -1698,9 +1717,9 @@ export class GuestProcessRunner {
     if (merged > 0) {
       this.muiLoaded = true;
       this.muiSource = muiPath;
-      console.error(`[bk] merged ${merged} MUI resources (${muiPath})`);
+      console.error(`[specter-core] merged ${merged} MUI resources (${muiPath})`);
     } else {
-      console.warn(`[bk] MUI: found ${muiPath} but merged 0 resources`);
+      console.warn(`[specter-core] MUI: found ${muiPath} but merged 0 resources`);
     }
   }
 
@@ -2051,6 +2070,36 @@ export class GuestProcessRunner {
     this.interceptor.hook('kernel32.dll', 'ApiSetQueryApiSetPresence', (ctx, host) => {
       const present = (ctx.rawArgs[1] ?? 0) >>> 0;
       if (present) host.memory.write(present, new Uint8Array([1])); // TRUE
+      return { returnValue: 0, errorCode: E.NO_ERROR }; // STATUS_SUCCESS
+    });
+
+    // RtlCreateUnicodeStringFromAsciiz(PUNICODE_STRING DestinationString,
+    // PCSZ SourceString) — ntdll. cmd.exe's 0x42d39c string-init helper calls
+    // this; without a handler the UNICODE_STRING output stays zeroed and the
+    // helper returns NULL, sending cmd down its error-recovery path where
+    // standard-handle values get misused as pointers (edi=0xfffffff4 -> OOB).
+    // We allocate a temp wide buffer and fill the struct so the helper succeeds.
+    this.interceptor.hook('ntdll.dll', 'RtlCreateUnicodeStringFromAsciiz', (ctx, host) => {
+      const dst = Number(ctx.rawArgs[0] ?? 0) >>> 0;
+      const src = Number(ctx.rawArgs[1] ?? 0) >>> 0;
+      if (!dst || !src) return { returnValue: 0xc0000001, errorCode: E.NO_ERROR }; // STATUS_UNSUCCESSFUL
+      // Read source ASCII string
+      const bytes = host.memory.read(src, 0x10000) ?? new Uint8Array(0);
+      let n = 0;
+      while (n < bytes.length && bytes[n] !== 0) n++;
+      // Temp wide buffer at a fixed high address (reused across calls — cmd
+      // consumes the string immediately in 0x42d39c, so this is safe enough).
+      const wideBuf = 0x00600000;
+      const wide = new Uint8Array((n + 1) * 2);
+      for (let i = 0; i < n; i++) wide[i * 2] = bytes[i] ?? 0; // ASCII -> UTF-16LE
+      host.memory.write(wideBuf, wide);
+      // Fill UNICODE_STRING: Length(2) + MaximumLength(2) + Buffer(4)
+      const us = new Uint8Array(8);
+      const dv = new DataView(us.buffer);
+      dv.setUint16(0, n * 2, true);          // Length = bytes (not including null)
+      dv.setUint16(2, (n + 1) * 2, true);    // MaximumLength
+      dv.setUint32(4, wideBuf, true);         // Buffer
+      host.memory.write(dst, us);
       return { returnValue: 0, errorCode: E.NO_ERROR }; // STATUS_SUCCESS
     });
 
@@ -2428,73 +2477,191 @@ export class GuestProcessRunner {
     // Real GDI drawing (from a WndProc WM_PAINT or any paint path) is
     // recorded as PaintCommands so a host renderer (L6 desktop) can replay
     // it; the guest only sees well-behaved pseudo-handles / 1s in return.
+    //
+    // Pixel path (design doc 3.2 / L6 image bridge): when `gdiBridge` is
+    // provided and returns a bridge for the guest hwnd, drawing is forwarded
+    // to that bridge instead of being captured — the L6 canvas owns the
+    // pixels, and EndPaint/BitBlt flush them. Fallback (null bridge / headless)
+    // keeps the PaintCommand capture above, so CLI runs are unchanged.
     // ------------------------------------------------------------------
     const nextGdiObj = (): number => ++this.gdiObjSeq;
     const recordPaint = (cmd: PaintCommand): ApiResult => {
       this.paintCommands.push(cmd);
       return { returnValue: 1, errorCode: E.NO_ERROR };
     };
-    this.interceptor.hook('gdi32.dll', 'GetStockObject', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
-    this.interceptor.hook('gdi32.dll', 'SelectObject', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    const bridgeByHdc = this.gdiBridgeByHdc;
+    const bridgeFor = (hdc: number): GdiBridge | null => bridgeByHdc.get(hdc) ?? null;
+    const ok1 = (): ApiResult => ({ returnValue: 1, errorCode: E.NO_ERROR });
+    /** COLORREF (0x00BBGGRR) -> ARGB Color. */
+    const colorFromBgr = (n: number): Color => ({ r: n & 0xff, g: (n >>> 8) & 0xff, b: (n >>> 16) & 0xff, a: 255 });
+    const BLACK: Color = { r: 0, g: 0, b: 0, a: 255 };
+    const WHITE: Color = { r: 255, g: 255, b: 255, a: 255 };
+    const brushColorByObj = new Map<number, Color>();
+    const penColorByObj = new Map<number, Color>();
+    const curBrushByHdc = new Map<number, Color>();
+    const curPenByHdc = new Map<number, Color>();
+    const penPosByHdc = new Map<number, { x: number; y: number }>();
+    /** Swallow drawing errors (e.g. a guest passing a stale HDC). */
+    const safe = async (fn: () => Promise<unknown>): Promise<void> => {
+      try {
+        await fn();
+      } catch {
+        /* ignore drawing errors */
+      }
+    };
+    const readRect = (lprc: number): { x: number; y: number; w: number; h: number } =>
+      lprc
+        ? {
+            x: runtime.readInt32(lprc + 0),
+            y: runtime.readInt32(lprc + 4),
+            w: runtime.readInt32(lprc + 8) - runtime.readInt32(lprc + 0),
+            h: runtime.readInt32(lprc + 12) - runtime.readInt32(lprc + 4),
+          }
+        : { x: 0, y: 0, w: 0, h: 0 };
+    const toRect = (r: { x: number; y: number; w: number; h: number }): Rect => ({ x: r.x, y: r.y, width: r.w, height: r.h });
+    const readWStr16 = (address: number, cch: number): string => {
+      const w = runtime.readBytes(address, Math.min(cch * 2, 4096));
+      const view = new DataView(w.buffer, w.byteOffset, w.byteLength);
+      let text = '';
+      for (let i = 0; i + 1 < w.byteLength && i / 2 < cch; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        text += String.fromCharCode(c);
+      }
+      return text;
+    };
+
+    // Object creation: mint pseudo handles and remember brush/pen colours so
+    // the pixel path can resolve FillRect(brush) / LineTo(pen) colours.
+    this.interceptor.hook('gdi32.dll', 'GetStockObject', (ctx) => {
+      const obj = nextGdiObj();
+      const n = ctx.rawArgs[0] ?? 0;
+      const c = n === 4 || n === 7 ? BLACK : WHITE; // BLACK_BRUSH(4), BLACK_PEN(7)
+      if (n === 6 || n === 7) penColorByObj.set(obj, c);
+      else brushColorByObj.set(obj, c);
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('gdi32.dll', 'SelectObject', (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const obj = ctx.rawArgs[1] ?? 0;
+      if (brushColorByObj.has(obj)) curBrushByHdc.set(hdc, brushColorByObj.get(obj) ?? WHITE);
+      if (penColorByObj.has(obj)) curPenByHdc.set(hdc, penColorByObj.get(obj) ?? BLACK);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('gdi32.dll', 'DeleteObject', () => this.ok1());
-    this.interceptor.hook('gdi32.dll', 'CreateSolidBrush', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
-    this.interceptor.hook('gdi32.dll', 'CreateHatchBrush', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
-    this.interceptor.hook('gdi32.dll', 'CreatePen', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
+    this.interceptor.hook('gdi32.dll', 'CreateSolidBrush', (ctx) => {
+      const obj = nextGdiObj();
+      brushColorByObj.set(obj, colorFromBgr(ctx.rawArgs[0] ?? 0));
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('gdi32.dll', 'CreateHatchBrush', (ctx) => {
+      const obj = nextGdiObj();
+      brushColorByObj.set(obj, colorFromBgr(ctx.rawArgs[1] ?? 0));
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('gdi32.dll', 'CreatePen', (ctx) => {
+      const obj = nextGdiObj();
+      penColorByObj.set(obj, colorFromBgr(ctx.rawArgs[2] ?? 0));
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('gdi32.dll', 'CreateFontIndirectW', (ctx) => {
       const lpLogFont = ctx.rawArgs[0] ?? 0;
       if (lpLogFont) readWStr(lpLogFont + 28); // LOGFONTW.lfFaceName — validate
       return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('gdi32.dll', 'CreateFontIndirectA', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
-    // DC acquisition: mint pseudo HDCs. BeginPaint also fills PAINTSTRUCT.hdc.
-    this.interceptor.hook('user32.dll', 'GetDC', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
-    this.interceptor.hook('user32.dll', 'GetWindowDC', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
-    this.interceptor.hook('user32.dll', 'ReleaseDC', () => this.ok1());
-    this.interceptor.hook('user32.dll', 'BeginPaint', (ctx) => {
+    // DC acquisition: mint pseudo HDCs, or create real DCs on the guest's
+    // bridge when one is wired (pixel path). BeginPaint also fills
+    // PAINTSTRUCT.hdc with the handle the drawing calls will use.
+    this.interceptor.hook('user32.dll', 'GetDC', async (ctx) => {
+      const bridge = this.gdiBridgeProvider?.(ctx.rawArgs[0] ?? 0) ?? null;
+      if (!bridge) return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
+      const hdc = await bridge.createDC('DISPLAY');
+      bridgeByHdc.set(hdc, bridge);
+      return { returnValue: hdc, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('user32.dll', 'GetWindowDC', async (ctx) => {
+      const bridge = this.gdiBridgeProvider?.(ctx.rawArgs[0] ?? 0) ?? null;
+      if (!bridge) return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
+      const hdc = await bridge.createDC('DISPLAY');
+      bridgeByHdc.set(hdc, bridge);
+      return { returnValue: hdc, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('user32.dll', 'ReleaseDC', async (ctx) => {
+      const hdc = ctx.rawArgs[1] ?? 0;
+      const bridge = bridgeFor(hdc);
+      if (!bridge) return ok1();
+      await safe(() => bridge.deleteDC(hdc));
+      bridgeByHdc.delete(hdc);
+      return ok1();
+    });
+    this.interceptor.hook('user32.dll', 'BeginPaint', async (ctx) => {
       const lpPaint = ctx.rawArgs[1] ?? 0;
+      const bridge = this.gdiBridgeProvider?.(ctx.rawArgs[0] ?? 0) ?? null;
+      if (bridge) {
+        const hdc = await bridge.createDC('DISPLAY');
+        bridgeByHdc.set(hdc, bridge);
+        if (lpPaint) {
+          runtime.writeInt32(lpPaint + 0, hdc);
+          runtime.writeInt32(lpPaint + 4, 0); // fErase
+        }
+        return { returnValue: hdc, errorCode: E.NO_ERROR };
+      }
       if (lpPaint) {
         runtime.writeInt32(lpPaint + 0, this.gdiObjSeq + 1); // hdc
         runtime.writeInt32(lpPaint + 4, 0); // fErase
       }
       return { returnValue: ++this.gdiObjSeq, errorCode: E.NO_ERROR };
     });
-    this.interceptor.hook('user32.dll', 'EndPaint', () => this.ok1());
-    // Drawing primitives: capture and report success.
-    this.interceptor.hook('gdi32.dll', 'TextOutW', (ctx) => {
+    this.interceptor.hook('user32.dll', 'EndPaint', async (ctx) => {
+      const hdc = ctx.rawArgs[1] ? peek(ctx.rawArgs[1]) : 0;
+      const bridge = bridgeFor(hdc);
+      if (!bridge) return ok1();
+      await safe(() => bridge.flush(hdc));
+      bridgeByHdc.delete(hdc);
+      return ok1();
+    });
+    // Drawing primitives: forward to the pixel bridge when available, else
+    // capture a PaintCommand for the classic replay renderer.
+    this.interceptor.hook('gdi32.dll', 'TextOutW', async (ctx) => {
       const hdc = ctx.rawArgs[0] ?? 0;
       const x = ctx.rawArgs[1] ?? 0;
       const y = ctx.rawArgs[2] ?? 0;
-      const lpString = ctx.rawArgs[3] ?? 0;
-      const cch = ctx.rawArgs[4] ?? 0;
-      const w = runtime.readBytes(lpString, Math.min(cch * 2, 4096));
-      const view = new DataView(w.buffer, w.byteOffset, w.byteLength);
-      let text = '';
-      for (let i = 0; i + 1 < w.byteLength && i / 2 < cch; i += 2) {
-        const c = view.getUint16(i, true);
-        if (c === 0) break;
-        text += String.fromCharCode(c);
+      const text = readWStr16(ctx.rawArgs[3] ?? 0, ctx.rawArgs[4] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        await safe(() => bridge.textOut(hdc, x, y, text));
+        return ok1();
       }
       return recordPaint({ op: 'text', hdc, x, y, text });
     });
-    this.interceptor.hook('gdi32.dll', 'ExtTextOutW', (ctx) => {
+    this.interceptor.hook('gdi32.dll', 'ExtTextOutW', async (ctx) => {
       const hdc = ctx.rawArgs[0] ?? 0;
       const x = ctx.rawArgs[1] ?? 0;
       const y = ctx.rawArgs[2] ?? 0;
-      const lpString = ctx.rawArgs[4] ?? 0;
-      const cch = ctx.rawArgs[5] ?? 0;
-      const w = runtime.readBytes(lpString, Math.min(cch * 2, 4096));
-      const view = new DataView(w.buffer, w.byteOffset, w.byteLength);
-      let text = '';
-      for (let i = 0; i + 1 < w.byteLength && i / 2 < cch; i += 2) {
-        const c = view.getUint16(i, true);
-        if (c === 0) break;
-        text += String.fromCharCode(c);
+      const text = readWStr16(ctx.rawArgs[4] ?? 0, ctx.rawArgs[5] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        await safe(() => bridge.textOut(hdc, x, y, text));
+        return ok1();
       }
       return recordPaint({ op: 'text', hdc, x, y, text });
     });
-    this.interceptor.hook('gdi32.dll', 'SetTextColor', (ctx) => ({ returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('gdi32.dll', 'SetBkColor', (ctx) => ({ returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('gdi32.dll', 'SetBkMode', (ctx) => ({ returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('gdi32.dll', 'SetTextColor', async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.setTextColor(ctx.rawArgs[0] ?? 0, colorFromBgr(ctx.rawArgs[1] ?? 0)));
+      return { returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('gdi32.dll', 'SetBkColor', async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.setBkColor(ctx.rawArgs[0] ?? 0, colorFromBgr(ctx.rawArgs[1] ?? 0)));
+      return { returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('gdi32.dll', 'SetBkMode', async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.setBkMode(ctx.rawArgs[0] ?? 0, ctx.rawArgs[1] ?? 0));
+      return { returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('gdi32.dll', 'GetBkColor', () => ({ returnValue: 0x00ffffff, errorCode: E.NO_ERROR }));
     this.interceptor.hook('gdi32.dll', 'GetTextColor', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('gdi32.dll', 'GetTextAlign', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
@@ -2521,59 +2688,131 @@ export class GuestProcessRunner {
     });
     this.interceptor.hook('gdi32.dll', 'GetDeviceCaps', () => ({ returnValue: 96, errorCode: E.NO_ERROR }));
     this.interceptor.hook('gdi32.dll', 'MoveToEx', (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = ctx.rawArgs[1] ?? 0;
+      const y = ctx.rawArgs[2] ?? 0;
+      penPosByHdc.set(hdc, { x, y });
       const lppt = ctx.rawArgs[3] ?? 0;
       if (lppt) {
-        runtime.writeInt32(lppt + 0, ctx.rawArgs[1] ?? 0);
-        runtime.writeInt32(lppt + 4, ctx.rawArgs[2] ?? 0);
+        runtime.writeInt32(lppt + 0, x);
+        runtime.writeInt32(lppt + 4, y);
       }
       return { returnValue: 1, errorCode: E.NO_ERROR };
     });
-    this.interceptor.hook('gdi32.dll', 'LineTo', (ctx) =>
-      recordPaint({ op: 'line', hdc: ctx.rawArgs[0] ?? 0, x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0 }),
-    );
-    this.interceptor.hook('gdi32.dll', 'FillRect', (ctx) => {
-      const lprc = ctx.rawArgs[1] ?? 0;
-      const rc = lprc
-        ? {
-            x: runtime.readInt32(lprc + 0),
-            y: runtime.readInt32(lprc + 4),
-            w: runtime.readInt32(lprc + 8) - runtime.readInt32(lprc + 0),
-            h: runtime.readInt32(lprc + 12) - runtime.readInt32(lprc + 4),
-          }
-        : { x: 0, y: 0, w: 0, h: 0 };
-      return recordPaint({ op: 'fillrect', hdc: ctx.rawArgs[0] ?? 0, x: rc.x, y: rc.y, w: rc.w, h: rc.h });
+    this.interceptor.hook('gdi32.dll', 'LineTo', async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = ctx.rawArgs[1] ?? 0;
+      const y = ctx.rawArgs[2] ?? 0;
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const from = penPosByHdc.get(hdc) ?? { x: 0, y: 0 };
+        await safe(() => bridge.lineTo(hdc, from.x, from.y, x, y, curPenByHdc.get(hdc) ?? BLACK));
+        return ok1();
+      }
+      return recordPaint({ op: 'line', hdc, x, y });
     });
-    this.interceptor.hook('gdi32.dll', 'FrameRect', (ctx) => {
-      const lprc = ctx.rawArgs[1] ?? 0;
-      const rc = lprc
-        ? {
-            x: runtime.readInt32(lprc + 0),
-            y: runtime.readInt32(lprc + 4),
-            w: runtime.readInt32(lprc + 8) - runtime.readInt32(lprc + 0),
-            h: runtime.readInt32(lprc + 12) - runtime.readInt32(lprc + 4),
-          }
-        : { x: 0, y: 0, w: 0, h: 0 };
-      return recordPaint({ op: 'rect', hdc: ctx.rawArgs[0] ?? 0, x: rc.x, y: rc.y, w: rc.w, h: rc.h });
+    this.interceptor.hook('gdi32.dll', 'FillRect', async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const rc = readRect(ctx.rawArgs[1] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const color = brushColorByObj.get(ctx.rawArgs[2] ?? 0) ?? curBrushByHdc.get(hdc) ?? WHITE;
+        await safe(() => bridge.fillRect(hdc, toRect(rc), color));
+        return ok1();
+      }
+      return recordPaint({ op: 'fillrect', hdc, x: rc.x, y: rc.y, w: rc.w, h: rc.h });
     });
-    this.interceptor.hook('gdi32.dll', 'Rectangle', (ctx) =>
-      recordPaint({
-        op: 'rect',
-        hdc: ctx.rawArgs[0] ?? 0,
-        x: Math.min(ctx.rawArgs[1] ?? 0, ctx.rawArgs[3] ?? 0),
-        y: Math.min(ctx.rawArgs[2] ?? 0, ctx.rawArgs[4] ?? 0),
-        w: Math.abs((ctx.rawArgs[3] ?? 0) - (ctx.rawArgs[1] ?? 0)),
-        h: Math.abs((ctx.rawArgs[4] ?? 0) - (ctx.rawArgs[2] ?? 0)),
-      }),
-    );
-    this.interceptor.hook('gdi32.dll', 'BitBlt', () => this.ok1());
-    this.interceptor.hook('gdi32.dll', 'StretchBlt', () => this.ok1());
-    this.interceptor.hook('gdi32.dll', 'PatBlt', () => this.ok1());
-    this.interceptor.hook('gdi32.dll', 'CreateCompatibleDC', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
+    this.interceptor.hook('gdi32.dll', 'FrameRect', async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const rc = readRect(ctx.rawArgs[1] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const color = brushColorByObj.get(ctx.rawArgs[2] ?? 0) ?? curBrushByHdc.get(hdc) ?? WHITE;
+        await safe(() => bridge.frameRect(hdc, toRect(rc), color));
+        return ok1();
+      }
+      return recordPaint({ op: 'rect', hdc, x: rc.x, y: rc.y, w: rc.w, h: rc.h });
+    });
+    this.interceptor.hook('gdi32.dll', 'Rectangle', async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = Math.min(ctx.rawArgs[1] ?? 0, ctx.rawArgs[3] ?? 0);
+      const y = Math.min(ctx.rawArgs[2] ?? 0, ctx.rawArgs[4] ?? 0);
+      const w = Math.abs((ctx.rawArgs[3] ?? 0) - (ctx.rawArgs[1] ?? 0));
+      const h = Math.abs((ctx.rawArgs[4] ?? 0) - (ctx.rawArgs[2] ?? 0));
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const rc = { x, y, w, h };
+        const R = toRect(rc);
+        await safe(async () => {
+          await bridge.fillRect(hdc, R, curBrushByHdc.get(hdc) ?? WHITE);
+          await bridge.frameRect(hdc, R, curPenByHdc.get(hdc) ?? BLACK);
+        });
+        return ok1();
+      }
+      return recordPaint({ op: 'rect', hdc, x, y, w, h });
+    });
+    this.interceptor.hook('gdi32.dll', 'PatBlt', async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        await safe(() => bridge.patBlt(hdc, toRect(rc), curBrushByHdc.get(hdc) ?? WHITE, ctx.rawArgs[5] ?? 0));
+        return ok1();
+      }
+      return ok1();
+    });
+    this.interceptor.hook('gdi32.dll', 'BitBlt', async (ctx) => {
+      const dest = ctx.rawArgs[0] ?? 0;
+      const src = ctx.rawArgs[5] ?? 0;
+      const destBridge = bridgeFor(dest);
+      if (destBridge && bridgeFor(src) === destBridge) {
+        const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
+        await safe(() =>
+          destBridge.bitBlt(
+            dest,
+            toRect(rc),
+            src,
+            toRect({ x: ctx.rawArgs[6] ?? 0, y: ctx.rawArgs[7] ?? 0, w: rc.w, h: rc.h }),
+            ctx.rawArgs[8] ?? 0,
+          ),
+        );
+      }
+      return ok1();
+    });
+    this.interceptor.hook('gdi32.dll', 'StretchBlt', async (ctx) => {
+      const dest = ctx.rawArgs[0] ?? 0;
+      const src = ctx.rawArgs[5] ?? 0;
+      const destBridge = bridgeFor(dest);
+      if (destBridge && bridgeFor(src) === destBridge) {
+        const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
+        const srcRc = { x: ctx.rawArgs[6] ?? 0, y: ctx.rawArgs[7] ?? 0, w: ctx.rawArgs[8] ?? 0, h: ctx.rawArgs[9] ?? 0 };
+        await safe(() => destBridge.stretchBlt(dest, toRect(rc), src, toRect(srcRc), ctx.rawArgs[10] ?? 0));
+      }
+      return ok1();
+    });
+    this.interceptor.hook('gdi32.dll', 'CreateCompatibleDC', async (ctx) => {
+      const src = ctx.rawArgs[0] ?? 0;
+      const bridge = bridgeFor(src);
+      if (bridge) {
+        const hdc = await bridge.createCompatibleDC(src);
+        bridgeByHdc.set(hdc, bridge);
+        return { returnValue: hdc, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('gdi32.dll', 'CreateCompatibleBitmap', () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
     this.interceptor.hook('gdi32.dll', 'SelectPalette', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('gdi32.dll', 'RealizePalette', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('gdi32.dll', 'SaveDC', () => ({ returnValue: 1, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('gdi32.dll', 'RestoreDC', () => this.ok1());
+    this.interceptor.hook('gdi32.dll', 'SaveDC', async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.saveDC(ctx.rawArgs[0] ?? 0));
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('gdi32.dll', 'RestoreDC', async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.restoreDC(ctx.rawArgs[0] ?? 0, ctx.rawArgs[1] ?? 0));
+      return ok1();
+    });
 
     // DispatchMessageW: run the guest WndProc with (hwnd, msg, wParam,
     // lParam) on the stack (stdcall) and a sentinel return address; the

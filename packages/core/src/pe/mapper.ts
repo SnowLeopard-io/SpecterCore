@@ -9,7 +9,7 @@
  *      the stub index read out of EAX (design 4.2.4).
  */
 
-import type { PeImage } from '@bk/contracts';
+import type { PeImage } from '@specter-core/contracts';
 import type { WasmRuntimeImpl } from '../jit/runtime';
 
 /** Stub region: below the default 0x400000 image base. */

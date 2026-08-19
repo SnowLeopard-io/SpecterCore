@@ -1,4 +1,4 @@
-import type { DesktopAppInfo } from '@bk/contracts';
+import type { DesktopAppInfo } from '@specter-core/contracts';
 import { NotepadApp } from './apps/NotepadApp';
 import { SystemInfoApp } from './apps/SystemInfoApp';
 import { MinesweeperApp } from './apps/MinesweeperApp';

@@ -6,8 +6,8 @@ import type {
   ApiResult,
   IEventBus,
   KernelEvents,
-} from '@bk/contracts';
-import { WinError as E } from '@bk/contracts';
+} from '@specter-core/contracts';
+import { WinError as E } from '@specter-core/contracts';
 
 /**
  * Maps API-Set redirector names (api-ms-win-*) back to the real DLLs so

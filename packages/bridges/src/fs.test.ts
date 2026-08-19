@@ -6,8 +6,8 @@ import {
   FileMoveMethod,
   ShareMode,
   WinError as E,
-} from '@bk/contracts';
-import { MemoryFileStore } from '@bk/host';
+} from '@specter-core/contracts';
+import { MemoryFileStore } from '@specter-core/host';
 import { FileSystemBridgeImpl } from './fs';
 
 const READ = DesiredAccess.GENERIC_READ;

@@ -1,6 +1,6 @@
 /** Dump the compiled WASM for notepad's __chkstk finishing block (0x427348). */
 import { readFile } from 'node:fs/promises';
-import { PeLoaderImpl, WasmRuntimeImpl, X86Decoder } from '@bk/core';
+import { PeLoaderImpl, WasmRuntimeImpl, X86Decoder } from '@specter-core/core';
 import { buildBlockFunction } from '../packages/core/src/jit/codegen';
 import { WasmModuleBuilder } from '../packages/core/src/jit/wasm-encoder';
 
@@ -9,7 +9,7 @@ const runtime = new WasmRuntimeImpl();
 const loader = new PeLoaderImpl();
 const pe = await loader.load(image);
 // map so readBytes works (needed only to read code)
-const { mapPeImage } = await import('@bk/core');
+const { mapPeImage } = await import('@specter-core/core');
 mapPeImage(runtime, image, pe);
 
 const decoder = new X86Decoder('x86');
