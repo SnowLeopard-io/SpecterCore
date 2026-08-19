@@ -670,10 +670,22 @@ export class GuestProcessRunner {
       if (fromModule && hModule === 0) text = lookupMsgTable(msgId);
       if (text === null && fromSystem) text = SYSTEM_MESSAGE_TEXT[msgId] ?? null;
       if (text === null) return { returnValue: 0, errorCode: 0x13d }; // ERROR_MR_MID_NOT_FOUND
-      // Minimal %N substitution from the Arguments array (va_list or array of
-      // LPCWSTR with FORMAT_MESSAGE_ARGUMENT_ARRAY). cmd's table strings use
-      // %s-style inserts with wide-string args; numbers are left as-is.
-      const argsPtr = (ctx.rawArgs[6] ?? 0) >>> 0;
+      // Minimal %N substitution from the Arguments parameter.
+      //
+      // The Arguments parameter is `va_list *`:
+      //  - WITHOUT FORMAT_MESSAGE_ARGUMENT_ARRAY (0x2000): it points to a
+      //    va_list variable; the va_list (x86: char*) points at the first
+      //    argument on the caller's stack. So the real arg array is
+      //    [ *Arguments + i*4 ] — one level of indirection.
+      //  - WITH FORMAT_MESSAGE_ARGUMENT_ARRAY: it IS the LPCWSTR* array.
+      // Without the extra dereference, cmd's dir headers come out with
+      // garbage where the drive letter / volume serial / path insert should
+      // be (the va_list value was read as the string pointer itself).
+      let argsPtr = (ctx.rawArgs[6] ?? 0) >>> 0;
+      const argArray = (flags & 0x2000) !== 0;
+      if (argsPtr && !(flags & 0x200) && !argArray) {
+        argsPtr = this.runtime.readInt32(argsPtr) >>> 0;
+      }
       const readArgW = (i: number): string => {
         if (!argsPtr) return '';
         const p = this.runtime.readInt32(argsPtr + i * 4) >>> 0;
@@ -1343,7 +1355,12 @@ export class GuestProcessRunner {
       return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('kernel32.dll', 'HeapReAlloc', (ctx) => {
-      const old = ctx.rawArgs[1] ?? 0;
+      // HeapReAlloc(hHeap, dwFlags, lpMem, dwBytes): lpMem is rawArgs[2],
+      // NOT rawArgs[1] (dwFlags). Using rawArgs[1] made old=0 -> bumpAlloc
+      // without copying, so cmd's 0x411cd0 realloc helper (used by the
+      // 0x40fed0 tokenizer tail) returned an EMPTY string. Same class of
+      // arg-index bug as HeapSize below.
+      const old = ctx.rawArgs[2] ?? 0;
       const size = ctx.rawArgs[3] ?? 0;
       if (!old) return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
       const oldSize = Math.max(0, this.runtime.readInt32(old - 4) & ~7);

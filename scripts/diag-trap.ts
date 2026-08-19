@@ -125,6 +125,22 @@ class LoggingInterceptor extends ApiInterceptorImpl {
         s += String.fromCharCode(c);
       }
       console.error(`[api]   ${ctx.proc} path: ${JSON.stringify(s)}`);
+      // dump the find-data buffer after the handler filled it
+      const fd = ctx.rawArgs[2] ?? 0;
+      if (ctx.proc.toLowerCase() === 'findfirstfileexw' && fd) {
+        const fb = this.memHost.memory.read(fd, 592);
+        const fv = new DataView(fb.buffer, fb.byteOffset, fb.byteLength);
+        const attrs = fv.getUint32(0, true);
+        const size = fv.getUint32(32, true);
+        let fn = '';
+        for (let i = 0; i < 259; i++) {
+          const c = fv.getUint16(44 + i * 2, true);
+          if (c === 0) break;
+          fn += String.fromCharCode(c);
+        }
+        const ftc = fv.getUint32(8, true); // ftCreationTime low
+        console.error(`[api]   findData@0x${fd.toString(16)} attrs=0x${attrs.toString(16)} size=${size} ftCreationLow=0x${ftc.toString(16)} name=${JSON.stringify(fn)}`);
+      }
     }
     if (ctx.proc.toLowerCase() === 'messageboxw') {
       const text = ctx.rawArgs[1] ?? 0;
@@ -174,6 +190,100 @@ class LoggingInterceptor extends ApiInterceptorImpl {
         if (c === 0) zeros++;
       }
       console.error(`[api]   ${ctx.proc} block @0x${addr.toString(16)}: ${JSON.stringify(s)} zeros=${zeros}`);
+    }
+    if (ctx.proc.toLowerCase() === 'writeconsolew' || ctx.proc.toLowerCase() === 'writefile') {
+      const buf = ctx.rawArgs[1] ?? 0;
+      const n = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const cap = Math.min(n, 4096);
+      const rawb = this.memHost.memory.read(buf, cap);
+      const view = new DataView(rawb.buffer, rawb.byteOffset, rawb.byteLength);
+      // Dump as wide chars if it looks like UTF-16LE text, else raw hex.
+      let s = '';
+      for (let i = 0; i + 1 < rawb.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      const printable = s.length > 0 && [...s].every((ch) => ch === '\r' || ch === '\n' || ch === '\t' || (ch.charCodeAt(0) >= 0x20 && ch.charCodeAt(0) < 0x7f) || ch.charCodeAt(0) > 0x7f);
+      if (printable) {
+        console.error(`[api]   ${ctx.proc} buf=0x${buf.toString(16)} n=${n} wide=${JSON.stringify(s)}`);
+      } else {
+        const hex = [...rawb.subarray(0, Math.min(64, rawb.byteLength))].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+        console.error(`[api]   ${ctx.proc} buf=0x${buf.toString(16)} n=${n} hex=${hex}`);
+      }
+    }
+    if (ctx.proc.toLowerCase().includes('vswprintf') || ctx.proc.toLowerCase().includes('vsnwprintf')) {
+      const buf = ctx.rawArgs[2] ?? 0;
+      const count = ctx.rawArgs[3] ?? 0;
+      const fmt = ctx.rawArgs[4] ?? 0;
+      const va = ctx.rawArgs[6] ?? 0;
+      const readW = (a: number, len = 128) => {
+        const b = this.memHost.memory.read(a >>> 0, len);
+        const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        let s = '';
+        for (let i = 0; i + 1 < b.byteLength; i += 2) {
+          const c = v.getUint16(i, true);
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      };
+      const rd32 = (a: number) => {
+        const b = this.memHost.memory.read(a >>> 0, 4);
+        return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+      };
+      const vaDump: string[] = [];
+      for (let i = 0; i < 8; i++) {
+        const v = rd32(va + i * 4);
+        if (!v) break;
+        const s = readW(v, 64);
+        vaDump.push(`[va+${i * 4}]=0x${v.toString(16)}${s ? ' ' + JSON.stringify(s) : ''}`);
+      }
+      console.error(
+        `[api]   ${ctx.proc} buf=0x${buf.toString(16)} count=${count} fmt=0x${fmt.toString(16)} ${JSON.stringify(readW(fmt))} va=0x${va.toString(16)} ${vaDump.join(' ')}`,
+      );
+    }
+    if (ctx.proc.toLowerCase() === 'formatmessagew') {
+      const flags = ctx.rawArgs[0] ?? 0;
+      const msgId = ctx.rawArgs[2] ?? 0;
+      const bufPtr = ctx.rawArgs[4] ?? 0;
+      const argsPtr = ctx.rawArgs[6] ?? 0;
+      const rd32 = (a: number) => {
+        const b = this.memHost.memory.read(a >>> 0, 4);
+        return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+      };
+      const readW = (a: number) => {
+        const b = this.memHost.memory.read(a >>> 0, 128);
+        const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        let s = '';
+        for (let i = 0; i + 1 < b.byteLength; i += 2) {
+          const c = v.getUint16(i, true);
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      };
+      const argDump: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        const v = rd32(argsPtr + i * 4);
+        if (!v) break;
+        const s = readW(v, 64);
+        argDump.push(`[args+${i * 4}]=0x${v.toString(16)}${s ? ' ' + JSON.stringify(s) : ''}`);
+      }
+      const postBuf = rd32(bufPtr) >>> 0;
+      console.error(
+        `[api]   FormatMessageW flags=0x${(flags >>> 0).toString(16)} msgId=0x${(msgId >>> 0).toString(16)} bufPtr=0x${bufPtr.toString(16)} nSize=0x${(ctx.rawArgs[5] ?? 0).toString(16)} argsPtr=0x${argsPtr.toString(16)} ${argDump.join(' ')} -> ret=0x${(result.returnValue >>> 0).toString(16)} out@0x${postBuf.toString(16)} ${JSON.stringify(readW(postBuf))}`,
+      );
+      // va_list* semantics probe: [argsPtr] = va_list; args live at [va_list]
+      const vaList = rd32(argsPtr) >>> 0;
+      const deeper: string[] = [];
+      for (let i = 0; i < 4; i++) {
+        const v = rd32(vaList + i * 4);
+        if (!v) break;
+        const s = readW(v, 64);
+        deeper.push(`[vaList+${i * 4}]=0x${v.toString(16)}${s ? ' ' + JSON.stringify(s) : ''}`);
+      }
+      console.error(`[api]     vaList=0x${vaList.toString(16)} ${deeper.join(' ')} | 44f240=${JSON.stringify(readW(0x44f240))}`);
     }
     return result;
   }
@@ -234,7 +344,8 @@ function buildExeFs(exePath: string, exeBytes: Uint8Array): FileSystemBridge {
       };
     },
     async findNextFile() {
-      return { entries: [], error: notFound };
+      // Enumeration end must be ERROR_NO_MORE_FILES (18), not ERROR_FILE_NOT_FOUND (2).
+      return { entries: [], error: 18 as WinError };
     },
     async findClose() {},
     async createDirectory() {
@@ -462,6 +573,32 @@ async function main(): Promise<void> {
         0x40bfd7, // dir: cmp bx,ax (first char vs '\')
         0x40bfda, // dir: je 0x40c138 (taken for relative path)
         0x40bf53, // dir handler entry (ecx = command object)
+        0x40a9e9, // dir wrapper entry (ecx = target param string)
+        0x40a320, // dir outer handler (ecx = context)
+        0x409b0a, // X: dir executor (ecx = context)
+        0x40c1a6, // param parser (ecx=cmdstr, edx=context)
+        0x40c1d6, // after 0x40fed0 tokenize: ebx = result
+        0x40dc0d, // string copy helper (NOT the resolver)
+        0x40dc53, // dir resolve+enum (ecx = path)
+        0x40dc77, // after wcschr('*') check in 0x40dc0d
+        0x40dc89, // after wcschr('?') check in 0x40dc0d
+        0x40dcb9, // after 0x41afe9 call in 0x40dc0d
+        0x41afe9, // FindFirstFileExW wrapper (edx = lpFileName)
+        0x41916d, // enum path build: [ebx] is lpFileName
+        0x417ed4, // path concat (ecx, edx + stack args)
+        0x414ad6, // path obj append (ecx=obj, [ebp+8]=src)
+        0x40a376, // after 0x41ee28: check obj+0x208
+        0x41eccc, // delay-load jmp [0x45042c]
+        0x40a4ac, // copy 0x44ed08/[0x44ef10] -> [ebp-0x220]
+        0x40a4b6, // after 0x414ad6: check [ebp-0x220] content
+        0x40a60f, // after 0x40dc0d("Windows"): dump globals
+        0x408ba9, // dir exec core entry (node in ecx)
+        0x408b1c, // dir exec entry
+        0x42529c, // " Directory of %s" FormatMessageW call site
+        0x410800, // dispatch entry (ecx=?, edx=slot string)
+        0x4108a9, // [0x4406dc] = [ebp-4] = slot
+        0x4108f6, // esi = 0x40e5ca ret (token ptr?)
+        0x41090a, // call 0x410960 (read next token)
         0x410c28, // tokenizer: after setjmp3, reads [0x4406d4]
         0x410c5f, // tokenizer main loop start
       ];
@@ -530,15 +667,33 @@ async function main(): Promise<void> {
         if (eip === 0x40bf53) {
           const obj = rt.getReg('ecx') >>> 0;
           const tgt = rd32(obj) >>> 0;
-          const b = rt.readBytes(tgt, 64);
-          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
-          let s = '';
-          for (let i = 0; i + 1 < b.byteLength; i += 2) {
-            const c = v.getUint16(i, true);
-            if (c === 0) break;
-            s += String.fromCharCode(c);
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 64);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          // ret addr + caller chain from stack
+          const retInto = rd32(esp);
+          const callerEbp = rd32(esp + 4);
+          const retIntoCaller = rd32(callerEbp + 4);
+          // obj layout: first 0x30 bytes
+          const ob = rt.readBytes(obj, 0x30);
+          const ov = new DataView(ob.buffer, ob.byteOffset, ob.byteLength);
+          const objWords: string[] = [];
+          for (let i = 0; i + 4 <= 0x30; i += 4) {
+            const w = ov.getUint32(i, true);
+            let tag = '';
+            if (w >= 0x400000 && w < 0x500000) tag = `"${readW(w)}"`;
+            objWords.push(`[+0x${i.toString(16)}]=0x${w.toString(16)}${tag}`);
           }
-          extra = ` obj=0x${obj.toString(16)} target=0x${tgt.toString(16)} ${JSON.stringify(s)} esp=${r('esp')}`;
+          extra = ` obj=0x${obj.toString(16)} target=0x${tgt.toString(16)} ${JSON.stringify(readW(tgt))} esp=0x${esp.toString(16)} retInto=0x${retInto.toString(16)} callerEbp=0x${callerEbp.toString(16)} retIntoCaller=0x${retIntoCaller.toString(16)} | obj: ${objWords.join(' ')}`;
         }
         if (eip === 0x410c28 || eip === 0x410c5f) {
           const rd32g = (a: number) => rd32(a);
@@ -553,9 +708,438 @@ async function main(): Promise<void> {
           }
           extra = ` cmd@0x${p.toString(16)} ${JSON.stringify(s)} [4406d0]=0x${(rd32g(0x4406d0) >>> 0).toString(16)} [4406d4]=0x${(rd32g(0x4406d4) >>> 0).toString(16)}`;
         }
-        console.error(
-          `[tk] eip=0x${eip.toString(16)} eax=${r('eax')} ecx=${r('ecx')} edx=${r('edx')} esi=${r('esi')} edi=${r('edi')} ebx=${r('ebx')}${extra}`,
-        );
+        if (eip === 0x410800) {
+          const edx = rt.getReg('edx') >>> 0;
+          const ecx = rt.getReg('ecx') >>> 0;
+          const readW = (a: number, len = 256) => {
+            const b = rt.readBytes(a >>> 0, len);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          extra = ` ecx=0x${ecx.toString(16)} slot(edx)=0x${edx.toString(16)} ${JSON.stringify(readW(edx))} 4386ca=${JSON.stringify(readW(0x4386ca))} 43c6d0=${JSON.stringify(readW(0x43c6d0))} [4406dc]=0x${(rd32(0x4406dc) >>> 0).toString(16)} [440890]=0x${(rd32(0x440890) >>> 0).toString(16)}`;
+        }
+        if (eip === 0x4108a9) {
+          const ebp = rt.getReg('ebp') >>> 0;
+          const sptr = rd32(ebp - 4) >>> 0;
+          const b = rt.readBytes(sptr, 128);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          extra = ` [ebp-4]=0x${sptr.toString(16)} ${JSON.stringify(s)} [4406dc]=0x${(rd32(0x4406dc) >>> 0).toString(16)} [4406d4]=0x${(rd32(0x4406d4) >>> 0).toString(16)}`;
+        }
+        if (eip === 0x4108f6) {
+          const eax = rt.getReg('eax') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const tok = 0x44ac08;
+          extra = ` eax(0x40e5ca ret)=0x${eax.toString(16)} ${JSON.stringify(readW(eax))} [440808]=0x${(rd32(0x440808) >>> 0).toString(16)} [440804]=0x${(rd32(0x440804) >>> 0).toString(16)} token@0x44ac08=${JSON.stringify(readW(tok))} [4406d4]=0x${(rd32(0x4406d4) >>> 0).toString(16)} ${JSON.stringify(readW(rd32(0x4406d4)))}`;
+        }
+        if (eip === 0x41090a) {
+          extra = ` [4406d4]=0x${(rd32(0x4406d4) >>> 0).toString(16)} [4406dc]=0x${(rd32(0x4406dc) >>> 0).toString(16)} [440808]=0x${(rd32(0x440808) >>> 0).toString(16)}`;
+        }
+        if (eip === 0x40a9e9) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const retInto = rd32(esp);
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const callerEbp = rd32(esp + 4);
+          const retIntoCaller = rd32(callerEbp + 4);
+          extra = ` targetParam(ecx)=0x${ecx.toString(16)} ${JSON.stringify(readW(ecx))} esp=0x${esp.toString(16)} retInto=0x${retInto.toString(16)} callerEbp=0x${callerEbp.toString(16)} retIntoCaller=0x${retIntoCaller.toString(16)}`;
+        }
+        if (eip === 0x40a320) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const retInto = rd32(esp);
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const nArgs = rd32(ecx + 0x48);
+          const argvPtr = rd32(ecx + 0x4c) >>> 0;
+          const argv0 = rd32(argvPtr) >>> 0;
+          extra = ` ctx=0x${ecx.toString(16)} nArgs([+0x48])=0x${nArgs.toString(16)} argvPtr([+0x4c])=0x${argvPtr.toString(16)} argv0=0x${argv0.toString(16)} ${JSON.stringify(readW(argv0))} esp=0x${esp.toString(16)} retInto=0x${retInto.toString(16)}`;
+        }
+        if (eip === 0x409b0a) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const edx = rt.getReg('edx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const retInto = rd32(esp);
+          const a1 = rd32(esp + 4);
+          const a2 = rd32(esp + 8);
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          extra = ` ecx=0x${ecx.toString(16)} edx=0x${edx.toString(16)} esp=0x${esp.toString(16)} retInto=0x${retInto.toString(16)} a1=0x${a1.toString(16)} a2=0x${a2.toString(16)} [4406dc]=0x${(rd32(0x4406dc) >>> 0).toString(16)} ${JSON.stringify(readW(rd32(0x4406dc)))} 4386ca=${JSON.stringify(readW(0x4386ca))}`;
+        }
+        if (eip === 0x40c1a6) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const edx = rt.getReg('edx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const w0 = rd32(edx);
+          const w4 = rd32(edx + 4);
+          const w48 = rd32(edx + 0x48);
+          const w4c = rd32(edx + 0x4c);
+          extra = ` ecx=0x${ecx.toString(16)} ${JSON.stringify(readW(ecx))} ctx(edx)=0x${edx.toString(16)} [ctx+0]=0x${w0.toString(16)}${w0 >= 0x400000 && w0 < 0x500000 ? ` ${JSON.stringify(readW(w0))}` : ''} [ctx+4]=0x${w4.toString(16)} [ctx+48]=0x${w48.toString(16)} [ctx+4c]=0x${w4c.toString(16)}${w4c >= 0x400000 && w4c < 0x500000 ? ` ${JSON.stringify(readW(w4c))}` : ''} retInto=0x${(rd32(esp) >>> 0).toString(16)}`;
+        }
+        if (eip === 0x40c1d6) {
+          const ret = rt.getReg('eax') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const esi = rt.getReg('esi') >>> 0;
+          const c4c = rd32(esi + 0x4c) >>> 0;
+          extra = ` eax(0x40fed0 ret)=0x${ret.toString(16)} ${JSON.stringify(readW(ret))} esi(ctx)=0x${esi.toString(16)} [ctx+0x4c]=0x${c4c.toString(16)} ${JSON.stringify(readW(c4c))}`;
+        }
+        if (eip === 0x40dc0d) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          extra = ` ecx(path)=0x${ecx.toString(16)} ${JSON.stringify(readW(ecx))} esp=0x${esp.toString(16)} retInto=0x${(rd32(esp) >>> 0).toString(16)} 4408e0=${JSON.stringify(readW(0x4408e0))}`;
+        }
+        if (eip === 0x41b00b) {
+          const edx = rt.getReg('edx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const s0 = rd32(esp + 4);
+          const s1 = rd32(esp + 8);
+          const s2 = rd32(esp + 0xc);
+          extra = ` edx(lpFileName)=0x${edx.toString(16)} ${JSON.stringify(readW(edx))} esp=0x${esp.toString(16)} [esp+4]=0x${s0.toString(16)} ${JSON.stringify(readW(s0))} [esp+8]=0x${s1.toString(16)} ${JSON.stringify(readW(s1))} [esp+c]=0x${s2.toString(16)}`;
+        }
+        if (eip === 0x41afe9) {
+          const edx = rt.getReg('edx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const retInto = rd32(esp) >>> 0;
+          extra = ` edx(lpFileName)=0x${edx.toString(16)} ${JSON.stringify(readW(edx))} ecx=0x${(rt.getReg('ecx') >>> 0).toString(16)} esp=0x${esp.toString(16)} retInto=0x${retInto.toString(16)} [esp+4]=0x${(rd32(esp + 4) >>> 0).toString(16)} [esp+8]=0x${(rd32(esp + 8) >>> 0).toString(16)} [esp+c]=0x${(rd32(esp + 0xc) >>> 0).toString(16)} [esp+10]=0x${(rd32(esp + 0x10) >>> 0).toString(16)} [esp+14]=0x${(rd32(esp + 0x14) >>> 0).toString(16)}`;
+        }
+        if (eip === 0x40dc77 || eip === 0x40dc89 || eip === 0x40dcb9) {
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const esi = rt.getReg('esi') >>> 0;
+          extra = ` eax(0x40e37e/41afe9 ret)=0x${(rt.getReg('eax') >>> 0).toString(16)} esi(path)=0x${esi.toString(16)} ${JSON.stringify(readW(esi))} [4408c0]=0x${(rd32(0x4408c0) >>> 0).toString(16)}`;
+        }
+        if (eip === 0x40dc53) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          extra = ` ecx(path)=0x${ecx.toString(16)} ${JSON.stringify(readW(ecx))} esp=0x${esp.toString(16)} retInto=0x${(rd32(esp) >>> 0).toString(16)} edx=0x${(rt.getReg('edx') >>> 0).toString(16)}`;
+        }
+        if (eip === 0x41916d) {
+          const ebx = rt.getReg('ebx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const w0 = rd32(ebx);
+          const w4 = rd32(ebx + 4);
+          const w8 = rd32(ebx + 8);
+          const w18 = rd32(ebx + 0x18);
+          extra = ` ebx=0x${ebx.toString(16)} [ebx]=0x${w0.toString(16)} ${JSON.stringify(readW(w0))} [ebx+4]=0x${w4.toString(16)} ${JSON.stringify(readW(w4))} [ebx+8]=0x${w8.toString(16)} ${JSON.stringify(readW(w8))} [ebx+18]=0x${w18.toString(16)} esp=0x${esp.toString(16)} retInto=0x${(rd32(esp) >>> 0).toString(16)}`;
+        }
+        if (eip === 0x417ed4) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const edx = rt.getReg('edx') >>> 0;
+          const edi = rt.getReg('edi') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const a1 = rd32(esp + 4);
+          const a2 = rd32(esp + 8);
+          const a3 = rd32(esp + 0xc);
+          // if this is the 0x408cac concat, edi = dir tree node
+          let nodeDump = '';
+          if (edi >= 0x2000000 && edi < 0x3000000) {
+            const n0 = rd32(edi) >>> 0;
+            const n4 = rd32(edi + 4) >>> 0;
+            const nc = rd32(edi + 0xc) >>> 0;
+            const nnc = rd32(nc) >>> 0;
+            nodeDump = ` node(edi)=0x${edi.toString(16)} [n+0]=0x${n0.toString(16)} ${JSON.stringify(readW(n0))} [n+4]=0x${n4.toString(16)} ${JSON.stringify(readW(n4))} [n+c]=0x${nc.toString(16)} [[n+c]]=0x${nnc.toString(16)} ${JSON.stringify(readW(nnc))}`;
+          }
+          extra = ` ecx=0x${ecx.toString(16)} ${JSON.stringify(readW(ecx))} edx=0x${edx.toString(16)} ${JSON.stringify(readW(edx))} [esp+4]=0x${a1.toString(16)} ${JSON.stringify(readW(a1))} [esp+8]=0x${a2.toString(16)} ${JSON.stringify(readW(a2))} [esp+c]=0x${a3.toString(16)} ${JSON.stringify(readW(a3))} retInto=0x${(rd32(esp) >>> 0).toString(16)}${nodeDump}`;
+        }
+        if (eip === 0x40a4ac) {
+          const edx = rt.getReg('edx') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const e44ef10 = rd32(0x44ef10) >>> 0;
+          extra = ` edx(src)=0x${edx.toString(16)} ${JSON.stringify(readW(edx))} [44ef10]=0x${e44ef10.toString(16)} ${JSON.stringify(readW(e44ef10))} 44ed08=${JSON.stringify(readW(0x44ed08))} 44ed00=${JSON.stringify(readW(0x44ed00))}`;
+        }
+        if (eip === 0x40a60f) {
+          const ebp = rt.getReg('ebp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 256);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const p220 = rd32(ebp - 0x220) >>> 0;
+          const p18 = rd32(ebp - 0x18) >>> 0;
+          const e44ef10 = rd32(0x44ef10) >>> 0;
+          const e44ed08 = rd32(0x44ed08) >>> 0;
+          extra = ` ebp=0x${ebp.toString(16)} [ebp-0x220]=0x${p220.toString(16)} ${JSON.stringify(readW(p220))} [ebp-0x18]=0x${p18.toString(16)} ${JSON.stringify(readW(p18))} [44ef10]=0x${e44ef10.toString(16)} ${JSON.stringify(readW(e44ef10))} 44ed08=0x${e44ed08.toString(16)} ${JSON.stringify(readW(e44ed08))} 44ed00=${JSON.stringify(readW(0x44ed00))}`;
+        }
+        if (eip === 0x40a4b6) {
+          const ebp = rt.getReg('ebp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          extra = ` ebp=0x${ebp.toString(16)} [ebp-0x220]=0x${(rd32(ebp - 0x220) >>> 0).toString(16)} 220str=${JSON.stringify(readW(ebp - 0x220))} [ebp-0x18]=0x${(rd32(ebp - 0x18) >>> 0).toString(16)} ${JSON.stringify(readW(rd32(ebp - 0x18)))} eax=0x${(rt.getReg('eax') >>> 0).toString(16)}`;
+        }
+        if (eip === 0x414ad6) {
+          const ecx = rt.getReg('ecx') >>> 0;
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const src = rd32(esp + 4) >>> 0;
+          extra = ` obj(ecx)=0x${ecx.toString(16)} objStr=${JSON.stringify(readW(ecx))} [obj+208]=0x${(rd32(ecx + 0x208) >>> 0).toString(16)} src([esp+4])=0x${src.toString(16)} ${JSON.stringify(readW(src))} retInto=0x${(rd32(esp) >>> 0).toString(16)} edx=0x${(rt.getReg('edx') >>> 0).toString(16)}`;
+        }
+        if (eip === 0x40a376) {
+          const ebp = rt.getReg('ebp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const obj208 = rd32(ebp - 0x220 + 0x208) >>> 0;
+          extra = ` [obj+208]=0x${obj208.toString(16)} ${JSON.stringify(readW(obj208))} [44ef10]=0x${(rd32(0x44ef10) >>> 0).toString(16)} ${JSON.stringify(readW(rd32(0x44ef10)))} 44ed08str=${JSON.stringify(readW(0x44ed08))}`;
+        }
+        if (eip === 0x41eccc) {
+          const esp = rt.getReg('esp') >>> 0;
+          const readW = (a: number) => {
+            const b = rt.readBytes(a >>> 0, 128);
+            const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+            let s = '';
+            for (let i = 0; i + 1 < b.byteLength; i += 2) {
+              const c = v.getUint16(i, true);
+              if (c === 0) break;
+              s += String.fromCharCode(c);
+            }
+            return s;
+          };
+          const tgt = rd32(0x45042c) >>> 0;
+          const a1 = rd32(esp + 4) >>> 0;
+          const a2 = rd32(esp + 8) >>> 0;
+          const a3 = rd32(esp + 0xc) >>> 0;
+          const a4 = rd32(esp + 0x10) >>> 0;
+          const a5 = rd32(esp + 0x14) >>> 0;
+          extra = ` [45042c]=0x${tgt.toString(16)} [esp+4]=0x${a1.toString(16)} [esp+8]=0x${a2.toString(16)} [esp+c]=0x${a3.toString(16)} ${JSON.stringify(readW(a3))} [esp+10]=0x${a4.toString(16)} [esp+14]=0x${a5.toString(16)}`;
+        }
+      if (eip === 0x408ba9 || eip === 0x408b1c) {
+        const ecx = rt.getReg('ecx') >>> 0;
+        const esp = rt.getReg('esp') >>> 0;
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const readW = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 128);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        };
+        const node = ecx;
+        const f = (a: number) => {
+          const v = rd32m(a) >>> 0;
+          const s = v >= 0x400000 && v < 0x500000 ? ` ${JSON.stringify(readW(v))}` : '';
+          return `0x${v.toString(16)}${s}`;
+        };
+        extra = ` eip=0x${eip.toString(16)} node(ecx)=0x${node.toString(16)} [n+0]=${f(node)} [n+4]=${f(node + 4)} [n+8]=${f(node + 8)} [n+c]=${f(node + 0xc)} [n+10]=${f(node + 0x10)} [n+14]=${f(node + 0x14)} [n+18]=${f(node + 0x18)} [[n+c]]=${f(rd32m(node + 0xc))} esp=0x${esp.toString(16)} retInto=0x${(rd32m(esp) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x42529c) {
+        const ebp = rt.getReg('ebp') >>> 0;
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const readW = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 128);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        };
+        const a0 = rd32m(ebp + 8) >>> 0;
+        const a4 = rd32m(a0 + 4) >>> 0;
+        extra = ` ebp=0x${ebp.toString(16)} [ebp+8]=0x${a0.toString(16)} [a0+0]=0x${(rd32m(a0) >>> 0).toString(16)} ${JSON.stringify(readW(rd32m(a0)))} [a0+4]=0x${a4.toString(16)} ${JSON.stringify(readW(a4))} [a0+c]=0x${(rd32m(a0 + 0xc) >>> 0).toString(16)}`;
+      }
+      console.error(
+        `[tk] eip=0x${eip.toString(16)} eax=${r('eax')} ecx=${r('ecx')} edx=${r('edx')} esi=${r('esi')} edi=${r('edi')} ebx=${r('ebx')}${extra}`,
+      );
       }
     },
     onFault: (rt, res) => {
