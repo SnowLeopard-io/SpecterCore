@@ -45,7 +45,13 @@ describe('CanvasGdiBridge', () => {
     const invalidated: number[] = [];
     bridge.onInvalidate((dc) => invalidated.push(dc));
     await bridge.fillRect(a, { x: 0, y: 0, width: 10, height: 10 }, red);
-    const err = await bridge.bitBlt(b, { x: 5, y: 5, width: 10, height: 10 }, a, { x: 0, y: 0, width: 10, height: 10 }, 0x00cc0020);
+    const err = await bridge.bitBlt(
+      b,
+      { x: 5, y: 5, width: 10, height: 10 },
+      a,
+      { x: 0, y: 0, width: 10, height: 10 },
+      0x00cc0020,
+    );
     expect(err).toBe(0);
     expect(invalidated).toContain(b);
   });
@@ -91,12 +97,17 @@ describe('CanvasGdiBridge', () => {
     const dc = await bridge.createDC('DISPLAY');
     expect(await bridge.getClip(dc)).toBeNull();
     await bridge.setClip(dc, { type: 'ellipse', rect: { x: 0, y: 0, width: 8, height: 8 } });
-    expect(await bridge.getClip(dc)).toEqual({ type: 'ellipse', rect: { x: 0, y: 0, width: 8, height: 8 } });
+    expect(await bridge.getClip(dc)).toEqual({
+      type: 'ellipse',
+      rect: { x: 0, y: 0, width: 8, height: 8 },
+    });
   });
 
   it('非法 DC 抛错', async () => {
     const bridge = new CanvasGdiBridge(makeDisplay());
-    await expect(bridge.fillRect(999, { x: 0, y: 0, width: 1, height: 1 }, red)).rejects.toThrow(/Invalid DC/);
+    await expect(bridge.fillRect(999, { x: 0, y: 0, width: 1, height: 1 }, red)).rejects.toThrow(
+      /Invalid DC/,
+    );
   });
 });
 
@@ -107,7 +118,15 @@ describe('NullGdiBridge', () => {
     expect(dc).toBe(0);
     expect(await bridge.textOut(dc, 0, 0, 'x')).toBe(120);
     expect(await bridge.fillRect(dc, { x: 0, y: 0, width: 1, height: 1 }, red)).toBe(120);
-    expect(await bridge.bitBlt(dc, { x: 0, y: 0, width: 1, height: 1 }, dc, { x: 0, y: 0, width: 1, height: 1 }, 0)).toBe(120);
+    expect(
+      await bridge.bitBlt(
+        dc,
+        { x: 0, y: 0, width: 1, height: 1 },
+        dc,
+        { x: 0, y: 0, width: 1, height: 1 },
+        0,
+      ),
+    ).toBe(120);
     expect((await bridge.getDeviceCaps(dc)).bitsPerPixel).toBe(32);
     expect(await bridge.getClip(dc)).toBeNull();
   });

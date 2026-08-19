@@ -66,7 +66,12 @@ export const ROP_INDEX_PATCOPY = 0xf0;
  * 对完整 32 位像素逐位应用三元真值表，返回结果像素。
  * `rop` 为已归一化的 8 位真值表索引；布尔运算作用于像素值的每一位（8 位/通道 × 4 通道）。
  */
-export function applyRopPixels(destPx: number, srcPx: number, patternPx: number, rop: number): number {
+export function applyRopPixels(
+  destPx: number,
+  srcPx: number,
+  patternPx: number,
+  rop: number,
+): number {
   const index = rop & 0xff;
   let out = 0;
   for (let bit = 0; bit < 32; bit++) {
@@ -87,7 +92,10 @@ export function applyRop(dest: Color, src: Color, pattern: Color, rop: number): 
 
 export function toPixel(color: Color): number {
   return (
-    (((color.a & 0xff) << 24) | ((color.r & 0xff) << 16) | ((color.g & 0xff) << 8) | (color.b & 0xff)) >>>
+    (((color.a & 0xff) << 24) |
+      ((color.r & 0xff) << 16) |
+      ((color.g & 0xff) << 8) |
+      (color.b & 0xff)) >>>
     0
   );
 }
@@ -238,7 +246,11 @@ export class GdiSurface {
     for (let y = Math.max(0, bounds.y); y < Math.min(this.height, bounds.y + bounds.height); y++) {
       const ny = (y + 0.5 - cy) / ry;
       const hw = rx * Math.sqrt(Math.max(0, 1 - ny * ny));
-      for (let x = Math.max(0, Math.floor(cx - hw)); x <= Math.min(this.width - 1, Math.ceil(cx + hw)); x++) {
+      for (
+        let x = Math.max(0, Math.floor(cx - hw));
+        x <= Math.min(this.width - 1, Math.ceil(cx + hw));
+        x++
+      ) {
         this.setPixelPattern(x, y, color, rop);
       }
     }
@@ -279,7 +291,13 @@ export class GdiSurface {
     return nx * nx + ny * ny <= 1;
   }
 
-  roundRect(bounds: Rect, rx: number, ry: number, color: Color, rop: number = ROP_INDEX_PATCOPY): void {
+  roundRect(
+    bounds: Rect,
+    rx: number,
+    ry: number,
+    color: Color,
+    rop: number = ROP_INDEX_PATCOPY,
+  ): void {
     for (let y = Math.max(0, bounds.y); y < Math.min(this.height, bounds.y + bounds.height); y++) {
       for (let x = Math.max(0, bounds.x); x < Math.min(this.width, bounds.x + bounds.width); x++) {
         if (this.roundRectContains(bounds, rx, ry, x, y)) this.setPixelPattern(x, y, color, rop);
@@ -367,14 +385,33 @@ export class GdiSurface {
     const index = ropIndex(rop);
     const scaleX = srcRect.width / destRect.width;
     const scaleY = srcRect.height / destRect.height;
-    for (let y = Math.max(0, destRect.y); y < Math.min(this.height, destRect.y + destRect.height); y++) {
-      const sy = Math.min(src.height - 1, Math.max(0, Math.floor(srcRect.y + (y - destRect.y) * scaleY)));
-      for (let x = Math.max(0, destRect.x); x < Math.min(this.width, destRect.x + destRect.width); x++) {
+    for (
+      let y = Math.max(0, destRect.y);
+      y < Math.min(this.height, destRect.y + destRect.height);
+      y++
+    ) {
+      const sy = Math.min(
+        src.height - 1,
+        Math.max(0, Math.floor(srcRect.y + (y - destRect.y) * scaleY)),
+      );
+      for (
+        let x = Math.max(0, destRect.x);
+        x < Math.min(this.width, destRect.x + destRect.width);
+        x++
+      ) {
         if (!this.clipContains(x, y)) continue;
-        const sx = Math.min(src.width - 1, Math.max(0, Math.floor(srcRect.x + (x - destRect.x) * scaleX)));
+        const sx = Math.min(
+          src.width - 1,
+          Math.max(0, Math.floor(srcRect.x + (x - destRect.x) * scaleX)),
+        );
         const srcPixel = src.pixels[sy * src.width + sx] ?? 0;
         const destPixel = this.pixels[y * this.width + x] ?? 0;
-        this.pixels[y * this.width + x] = applyRopPixels(destPixel, srcPixel, toPixel(WHITE_COLOR), index);
+        this.pixels[y * this.width + x] = applyRopPixels(
+          destPixel,
+          srcPixel,
+          toPixel(WHITE_COLOR),
+          index,
+        );
       }
     }
   }

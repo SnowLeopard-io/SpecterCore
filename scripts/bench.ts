@@ -87,7 +87,12 @@ function main(): void {
     'blit SRCCOPY 1:1 (640x480)',
     () => {
       for (let i = 0; i < ITERS; i++) {
-        dst.blit({ x: 0, y: 0, width: 640, height: 480 }, src, { x: 0, y: 0, width: 640, height: 480 }, Rop3.SRCCOPY);
+        dst.blit(
+          { x: 0, y: 0, width: 640, height: 480 },
+          src,
+          { x: 0, y: 0, width: 640, height: 480 },
+          Rop3.SRCCOPY,
+        );
       }
     },
     1,
@@ -96,7 +101,12 @@ function main(): void {
     'blit SRCINVERT 1:1 (640x480)',
     () => {
       for (let i = 0; i < ITERS; i++) {
-        dst.blit({ x: 0, y: 0, width: 640, height: 480 }, src, { x: 0, y: 0, width: 640, height: 480 }, Rop3.SRCINVERT);
+        dst.blit(
+          { x: 0, y: 0, width: 640, height: 480 },
+          src,
+          { x: 0, y: 0, width: 640, height: 480 },
+          Rop3.SRCINVERT,
+        );
       }
     },
     1,
@@ -105,7 +115,12 @@ function main(): void {
     'blit SRCCOPY 4x 放大 (160x120→640x480)',
     () => {
       for (let i = 0; i < ITERS; i++) {
-        dst.blit({ x: 0, y: 0, width: 640, height: 480 }, src, { x: 0, y: 0, width: 160, height: 120 }, Rop3.SRCCOPY);
+        dst.blit(
+          { x: 0, y: 0, width: 640, height: 480 },
+          src,
+          { x: 0, y: 0, width: 160, height: 120 },
+          Rop3.SRCCOPY,
+        );
       }
     },
     1,

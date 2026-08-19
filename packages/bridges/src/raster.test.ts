@@ -70,7 +70,7 @@ describe('applyRop（按 32 位逐位求值，rop 为 8 位真值表索引）', 
 
   it('DSTINVERT = ~dest', () => {
     const d = toPixel(dest);
-    expect(toPixel(applyRop(dest, black, WHITE_COLOR, ropIndex(Rop3.DSTINVERT)))).toBe((~d) >>> 0);
+    expect(toPixel(applyRop(dest, black, WHITE_COLOR, ropIndex(Rop3.DSTINVERT)))).toBe(~d >>> 0);
   });
 
   it('索引 0x00 / 0xFF 恒 0 / 恒 FF', () => {
@@ -81,7 +81,9 @@ describe('applyRop（按 32 位逐位求值，rop 为 8 位真值表索引）', 
   it('PATCOPY = pattern、PATINVERT = dest ^ pattern', () => {
     expect(toPixel(applyRop(dest, black, red, ropIndex(Rop3.PATCOPY)))).toBe(toPixel(red));
     const d = toPixel(dest);
-    expect(toPixel(applyRop(dest, black, red, ropIndex(Rop3.PATINVERT)))).toBe((d ^ toPixel(red)) >>> 0);
+    expect(toPixel(applyRop(dest, black, red, ropIndex(Rop3.PATINVERT)))).toBe(
+      (d ^ toPixel(red)) >>> 0,
+    );
   });
 
   it('ROP2：源参与、pattern 置黑（二元语义）', () => {
@@ -178,7 +180,12 @@ describe('GdiSurface', () => {
     const a = new GdiSurface(16, 16);
     const b = new GdiSurface(16, 16);
     a.fillRect({ x: 0, y: 0, width: 8, height: 8 }, red);
-    b.blit({ x: 4, y: 4, width: 8, height: 8 }, a, { x: 0, y: 0, width: 8, height: 8 }, Rop3.SRCCOPY);
+    b.blit(
+      { x: 4, y: 4, width: 8, height: 8 },
+      a,
+      { x: 0, y: 0, width: 8, height: 8 },
+      Rop3.SRCCOPY,
+    );
     expect(b.getPixel(5, 5)).toEqual(red);
     expect(b.getPixel(0, 0)).toEqual(black);
   });
@@ -188,7 +195,12 @@ describe('GdiSurface', () => {
     const b = new GdiSurface(8, 8);
     a.fillRect({ x: 0, y: 0, width: 4, height: 4 }, red);
     b.fillRect({ x: 0, y: 0, width: 4, height: 4 }, red);
-    b.blit({ x: 0, y: 0, width: 4, height: 4 }, a, { x: 0, y: 0, width: 4, height: 4 }, Rop3.SRCINVERT);
+    b.blit(
+      { x: 0, y: 0, width: 4, height: 4 },
+      a,
+      { x: 0, y: 0, width: 4, height: 4 },
+      Rop3.SRCINVERT,
+    );
     expect(b.getPixel(1, 1)).toEqual(transparentBlack); // red ^ red
   });
 
@@ -196,7 +208,12 @@ describe('GdiSurface', () => {
     const a = new GdiSurface(4, 4);
     const b = new GdiSurface(16, 16);
     a.fillRect({ x: 0, y: 0, width: 4, height: 4 }, red);
-    b.blit({ x: 0, y: 0, width: 16, height: 16 }, a, { x: 0, y: 0, width: 4, height: 4 }, Rop3.SRCCOPY);
+    b.blit(
+      { x: 0, y: 0, width: 16, height: 16 },
+      a,
+      { x: 0, y: 0, width: 4, height: 4 },
+      Rop3.SRCCOPY,
+    );
     expect(b.getPixel(0, 0)).toEqual(red);
     expect(b.getPixel(4, 4)).toEqual(red);
     expect(b.getPixel(12, 12)).toEqual(red);

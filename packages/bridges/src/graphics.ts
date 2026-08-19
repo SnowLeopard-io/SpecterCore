@@ -1,5 +1,4 @@
 import type {
-  BkMode,
   ClipRegion,
   Color,
   D3DBridge,
@@ -29,7 +28,13 @@ export class NullGdiBridge implements GdiBridge {
     return 0;
   }
   async deleteDC(_dc: number): Promise<void> {}
-  async textOut(_dc: number, _x: number, _y: number, _text: string, _font?: FontSpec): Promise<WinError> {
+  async textOut(
+    _dc: number,
+    _x: number,
+    _y: number,
+    _text: string,
+    _font?: FontSpec,
+  ): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
   async setTextColor(_dc: number, _color: Color): Promise<WinError> {
@@ -41,7 +46,15 @@ export class NullGdiBridge implements GdiBridge {
   async setBkMode(_dc: number, _mode: number): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
-  async lineTo(_dc: number, _x0: number, _y0: number, _x1: number, _y1: number, _color: Color, _rop?: number): Promise<WinError> {
+  async lineTo(
+    _dc: number,
+    _x0: number,
+    _y0: number,
+    _x1: number,
+    _y1: number,
+    _color: Color,
+    _rop?: number,
+  ): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
   async fillRect(_dc: number, _rect: Rect, _color: Color, _rop?: number): Promise<WinError> {
@@ -56,7 +69,14 @@ export class NullGdiBridge implements GdiBridge {
   async frameEllipse(_dc: number, _bounds: Rect, _color: Color, _rop?: number): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
-  async roundRect(_dc: number, _bounds: Rect, _rx: number, _ry: number, _color: Color, _rop?: number): Promise<WinError> {
+  async roundRect(
+    _dc: number,
+    _bounds: Rect,
+    _rx: number,
+    _ry: number,
+    _color: Color,
+    _rop?: number,
+  ): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
   async polyline(_dc: number, _points: Point[], _color: Color, _rop?: number): Promise<WinError> {
@@ -78,7 +98,13 @@ export class NullGdiBridge implements GdiBridge {
   async restoreDC(_dc: number, _saved?: number): Promise<number> {
     return 0;
   }
-  async bitBlt(_destDc: number, _destRect: Rect, _srcDc: number, _srcRect: Rect, _rop: number): Promise<WinError> {
+  async bitBlt(
+    _destDc: number,
+    _destRect: Rect,
+    _srcDc: number,
+    _srcRect: Rect,
+    _rop: number,
+  ): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
   async stretchBlt(
@@ -94,7 +120,14 @@ export class NullGdiBridge implements GdiBridge {
     return NOT_IMPLEMENTED;
   }
   async getDeviceCaps(_dc: number): Promise<DeviceCaps> {
-    return { bitsPerPixel: 32, width: 0, height: 0, colorPlanes: 1, horizontalResolution: 0, verticalResolution: 0 };
+    return {
+      bitsPerPixel: 32,
+      width: 0,
+      height: 0,
+      colorPlanes: 1,
+      horizontalResolution: 0,
+      verticalResolution: 0,
+    };
   }
   async flush(_dc: number): Promise<void> {}
   onInvalidate(_listener: (dc: number, rect: Rect) => void): Dispose {
@@ -171,7 +204,12 @@ export class CanvasGdiBridge implements GdiBridge {
   async createDC(name: string): Promise<number> {
     const surface = new GdiSurface(800, 600);
     const handle = nextId();
-    this.dcs.set(handle, { surface, state: cloneState(DEFAULT_STATE), saveStack: [], canvas: null });
+    this.dcs.set(handle, {
+      surface,
+      state: cloneState(DEFAULT_STATE),
+      saveStack: [],
+      canvas: null,
+    });
     void name;
     return handle;
   }
@@ -215,7 +253,13 @@ export class CanvasGdiBridge implements GdiBridge {
     return prev;
   }
 
-  async textOut(dc: number, x: number, y: number, text: string, font?: FontSpec): Promise<WinError> {
+  async textOut(
+    dc: number,
+    x: number,
+    y: number,
+    text: string,
+    font?: FontSpec,
+  ): Promise<WinError> {
     const rec = this.requireDc(dc);
     if (!this.textCtx) return E.NO_ERROR; // node 无 canvas：文本为 no-op
     const { surface } = rec;
@@ -246,10 +290,23 @@ export class CanvasGdiBridge implements GdiBridge {
 
   // -- 形状（3.2.1 扩展） -----------------------------------------------------
 
-  async lineTo(dc: number, x0: number, y0: number, x1: number, y1: number, color: Color, rop?: number): Promise<WinError> {
+  async lineTo(
+    dc: number,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    color: Color,
+    rop?: number,
+  ): Promise<WinError> {
     const { surface } = this.requireDc(dc);
     surface.line(x0, y0, x1, y1, color, rop ?? ROP_INDEX_COPY);
-    this.notify(dc, { x: Math.min(x0, x1), y: Math.min(y0, y1), width: Math.abs(x1 - x0) + 1, height: Math.abs(y1 - y0) + 1 });
+    this.notify(dc, {
+      x: Math.min(x0, x1),
+      y: Math.min(y0, y1),
+      width: Math.abs(x1 - x0) + 1,
+      height: Math.abs(y1 - y0) + 1,
+    });
     return E.NO_ERROR;
   }
 
@@ -281,7 +338,14 @@ export class CanvasGdiBridge implements GdiBridge {
     return E.NO_ERROR;
   }
 
-  async roundRect(dc: number, bounds: Rect, rx: number, ry: number, color: Color, rop?: number): Promise<WinError> {
+  async roundRect(
+    dc: number,
+    bounds: Rect,
+    rx: number,
+    ry: number,
+    color: Color,
+    rop?: number,
+  ): Promise<WinError> {
     const { surface } = this.requireDc(dc);
     surface.roundRect(bounds, rx, ry, color, rop ?? ROP_INDEX_PATCOPY);
     this.notify(dc, bounds);
@@ -352,7 +416,13 @@ export class CanvasGdiBridge implements GdiBridge {
 
   // -- 位块传输（3.2.1） -----------------------------------------------------
 
-  async bitBlt(destDc: number, destRect: Rect, srcDc: number, srcRect: Rect, rop: number): Promise<WinError> {
+  async bitBlt(
+    destDc: number,
+    destRect: Rect,
+    srcDc: number,
+    srcRect: Rect,
+    rop: number,
+  ): Promise<WinError> {
     const dest = this.requireDc(destDc);
     const src = this.requireDc(srcDc);
     dest.surface.blit(destRect, src.surface, srcRect, rop);
@@ -360,7 +430,13 @@ export class CanvasGdiBridge implements GdiBridge {
     return E.NO_ERROR;
   }
 
-  async stretchBlt(destDc: number, destRect: Rect, srcDc: number, srcRect: Rect, rop: number): Promise<WinError> {
+  async stretchBlt(
+    destDc: number,
+    destRect: Rect,
+    srcDc: number,
+    srcRect: Rect,
+    rop: number,
+  ): Promise<WinError> {
     return this.bitBlt(destDc, destRect, srcDc, srcRect, rop);
   }
 
@@ -446,12 +522,17 @@ function blitRgbaIntoSurface(
   for (let row = 0; row < height; row++) {
     for (let col = 0; col < width; col++) {
       const i = (row * width + col) * 4;
-      surface.setPixel(x + col, y + row, {
-        r: rgba[i] ?? 0,
-        g: rgba[i + 1] ?? 0,
-        b: rgba[i + 2] ?? 0,
-        a: rgba[i + 3] ?? 0,
-      }, rop);
+      surface.setPixel(
+        x + col,
+        y + row,
+        {
+          r: rgba[i] ?? 0,
+          g: rgba[i + 1] ?? 0,
+          b: rgba[i + 2] ?? 0,
+          a: rgba[i + 3] ?? 0,
+        },
+        rop,
+      );
     }
   }
 }

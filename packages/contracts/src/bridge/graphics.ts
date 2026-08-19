@@ -154,12 +154,27 @@ export interface GdiBridge {
   setBkMode(dc: number, mode: number): Promise<WinError>;
 
   // -- 形状（3.2.1 扩展） -----------------------------------------------------
-  lineTo(dc: number, x0: number, y0: number, x1: number, y1: number, color: Color, rop?: number): Promise<WinError>;
+  lineTo(
+    dc: number,
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    color: Color,
+    rop?: number,
+  ): Promise<WinError>;
   fillRect(dc: number, rect: Rect, color: Color, rop?: number): Promise<WinError>;
   frameRect(dc: number, rect: Rect, color: Color, rop?: number): Promise<WinError>;
   ellipse(dc: number, bounds: Rect, color: Color, rop?: number): Promise<WinError>;
   frameEllipse(dc: number, bounds: Rect, color: Color, rop?: number): Promise<WinError>;
-  roundRect(dc: number, bounds: Rect, rx: number, ry: number, color: Color, rop?: number): Promise<WinError>;
+  roundRect(
+    dc: number,
+    bounds: Rect,
+    rx: number,
+    ry: number,
+    color: Color,
+    rop?: number,
+  ): Promise<WinError>;
   polyline(dc: number, points: Point[], color: Color, rop?: number): Promise<WinError>;
   polygon(dc: number, points: Point[], color: Color, rop?: number): Promise<WinError>;
   setPixel(dc: number, x: number, y: number, color: Color): Promise<WinError>;
@@ -173,7 +188,13 @@ export interface GdiBridge {
   restoreDC(dc: number, saved?: number): Promise<number>;
 
   // -- 位块传输（3.2.1） -----------------------------------------------------
-  bitBlt(destDc: number, destRect: Rect, srcDc: number, srcRect: Rect, rop: number): Promise<WinError>;
+  bitBlt(
+    destDc: number,
+    destRect: Rect,
+    srcDc: number,
+    srcRect: Rect,
+    rop: number,
+  ): Promise<WinError>;
   stretchBlt(
     destDc: number,
     destRect: Rect,

@@ -699,3 +699,104 @@ cmd.exe 比 Step 12 再进一步：**Step 12 遗留的 0x40b4c8 cookie FAIL 已�
 - `_o_towupper`（idx 52）无 handler（默认 0）——cmd 宽字符大小写转换可能受影响。
 - `ExpandEnvironmentStringsW`（idx 220）无 handler——`%VAR%` 展开不生效（0x40b45e 调用点，目前未走到该分支）。
 - **同事并行修改警告**：工作区可能被另一个 agent 同时编辑（代码文件以实际内容为准；提交前 git status 确认；不要 checkout/stash/pull 覆盖）。vitest/lint/apps-web-build 本轮未跑（基线 189/189）。notepad 回归基线：用户已提交 8fe812a（Step 12 修复）+ 0acff25，diag-trap 跑真 notepad 应 cleanExit ✓。
+
+---
+
+# Step 14（2026-08-19：cmd.exe 攻坚 —— 定位并修复 C6 解码通用 bug（mov r/m8,imm8 写 4 字节），cmd 从 fail-fast 推进到命令解析阶段；当前卡点 fastcall 函数参数被当指针）
+
+## 一句话现状
+
+Step 13 遗留的 0x42d47a cookie FAIL（ebp=0x7000000）已彻底解决，**真正根因不是 ApiSetQueryApiSetPresence 默认写越界，而是 x86-decoder.ts 的 C6 解码 bug**（`mov r/m8, imm8` 被错当 32 位写 4 字节，覆盖栈上保存的 ebp）。修复后 cmd 日志从 429 行暴增到 911 行，cookie FAIL 彻底消除，cmd 大幅推进：longjmp → _o__get_osfhandle/GetFileType → 命令解析。当前新卡点：**0x40baa6 `cmp [edi], ebx` 越界——edi=0xfffffff4（STD_ERROR_HANDLE 伪句柄）被当指针解引用**。edi 来自 fastcall 函数 0x40b743 的 ecx 参数（`mov [ebp-0x60], esi`，esi=ecx），调用者传入了 STD_ERROR_HANDLE 但函数期望指向 3 句柄结构的指针。vitest 229/229 通过（28 files），notepad cleanExit 回归通过（stubs=312）。
+
+## 本轮修复的 bug（按根因，全部过 typecheck）
+
+### Bug 1（最重大）：C6 `mov r/m8, imm8` 解码用 32 位 size → 写 4 字节覆盖栈（**Step 13 遗留 cookie FAIL @0x42d47a 的真正根因**）
+- **症状**：Step 13 推断 ApiSetQueryApiSetPresence 默认处理向 present 指针写 4 字节覆盖 [ebp]。实际补了 handler（只写 1 字节）+ argCount 后，ebp 仍异常（0x7000000）。
+- **定位过程**（diag-trap 二分断点）：
+  1. 0x42d39c 入口 ebp 正常，0x41efeb（ApiSetQueryApiSetPresence 包装器）入口 [ebp]=0x7ffff60 正常，但 call 返回后 0x41f010 时 [ebp]=0x7000000。
+  2. 反汇编包装器 0x41efeb：`push ebp; mov ebp,esp; push ecx; ...; mov byte [ebp-1], 0 @0x41f001; lea eax,[ebp-1]; push eax; push 0x401034; call ApiSetQueryApiSetPresence; ...; leave; ret`。
+  3. 0x7000000 = 原 0x07fffed4 的低 3 字节被清零、高字节 0x07 保留——**写 4 字节 0x00000001 到 [ebp-1]=0x7fffe6b 覆盖了 [ebp]=0x7fffe6c 的低 3 字节**。
+  4. handler 只写 1 字节，runtime.writeBytes 也精确按字节写。那 4 字节写来自 `mov byte [ebp-1], 0` 本身的 codegen！
+  5. 查 x86-decoder.ts `case 0xc6/0xc7`：C6（mov r/m8, imm8）的 immSize 设为 8，但 **dst 和 src 仍用外层 32 位 size** → codegen 写 4 字节而非 1 字节。**这是通用 bug，影响所有 C6 指令（所有 exe）。**
+- **修复**：`opSize = opcode===0xc6 ? 8 : size`，decodeRm/rmOperand/immOperand 全部用 opSize。
+- **验证**：cmd cookie FAIL 彻底消除（无 TerminateProcess 0xc0000409），日志从 429 行暴增到 911 行。notepad cleanExit 回归通过。vitest 229/229 通过。
+- **教训**：C6/C7 共享解码分支时，C6 的 8 位操作数大小必须传播到 dst/src，不能只改 immSize。这是比 Step 13 推断的"ApiSet 默认写越界"更深层的根因——ApiSet handler 修复是必要的但不充分。
+
+### Bug 2：ApiSetQueryApiSetPresence 缺 argCount + handler（Step 13 推断的直接原因，仍需修复）
+- **修复**：mapper.ts 补 `'apisetqueryapisetpresence': 2`；guest-process.ts 加 handler（kernel32.dll，写 present 1 字节=1，返回 STATUS_SUCCESS）。
+- **注意**：present 是 BOOLEAN（1 字节），必须只写 1 字节。
+
+### Bug 3：RtlCreateUnicodeStringFromAsciiz 缺 argCount
+- **修复**：mapper.ts 补 `'rtlcreateunicodestringfromasciiz': 2`（ntdll，2 参 stdcall）。无 handler 默认返回 0 可接受。
+
+### Bug 4：GetConsoleTitleW/A 缺 argCount → 栈漂移 8 字节
+- **症状**：0x40b991 `call [0x450044]`=GetConsoleTitleW（push 0x104 + push 缓冲区），mapper 缺 argCount → stub ret 0 → 栈漂移 8 字节。
+- **修复**：mapper.ts 补 `getconsoletitlew:2, getconsoletitlea:2, setconsoletitlew:1, setconsoletitlea:1`。
+- **验证**：present 指针从 0x7fffe63 变 0x7fffe6b（差 8 字节，证明修复生效）。
+
+### Bug 5：longjmp 未实现 → cmd fall through 错误路径
+- **症状**：cmd 推进到 GetCurrentDirectoryW 多次调用后，`longjmp(0x446b48, 2)` 被调用（ucrtbase），无 handler 默认返回 0 不跳转 → cmd fall through 错误路径 → CreateFileW 路径为空 → fault。
+- **修复**：guest-process.ts 加 longjmp handler（ucrtbase.dll/msvcrt.dll），假设 MSVC x86 jmp_buf 布局 [0]=Ebp,[4]=Ebx,[8]=Edi,[12]=Esi,[16]=Esp,[20]=Eip，恢复寄存器+设置 eip。
+- **未解决**：实际读到 jmp_buf 全 0（eip=0, esp=0），说明 **MSVC jmp_buf 布局假设错误或 setjmp 未调用**。cmd /c 模式可能不调用 setjmp（jmp_buf 是零初始化全局变量）。当前 longjmp 跳转到 eip=0 会 trap，但后续 Bug 6 修复后 cmd 不再走 longjmp 路径。
+
+### Bug 6：_o__get_osfhandle + GetFileType 未实现 → cmd 认为控制台无效 → longjmp 错误路径
+- **症状**：`_o__get_osfhandle(0)` 返回 0（默认）→ `GetFileType(0)` 返回 0（FILE_TYPE_UNKNOWN）→ cmd 认为 stdin 无效 → 走 longjmp 错误恢复路径（jmp_buf 未初始化 → eip=0 trap）。
+- **修复**：handlers.ts 加 `_o__get_osfhandle`/`_get_osfhandle`（ucrtbase，fd 0/1/2 返回 STD_INPUT/OUTPUT/ERROR_HANDLE 伪句柄）+ `GetFileType`（kernel32，对伪句柄返回 FILE_TYPE_CHAR=2）。
+- **验证**：longjmp 不再被调用，cmd 推进到命令解析阶段（0x40baa6）。
+
+## 当前卡点（从这接手）：0x40baa6 edi=0xfffffff4 越界——fastcall 函数 0x40b743 参数 ecx 被当指针
+
+- **症状**：`status=fault eip=0x40baa6`，`memory access out of bounds`。寄存器 edi=0xfffffff4（STD_ERROR_HANDLE），ebx=0xfffffff5（STD_OUTPUT_HANDLE）。
+- **fault 指令**：0x40baa6 `mov [0x4386bc], eax` → 0x40baab `cmp [edi], ebx`（edi=0xfffffff4 被当指针解引用）。
+- **函数入口**（0x40b743，fastcall 约定）：
+  ```
+  0x40b743: mov edi, edi
+  0x40b745: push ebp
+  0x40b746: mov ebp, esp
+  0x40b748: sub esp, 0x64
+  0x40b75c: mov esi, ecx          ; esi = 第一个参数（fastcall ecx）
+  0x40b760: mov [ebp-0x60], esi   ; 保存参数到局部变量
+  ...
+  0x40b9f9: mov edi, [ebp-0x60]   ; edi = ecx 参数
+  0x40b9fc: cmp [edi+8], ebx      ; 把参数当指针，读 [edi+8]
+  ```
+- **根因分析**：函数期望 ecx 是一个指向 3 句柄结构的指针（[edi]=stdin, [edi+4]=stdout, [edi+8]=stderr），用于检查标准句柄是否被重定向。但调用者传入了 ecx=0xfffffff4（STD_ERROR_HANDLE 伪句柄）。
+  - 可能原因 A：调用者传错了参数（应该传结构指针，传了句柄值）。
+  - 可能原因 B：我们的某个 API（如 GetStdHandle 或 _o__get_osfhandle）返回了伪句柄，调用者把它当结构指针用了。
+  - 可能原因 C：cmd 的 STARTUPINFO 结构中 hStdError 字段被设置成了伪句柄，而代码期望它是指针（不太可能，STARTUPINFO 的 hStd* 是 HANDLE 不是指针）。
+- **待定位**：搜索谁调用了 0x40b743（`call 0x40b743`），看调用者在 ecx 中放了什么。0x40b743 可能是 cmd 的 `CheckForRedirectedHandles` 或类似函数。
+- **下一步**：
+  1. 反汇编搜索 `call 0x40b743` 的调用点（用 capstone 或字节模式搜索 e8 相对偏移）。
+  2. 看调用者设置 ecx 的代码——如果 ecx 来自某个全局变量或 API 返回值，确认是否是我们的 API 返回了错误的值。
+  3. 如果是 cmd 内部逻辑（调用者确实传了句柄当指针），可能需要在 0x40b743 函数入口加补丁（如果 ecx 是伪句柄则替换为有效结构指针），或者实现更完整的标准句柄模拟。
+
+## 诊断工具 / 断点状态
+
+- `scripts/diag-trap.ts`：**所有临时断点 [ck]/[ck2]/[ck3]/[ck4]/[diag2] 已全部清理**。保留 [api] 日志、maxSteps 8M、[trace] last 64 blocks、dumpFault、BK_ARGS、BK_NO_MUI。
+- longjmp handler 中保留了 jmp_buf 64 字节 dump（调试用，确认布局后可删）。
+- 诊断日志：`node_modules/.cache/cmd.log`~`cmd5.log`（中间产物，可删）。
+
+## 回归验证（本轮已跑）
+
+- **vitest**：229/229 通过（28 files，7.89s）。比 Step 13 的 189/189 多了 40 个测试（同事新增）。C6 解码修复无回归。
+- **notepad cleanExit**：`status=exit eip=0x0 stubs=312`，无 TerminateProcess 0xc0000409。✓
+- **typecheck**：通过。
+- **lint / apps-web build**：本轮未跑。
+
+## 修改文件清单
+
+- `packages/core/src/jit/x86-decoder.ts` — C6 解码修复（opSize 区分 8/32 位）。**通用 bug，影响所有 exe。**
+- `packages/core/src/pe/mapper.ts` — 新增 apisetqueryapisetpresence:2、rtlcreateunicodestringfromasciiz:2、getconsoletitlew:2、getconsoletitlea:2、setconsoletitlew:1、setconsoletitlea:1。
+- `packages/core/src/process/guest-process.ts` — 新增 ApiSetQueryApiSetPresence handler + longjmp handler（jmp_buf 布局待修正，含调试 dump）。
+- `packages/core/src/api/handlers.ts` — 新增 _o__get_osfhandle/_get_osfhandle（ucrtbase）+ GetFileType（kernel32）。
+- `scripts/diag-trap.ts` — 清理所有临时断点。
+- `docs/PROGRESS.md` — 本文件（Step 14）。
+
+## 未解 / 注意点（继承 + 新增）
+
+- **当前卡点**：0x40baa6 fastcall 函数 0x40b743 的 ecx 参数（0xfffffff4 伪句柄）被当指针。需定位调用者。
+- **longjmp jmp_buf 布局**：当前假设 [0..20]=Ebp/Ebx/Edi/Esi/Esp/Eip 但读到全 0。MSVC 可能用 _setjmp3，jmp_buf 前部有 Registration/TryLevel/Cookie 等字段。cmd /c 模式可能不调用 setjmp（jmp_buf 零初始化）。Bug 6 修复后 cmd 不再走 longjmp 路径，暂不阻塞。
+- **内置 Command Prompt 应用**（独立窗口 + stdin/stdout 桥接）尚未实现（Step 11 下一步）。
+- **GetOpenFileNameW 文件对话框桥接**（notepad Open/Save）未实现。
+- **文件资源管理器真实化**（用户硬性要求"和我电脑的一样"）未完成。
+- **同事并行修改警告**：packages/bridges/src/graphics.ts、raster.ts、index.ts、packages/contracts/src/bridge/graphics.ts 已被同事修改，本轮未碰。提交前 git status 确认。
