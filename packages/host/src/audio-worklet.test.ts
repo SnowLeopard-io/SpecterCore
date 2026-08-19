@@ -93,13 +93,15 @@ describe('audio-worklet mixer processor', () => {
     const out = makeOutput(2, 4);
     const keepAlive = processor.process([], out);
     expect(keepAlive).toBe(true);
+    const left = out[0][0];
+    const right = out[0][1];
     // mono → 双声道复制
-    expect(out[0][0]).toBeCloseTo(0.5, 6);
-    expect(out[1][0]).toBeCloseTo(0.5, 6);
-    expect(out[0][1]).toBeCloseTo(-0.5, 6);
-    expect(out[1][1]).toBeCloseTo(-0.5, 6);
-    expect(out[0][2]).toBeCloseTo(0.25, 6);
-    expect(out[0][3]).toBeCloseTo(0.0, 6);
+    expect(left[0]).toBeCloseTo(0.5, 6);
+    expect(right[0]).toBeCloseTo(0.5, 6);
+    expect(left[1]).toBeCloseTo(-0.5, 6);
+    expect(right[1]).toBeCloseTo(-0.5, 6);
+    expect(left[2]).toBeCloseTo(0.25, 6);
+    expect(left[3]).toBeCloseTo(0.0, 6);
   });
 
   it('mixes two streams together (自动混音)', () => {
@@ -110,11 +112,11 @@ describe('audio-worklet mixer processor', () => {
     write(processor, 2, new Float32Array([0.3, 0.3]));
     const out = makeOutput(2, 2);
     processor.process([], out);
-    expect(out[0][0]).toBeCloseTo(0.5, 6);
-    expect(out[1][0]).toBeCloseTo(0.5, 6);
+    expect(out[0][0][0]).toBeCloseTo(0.5, 6);
+    expect(out[0][1][0]).toBeCloseTo(0.5, 6);
     // 流 2 只有 1 帧，第二帧仅流 1
-    expect(out[0][1]).toBeCloseTo(0.2, 6);
-    expect(out[1][1]).toBeCloseTo(0.2, 6);
+    expect(out[0][0][1]).toBeCloseTo(0.2, 6);
+    expect(out[0][1][1]).toBeCloseTo(0.2, 6);
   });
 
   it('applies per-stream volume (3.3.4)', () => {
@@ -124,7 +126,7 @@ describe('audio-worklet mixer processor', () => {
     setVolume(processor, 1, 0.4);
     const out = makeOutput(1, 1);
     processor.process([], out);
-    expect(out[0][0]).toBeCloseTo(0.2, 6);
+    expect(out[0][0][0]).toBeCloseTo(0.2, 6);
   });
 
   it('applies master volume on top of stream volume (3.3.4)', () => {
@@ -135,7 +137,7 @@ describe('audio-worklet mixer processor', () => {
     setMaster(processor, 0.5);
     const out = makeOutput(1, 1);
     processor.process([], out);
-    expect(out[0][0]).toBeCloseTo(0.125, 6);
+    expect(out[0][0][0]).toBeCloseTo(0.125, 6);
   });
 
   it('removes a stream on close', () => {
@@ -145,7 +147,7 @@ describe('audio-worklet mixer processor', () => {
     closeStream(processor, 1);
     const out = makeOutput(1, 1);
     processor.process([], out);
-    expect(out[0][0]).toBeCloseTo(0.0, 6);
+    expect(out[0][0][0]).toBeCloseTo(0.0, 6);
   });
 
   it('outputs silence before any data arrives', () => {
@@ -153,7 +155,7 @@ describe('audio-worklet mixer processor', () => {
     open(processor, 1, 1);
     const out = makeOutput(2, 8);
     processor.process([], out);
-    for (const ch of out[0]) expect(ch).toBeCloseTo(0.0, 6);
+    for (const ch of out[0]) for (const s of ch) expect(s).toBeCloseTo(0.0, 6);
   });
 
   it('clamps volume to [0,1]', () => {
@@ -163,7 +165,7 @@ describe('audio-worklet mixer processor', () => {
     setVolume(processor, 1, 3.0);
     const out = makeOutput(1, 1);
     processor.process([], out);
-    expect(out[0][0]).toBeCloseTo(0.5, 6);
+    expect(out[0][0][0]).toBeCloseTo(0.5, 6);
   });
 
   it('does not overflow the ring buffer (capacity bound)', () => {
@@ -175,6 +177,6 @@ describe('audio-worklet mixer processor', () => {
     write(processor, 1, big);
     const out = makeOutput(1, 64);
     processor.process([], out);
-    for (const ch of out[0]) expect(ch).toBeCloseTo(0.5, 6);
+    for (const s of out[0][0]) expect(s).toBeCloseTo(0.5, 6);
   });
 });
