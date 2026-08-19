@@ -1,4 +1,4 @@
-# cmd.exe Emulator Debugging — Handover (2026-08-19 20:05, session 4)
+# cmd.exe Emulator Debugging — Handover (2026-08-19 20:42, session 5)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
@@ -14,185 +14,164 @@ Make the specter-core Windows PE emulator run `C:/Windows/SysWOW64/cmd.exe` with
 
 ## Current Status (one paragraph)
 
-**The old "C:\" truncation bug is FIXED** (root cause = HeapReAlloc handler arg-index bug,
-Bug10 below). dir target is now correctly `"C:\Windows"` (verified at dir handler 0x40bf53).
-**NEW remaining blocker: the enumeration path becomes `"C:\Windows\Windows"` instead of
-`"C:\Windows\*"`** — during dir's output phase, 0x408ba9 concatenates the full target
-`"C:\Windows"` (as the "directory" part) with its own last component `"Windows"` (as the
-"name" part), producing `"C:\Windows\Windows"`, so FindFirstFileExW enumerates nothing,
-prints "File Not Found" to stderr, exits 1. Root cause is upstream: the dir-object
-`[obj+4]` ("directory" field) is built as the FULL path `"C:\Windows"` instead of the
-parent dir `"C:\"`. The exact writer of that field is ~90% traced (evidence below); the
-remaining unknown is why the path-object `[ebp-0x220]+0x208` ends up `"C:\Windows"` —
-suspicion: the 0x41ee28 (vswprintf wrapper) call at 0x40a36e writes garbage/overwrites
-into the path object because 0x40a36e only pushes 3 args while 0x41ee28 forwards 5
-(remaining 2 are stale stack values = wrong format string).
+**dir now WORKS end-to-end.** Output (cmd-fix50-out.bin):
 
----
+```
+ Volume in drive C has no label.
+ Volume Serial Number is 1234-ABCD
 
-## Fixed This Session (Bug10 = the "C:\" truncation root cause)
+ Directory of C:\
 
-Applied to `packages/core/src/process/guest-process.ts` (HeapReAlloc hook).
+01/01/1601  12:00:00 AM263,cmd.exe
+               1 File(s) 263, bytes
+               0 Dir(s)            0 bytes free
+```
 
-### Bug10 — HeapReAlloc arg-index bug (Task #7 "target truncated" root cause)
-- `HeapReAlloc(hHeap, dwFlags, lpMem, dwBytes)`: **lpMem is rawArgs[2]**, but the handler
-  read `rawArgs[1]` (=dwFlags=0). So `old` was 0 → the `if (!old)` branch ran → bumpAlloc
-  WITHOUT copying → returned an EMPTY block.
-- Where it bites: cmd's realloc helper **0x411cd0** (used by the **0x40fed0 tokenizer tail**
-  — the tokenizer that produces `dir`'s target argument). 0x40fed0 collects the token in a
-  bump buffer, then 0x411cd0 HeapReAlloc's it; empty result → `dir`'s target became `""`,
-  and cmd's fallback logic turned it into `"C:\"` (cwd). Hence old symptom: `C:\` instead
-  of `C:\Windows`, enumerating `C:\*\*`.
-- Fix (guest-process.ts ~1345): `const old = ctx.rawArgs[2] ?? 0;` — same class of bug as
-  Bug7 (HeapSize arg index), already fixed previously.
-- VERIFIED: 0x40fed0 now returns `"C:\Windows"` (probe 0x40c1d6 eax=0x2091568), dir
-  handler 0x40bf53 target=`"C:\Windows"`, and 0x40a9e9 targetParam=`"C:\Windows"`.
+- FindFirstFileExW path is `"C:\Windows"` (correct; was `"C:\Windows\Windows"`).
+- All headers correct except `" Directory of C:\"` (should be `"C:\Windows"`).
+- File row content present but layout compressed (fields run together), size
+  truncated to `"263,"` (should be `"263,168"`), date/time are 1601/00:00
+  (find-data FILETIME is 0 — expected, fs bridge provides no timestamps).
+- cmd still exits 1 (should be 0 for a successful dir). UNRESOLVED.
+- stdout has stray NUL bytes (WriteConsoleW writes raw UTF-16LE to onOutput —
+  diag only; the real app may convert).
 
----
+**4 bugs fixed this session (Bug11-Bug14) — all in the EMULATOR, none in cmd:**
 
-## Current Blocker (Task #7 continued): enum path "C:\Windows\Windows"
+| Bug | Root cause | Fix |
+|---|---|---|
+| **Bug11** enum path "C:\Windows\Windows" | `wcsrchr` had NO handler (stub table mapper.ts `'wcsrchr': 0` → dispatch returns 0/NULL). cmd's parent-dir truncation `0x40aac4: wcsrchr(resolvedPath, L'\\')` returned NULL → truncation skipped → dir-tree `[obj+4]` kept full path → concat doubled the last component | handlers.ts: added `wcsrchr` + `_wcsrchr` (reverse scan, returns LAST match address) |
+| **Bug12** all dir rows blank | `_o___stdio_common_vswprintf` had NO handler → returned 0 → every formatted row empty | handlers.ts: added `vswprintfImpl` (handles %s/%S/%c/%d/%i/%u/%o/%x/%X/%p/%% with flags/width/precision), registered as `_o___stdio_common_vswprintf` + `__stdio_common_vswprintf` |
+| **Bug13** header mojibake (" Volume in drive 娸Ș…") | FormatMessageW handler read `Arguments` (a `va_list*`) as an LPCWSTR* array — missing ONE level of indirection → inserts were garbage stack values | guest-process.ts: when no `FORMAT_MESSAGE_ARGUMENT_ARRAY`(0x2000) and not `IGNORE_INSERTS`(0x200), deref `[argsPtr]` once first |
+| **Bug14** spurious "File Not Found" + exit 1 | findNextFile returned ERROR_FILE_NOT_FOUND(2) at enumeration end; cmd treats 2 as real failure | handlers.ts FindNextFileW/A: empty entries → `E.ERROR_NO_MORE_FILES`(18); diag-trap.ts buildExeFs.findNextFile also returns 18 |
 
-### Symptom chain
-1. FindFirstFileExW called ONCE (log line ~644): `FindFirstFileExW(0x21a5de8, 0x1, 0x21b5dd4, 0x0, 0x0, 0x2)`, path=`"C:\Windows\Windows"`.
-2. That call site is **0x408d08: call 0x41afe9** (the FindFirstFileExW wrapper), with
-   `edx = [ebp-0x18]` (0x408ba9's local) = `"C:\Windows\Windows"` (probe-verified).
-3. `[ebp-0x18]` was produced by **0x408cac: call 0x417ed4(ecx=0x21a5de8 fresh buf, edx=0x7fe9,
-   "C:\Windows"(0x2155ac0), "Windows"(0x2155a08))** — 0x417ed4 is a path-concat helper
-   (copies arg1 + "\" + arg2, see 0x417f41 cmp dx,0x5c / push 0x401f6c="\").
-4. So dir's output phase concatenates **"C:\Windows"** (full target, from `[edi+4]`) with
-   **"Windows"** (last component, from `[[edi+0xc]]`) → `"C:\Windows\Windows"`.
-   Correct would be parent dir `"C:\"` + `"Windows"` (i.e. `[edi+4]` should be `"C:\"`).
-5. `[edi+4]` and `[[edi+0xc]]` come from the dir tree object built in **0x40a320**
-   (dir outer handler): `[obj+0]="Windows"` (0x40a60a: 0x40dc0d copy of the filename part)
-   and `[obj+4]="C:\Windows"` (0x40a625: 0x40dc0d copy of `[ebp-0x18]` or `&[ebp-0x220]`).
+## IMPORTANT: progress.md v4's "vswprintf wrapper" hypothesis was WRONG
 
-### Root-cause chain (traced, ~90%)
-- 0x40a320 local `[ebp-0x18]` == path-object `[ebp-0x220]+0x208` == 0x20d55e0 `"C:\Windows"`.
-  The path object is a 0x208+ byte struct at `[ebp-0x220]`; field `+0x208` (== `[ebp-0x18]`)
-  holds the "resolved path" pointer.
-- 0x40a320 initializes `[ebp-0x18]=0` at 0x40a351 (verified, ONLY writer in 0x40a320 by
-  byte-scan). Yet at 0x40a4b6 (after 0x414ad6) and 0x40a60f it is already 0x20d55e0
-  `"C:\Windows"` → someone writes it in between (see suspicions below).
-- 0x40a4ac: call **0x414ad6**(&[ebp-0x220], src) — probe (0x414ad6, retInto=0x40a4b1)
-  shows `src=0x2024f28 "C:\Windows"` at that moment, and `[obj+208]=0x20d55e0` already.
-- **Contradiction to resolve**: probe 0x40a60f (later) shows `[44ef10]=0x2024f28 "C:\"`,
-  but the 0x414ad6 probe (earlier) showed the SAME address 0x2024f28 as `"C:\Windows"`.
-  → the string at 0x2024f28 changes content between those points; whoever writes it
-  (`0x414ad6`'s inner 0x4136f0? or the 0x41ee28 vswprintf?) is a prime suspect.
-- 0x40a4b1: call **0x408af6** — if `[0x4408bc]` (dir wrapper 0x40a9e9's path buffer)
-  is nonzero it does `0x414ad6(0x44ed08, [0x4408bc])` (append into global path object 0x44ed08).
-- **0x41ee28 is NOT a GetCurrentDirectory-style helper — it is a vswprintf wrapper**:
-  `0x41ee28: push [ebp+8..0x18] (5 args) → call 0x41dbf5 (=mov eax,0x434220) → call 0x41eccc`
-  where `0x41eccc: jmp [0x45042c]` and `[0x45042c]` resolves (delay-load) to
-  `_o___stdio_common_vswprintf` (probe: args 0x3d, 0, buf, size, fmt).
-  `0x40a36e: call 0x41ee28(&[ebp-0x220], 0, 0x104)` pushes only **3** args → the 2 extra
-  args forwarded to vswprintf (fmt/args) are STALE STACK VALUES → vswprintf may write
-  garbage into the path object. THIS is the top suspect for corrupting `[ebp-0x220]` /
-  `[ebp-0x18]` (obj+0x208) / the 0x2024f28 string.
+The previous handover blamed `0x40a36e: call 0x41ee28` (3 args) for corrupting the
+path object via a broken vswprintf wrapper. **0x41ee28 is NOT vswprintf:**
 
-### Evidence gathered (do NOT re-investigate)
-- 0x40fed0 → `"C:\Windows"` (0x40c1d6, eax=0x2091568). dir handler 0x40bf53 target
-  `"C:\Windows"` both entries (probe 521/545 of cmd-fix34+). 0x40a9e9 targetParam
-  `"C:\Windows"` (0x40a9e9 probe). 0x40c138 append-"\*" logic intact (would produce
-  `"C:\Windows\*"` if reached with correct input — but dir output phase uses 0x417ed4 concat).
-- FindFirstFileExW wrapper 0x41afe9(ecx=cb, edx=lpFileName, 4 stack args); callers:
-  **0x408d08** (ecx=0x41b160, edx=[ebp-0x18]="C:\Windows\Windows") — THE ACTIVE ONE;
-  0x419189 (ecx=0x41b130, edx=[ebx], never reached — 0x41916d loop not entered);
-  0x40dcb4 inside 0x40dc53 (ecx=0x41b130, 0x40dc53 never called — 0x413e1a not reached).
-- **0x40dc0d is a plain string-copy helper** (wcslen → HeapAlloc → 0x4136f0), NOT a
-  resolver. **0x40dc53** (0x40dcb4: FindFirstFileExW with ecx=0x41b130) is the real
-  resolve+enum fn but is never executed in this run.
-- 0x414ad6 = path-object concat: `0x4136f0(dst=[obj+0x208] or obj, maxlen=[obj+0x210], src=[ebp+8])`
-  — copies src INTO the object's resolved-path slot; also `[obj+208]` read at 0x414b06.
-- 0x417ed4 = two-string concat with "\" separator (0x401f6c).
-- IAT corrections vs previous handover: **0x4500bc = SetFilePointer** (was "?"),
-  **0x4500e8 = GetFileAttributesW** (was mislabeled "GetFullPathNameW(?)").
-  0x45042c (delay-load) = _o___stdio_common_vswprintf. 0x4500e4 = FindFirstFileExW.
-- Format strings: 0x4027c8 `"%04X-%04X.%c%s"` (time), 0x402c20 `"%s..."`,
-  0x401f6c `"\"` (concat sep), 0x401da8 `" .REM"`-ish.
-- GetCommandLineW returns `"cmd /c dir C:\Windows"` (0x2000370) correctly.
+- `0x41ee28: jmp dword ptr [0x450494]` — an IAT thunk; **0x450494 = memset**.
+  `0x40a36e` and `0x40a9e9`'s `0x41ee28(&pathobj, 0, 0x104)` are just
+  `memset(pathobj, 0, 0x104)` — a path-object init (confirmed: log line ~487
+  `memset(0x7ffeb18, 0, 0x104)`).
+- The real 5-arg vswprintf wrapper is a SEPARATE function at **0x41ee40**:
+  `push [ebp+8..0x18]; call 0x41dbf5 (mov eax,0x434220); mov ecx,[eax]; push [eax+4];
+  or ecx,1; push ecx; call 0x41eccc (jmp [0x45042c] → _o___stdio_common_vswprintf)`.
+  vswprintf args = (options=0x3d, buffer=rawArgs[2], count=rawArgs[3],
+  format=rawArgs[4], locale=rawArgs[5], va_list=rawArgs[6]).
+- So Bug12's fix belongs in the vswprintf HANDLER, not in cmd.
 
-### Next concrete steps (try in order)
-1. **Probe around 0x40a36e (call 0x41ee28)** — block starts: 0x40a36e itself (call) or
-   0x40a373 (add esp,0xc). Dump path object `[ebp-0x220]` first 0x20 bytes + `[ebp-0x18]`
-   (obj+0x208) BEFORE vs AFTER 0x41ee28, to prove the vswprintf wrapper corrupts the object.
-   Also dump the 2 stale forwarded args (`[esp+14]/[esp+18]` at the 0x41eccc probe) for the
-   0x40a36e call specifically — line 616 of cmd-fix49.log shows (0x3d, 0, 0x7ffeb38, 0xff,
-   0x4027c8) which is NOT the 0x40a36e call (that one is the 0x7ffeb18 buffer); find the
-   0x7ffeb18 variant in the log (or add filter) — its fmt arg will reveal the garbage.
-2. **Confirm who writes 0x2024f28** (string seen as "C:\" at 0x40a60f but "C:\Windows" at
-   0x414ad6 entry): probe 0x40a4a0 (cmovne edx) dumping `[0x44ef10]` + its string; then
-   check whether 0x414ad6's inner 0x4136f0 (dst = obj+0x208 = 0x20d55e0) is what later
-   overwrites 0x2024f28, or whether the vswprintf call does.
-3. **Ultimate fix target**: make the dir-tree build in 0x40a320 produce `[obj+4] = "C:\"`
-   (parent dir) instead of `"C:\Windows"`. Either fix the path-object corruption upstream
-   (steps 1-2) or, if that's a rabbit hole, patch the concat at 0x408cac/0x417ed4 semantics
-   so the "directory" part is trimmed to the parent (strip last component). Prefer fixing
-   the actual corruption, not patching cmd.
-4. Sanity-check 0x41ee28 contract: it forwards 5 args to vswprintf; the "correct" callers
-   push 5 (e.g. 0x40a393 pushes 3 too? verify), while 0x40a36e pushes 3. If 0x40a36e is
-   correct cmd code, then 0x41ee28 must be treated as varargs helper where the missing
-   args are supposed to be harmless — check what real cmd expects (fmt should be the 3rd
-   or 5th arg). Log line 616's call (0x7ffeb38, 0xff, 0x4027c8) shows fmt=0x4027c8 →
-   vswprintf(buf, 0xff, 0x4027c8, ...) formats time — i.e. 0x41ee28(buf, ?, ?, fmt, ...)
-   where fmt is the 5th stack arg in that call; for 0x40a36e the fmt slot is stale.
+## Verified probe evidence (do NOT re-investigate)
 
----
+- wcsrchr was called but unhandled: log line ~527/545 `wcsrchr(0x2135550, 0x5c) -> 0x0`.
+- After Bug11: `0x40a4b6` probe `[ebp-0x18]=0x20d55e0 "C:\"`, `0x40a60f`
+  `[ebp-0x18]="C:\" [44ef10]=0x2024f28 "C:\"`, `0x417ed4` probe at 0x408cac:
+  `[esp+4]=0x2155a88 "C:\" [esp+8]=0x2155a08 "Windows"` → concat `"C:\Windows"` ✓.
+- Bug13: FormatMessageW probe showed `[argsPtr+0]=0x7ffe4cc` (va_list value, read
+  as string = garbage) but `[vaList+0]=0x2185a38 "C"` (correct insert). All three
+  headers now format correctly.
+- Bug14: last writes now are the summary lines (msgId 0x2378/0x2379), `_o_exit(0x1)`.
 
-## Key Addresses
+## UNRESOLVED issues (next session, in priority order)
+
+### 1. " Directory of C:\" should be "C:\Windows" (cosmetic but on the checklist)
+- The header insert comes from the dir tree node's `[node+4]` field:
+  `0x42529c: mov eax,[ebp+8]; push [eax+4]` → observed `[node+4]=0x2155a88 "C:\"`.
+- The SAME `[node+4]` feeds the enumeration concat at `0x408cac`
+  (`0x417ed4([n+4], [[n+0xc]])` = `"C:\" + "\" + "Windows"` = `"C:\Windows"` ✓).
+  So `[node+4]` currently = parent dir, which makes the enumeration right but the
+  header wrong. Real cmd wants `[node+4]="C:\Windows"` (header) AND enumeration
+  `"C:\Windows\*"` — implying the concat's 2nd arg should be `"*"`.
+- Evidence: **another node builder at 0x425660** writes `[node+0]=0x401f70 "*"`
+  (or 0x401f74 if flag) and `[node+0xc]=0` (see 0x4256a7-0x4256eb) — i.e. real cmd
+  intends the name/wildcard field to be `"*"`. Observed node at 0x408ba9 instead:
+  `node=0x20f55a8 { [n+0]=0, [n+4]="C:\", [n+0xc]=0x7fff63c (stack), [[n+0xc]]="Windows" }`.
+- NEXT STEP: determine which builder actually ran (probe 0x425660-0x4256f3 region
+  and 0x408b5d/0x431cdd callers of 0x408ba9), then make `[node+4]` hold the FULL
+  path `"C:\Windows"` while the concat's 2nd arg becomes `"*"`. Prefer fixing the
+  builder so the enumeration path becomes `"C:\Windows\*"` (matches success
+  criterion #1 exactly). NOTE: onStep is BLOCK-level — 0x408ba9/0x42529c are NOT
+  block starts, their probes silently miss; use 0x417ed4 (fires) to dump node.
+
+### 2. exit code 1 (should be 0 for a successful dir)
+- `_o_exit(0x1)` at the end. dir printed the full listing, so cmd's dir command
+  itself seems to have set a nonzero return, or cmd's exit logic is off. Check the
+  last `[tk]`/`[api]` calls before `_o_exit` (log tail) and how cmd computes the
+  /c exit code (0x415d7b main slot loop / 0x415d25 exit path — the `_o_exit` call
+  came from 0x415d25).
+
+### 3. file-row size truncated: "263," (should be "263,168")
+- The size string is ALREADY "263," when it reaches the row vswprintf (line ~753:
+  `vswprintf ... [va+0]=0x7ffa2f0 "263,"`). So the truncation happens upstream —
+  in the number→string formatter (locale grouping / _i64tow_s path around
+  0x41d78b, or a `%`-format call with count 0x10 / 0x48 in the stack dump).
+- NEXT: find who formats the size (search log before line 753 for the formatter
+  calls; 0x402c20 "%s" writes into 0x21b6850 etc.) and why it stops at "263,".
+
+### 4. WriteConsoleW emits raw UTF-16LE bytes (NUL bytes in stdout)
+- diag only shows raw bytes; the handler (handlers.ts WriteConsoleW) — check
+  whether it converts wide→UTF-8 or the runner's onOutput is expected to convert.
+  For the real app this may already be handled; verify with run-exe.ts.
+
+### 5. row layout: "01/01/1601  12:00:00 AM263,cmd.exe" (fields run together)
+- Real cmd: `01/01/1601  12:00:00 AM         263,168 cmd.exe`. Field padding
+  depends on the individual field formatters (date "%s  ", time, size right-
+  aligned, name) — likely resolves once #3 (size) is fixed and/or the field
+  offsets in cmd's row builder are fed correct lengths.
+
+## Key Addresses (updated)
 
 ### cmd.exe functions (dir chain)
 - `0x408b1c` dir exec entry (8 stack args, ret 0x20). `0x408ba9` dir exec core (sub, ret 0x10).
-- `0x408cac` call 0x417ed4 (concat "C:\Windows"+"Windows" — THE WRONG JOIN).
+  Callers: 0x408b5d, 0x4256f3, 0x431cdd.
+- `0x408cac` call 0x417ed4 (concat [n+4] + "\" + [[n+0xc]] — now produces "C:\Windows").
   `0x408d08` call 0x41afe9 (FindFirstFileExW wrapper) with edx=[ebp-0x18].
 - `0x41afe9` FindFirstFileExW wrapper (ecx=cb, edx=lpFileName, 4 stack args; ret 0x10).
-  `0x41b130`/`0x41b160` per-entry callbacks (0x41b160 = "always 1" stub).
-- `0x40dc0d` **string copy** helper. `0x40dc53` resolve+enum (0x40dcb4 calls 0x41afe9,
-  ecx=0x41b130) — NOT executed (0x413e1a caller not reached).
-- `0x40fed0` tokenizer (delims 0x401d48 `=,;` + iswspace; excludes "/"; returns 1st token).
-- `0x40c1a6` param parser: 0x40fed0 → 0x414840 (lowercase/strip quotes) → 0x40dc0d copy →
-  `[context+0x4c]`. `0x40c2d9` stores target.
-- `0x40bf53` dir handler (ecx=obj, [obj+0]=target). `0x40a9e9` dir wrapper (ecx=target).
-- `0x40a320` dir outer handler — **builds dir tree**: `[obj+0]="Windows"` (0x40a60a),
-  `[obj+4]="C:\Windows"` (0x40a625, WRONG — should be "C:\"). `0x40a351` [ebp-0x18]=0.
-  `0x40a36e` call 0x41ee28 (3 args!). `0x40a4ac` call 0x414ad6. `0x40a4b1` call 0x408af6.
-- `0x409b0a` X = dir executor (ecx=context; called from 0x41718e; context=&[esp+0x10]).
-- `0x414ad6` path-object concat (0x4136f0 copies src into obj / obj+0x208).
-- `0x408af6` if [0x4408bc]≠0: 0x414ad6(0x44ed08, [0x4408bc]) + clear [0x4408bc].
-- `0x41ee28` vswprintf wrapper (5-arg forward; `0x41eccc: jmp [0x45042c]`).
-- `0x417ed4` concat2 with "\". `0x4136f0` wcsncpy_s-style copy (stops at src NUL).
-- `0x411cd0` HeapReAlloc wrapper (fixed by Bug10).
-- `0x419189` alt FindFirstFileExW caller (not reached; ecx=0x41b130).
-- Parser/main as before: 0x40b743, 0x410800 dispatch, 0x415d7b main slot loop.
+- `0x40dc0d` string copy. `0x40fed0` tokenizer. `0x40bf53` dir handler.
+  `0x40a9e9` dir wrapper — builds GLOBAL path obj 0x44ed08; parent truncation via
+  `0x40aac4: call 0x414abe` (= wcsrchr thunk, call [0x45045c]) + `0x40aacb: mov
+  word ptr [eax+2],0` (needs wcsrchr fixed — Bug11).
+- `0x40a320` dir outer handler — builds dir tree; `[obj+4]=copy of [ebp-0x18]` at
+  0x40a625. `0x414ad6` path-object concat. `0x408af6` global-object append helper.
+- `0x417ed4` concat2 with "\" (0x401f6c). `0x41ee28` = **memset thunk** (jmp
+  [0x450494]); `0x41ee40` = vswprintf wrapper (5-arg → 0x41eccc).
+- `0x42529c` " Directory of %s" (0x2339) call site — insert = [[ebp+8]+4].
+- `0x425660` region — alternative node builder: `[node+0]=0x401f70 "*" or 0x401f74`,
+  `[node+4]=copy`, `[node+0xc]=0` (0x4256cb/0x4256db/0x4256eb).
+- `0x42d600` region — volume header: 0x42d5b2 GetVolumeInformationW,
+  0x42d5fd/0x42d619 0x40d9f4(buf=0x44f240, size=0x104, fmt=0x403ca0, driveChar)
+  builds "C" string, 0x42d60f/0x42d626 0x408a5a(msgId, argc, insert...) wrapper
+  → 0x40a1f5 → 0x40a92f → FormatMessageW.
+- FormatMessageW wrapper chain: 0x408a5a(msgId,argc,...) → 0x40a1f5(argc,&arr)
+  → 0x40a92f → FormatMessageW.
+- Parser/main: 0x40b743, 0x410800 dispatch, 0x415d7b main slot loop, 0x415d25 exit.
 
 ### Globals
-- `[0x44ef10]` = 0x2024f28 ("C:\" at 0x40a60f probe; "C:\Windows" at 0x414ad6 probe —
-  CONTENT CHANGES — unresolved writer).
-- `0x44ed08` global path object (0x408af6 appends [0x4408bc] into it).
-- `[0x4408bc]` dir wrapper 0x40a9e9's path buffer (alloc'd 0xffce at 0x40aa73).
-- `[0x4406dc]` cmd tail ptr; `[0x4386ca]` line buffer; `[0x43c6d0]` stdin-read buffer (empty
-  in /c mode — normal). `[0x440860]` /c flag (=1). `[0x4408c0]` last-error.
-- Path object layout: `[ebp-0x220]` = obj (0x208+ bytes); `+0x208` == `[ebp-0x18]` = resolved
-  path pointer; `+0x210` = capacity; `+0x20c` = flag byte.
+- `[0x44ef10]` = 0x2024f28 = global path obj resolved buffer ("C:\" after Bug11).
+- `0x44ed08` global path object; `[0x4408bc]` dir wrapper buffer; `[0x4408c0]` last-error.
+- `0x44f240` drive-letter "C" buffer (0x42d5e5); `0x446c08` "File Not" buffer.
+- Path object layout: `[ebp-0x220]` obj; `+0x208` resolved ptr; `+0x210` capacity; `+0x20c` flag.
 
-### IAT slots (dump-iat3.cjs)
-- `0x4500e4`=FindFirstFileExW, `0x4500c4`=FindFirstFileW, `0x4500bc`=**SetFilePointer**,
-  `0x4500e8`=**GetFileAttributesW** (NOT GetFullPathNameW), `0x450148`=HeapReAlloc,
-  `0x45014c`=HeapSize, `0x45042c`(delay)=_o___stdio_common_vswprintf, `0x4501e0`=GetCommandLineW.
+### IAT slots (dump-iat3.cjs + manual parse)
+- `0x4500e4`=FindFirstFileExW, `0x4500c4`=FindFirstFileW, `0x4500bc`=SetFilePointer,
+  `0x4500e8`=GetFileAttributesW, `0x450148`=HeapReAlloc, `0x45014c`=HeapSize,
+  `0x450380`=_o__wcsicmp, `0x45045c`=**wcsrchr**, `0x450494`=**memset**,
+  `0x45042c`(delay)=_o___stdio_common_vswprintf, `0x4501e0`=GetCommandLineW,
+  `0x4503e0`=_o_towupper, `0x4503b0`=(iswalpha-ish, used at 0x42d56f),
+  `0x450454`=_o__wcsnicmp, `0x45051c`=?, `0x450100`=GetVolumeInformationW.
+- Import modules normalize: api-ms-win-crt-* → ucrtbase.dll; api-ms-win-core-* → kernel32.dll
+  (interceptor.ts normalizeApiSetModule). Handler lookup key = `module!proc` lowercased.
 
 ## Logs & helper scripts (node_modules/.cache/)
 
 | File | Purpose |
 |---|---|
-| `cmd-fix49.log` | **Latest** — has 0x414ad6 (5 calls incl. src="C:\Windows" at retInto=0x40a4b1), 0x41eccc (vswprintf wrapper, 4 calls), 0x40a4b6, 0x40a60f (globals), 0x417ed4 (concat args), 0x40dc0d, 0x40bf53 |
-| `cmd-fix47/48.log` | 0x414ad6 / 0x40a4b6 variants |
-| `cmd-fix45/46.log` | 0x40a60f ebp + globals ([44ef10]="C:\", [ebp-0x18]="C:\Windows") |
-| `cmd-fix34.log` | **Bug10 verified**: 0x40fed0→"C:\Windows", 0x40bf53 target="C:\Windows" |
-| `cmd-fix25-33.log` | Bug10 hunt (0x40c1d6/0x40c1a6/0x40dc0d probes) |
-| `cmd-fix13-24.log` | pre-Bug10 (old "C:\" symptom, tokenizer probes) |
-| `diag-trap.cjs` | esbuild bundle of scripts/diag-trap.ts (keep; debug harness) |
+| `cmd-fix50.log` | **Latest** — full run with all probes (wcsrchr, vswprintf, FormatMessageW vaList, findData, WriteConsoleW content, node dump at 0x417ed4). 85 [tk] lines. |
+| `cmd-fix50-out.bin` | stdout of latest run (the listing above) |
+| `diag-trap.cjs` | esbuild bundle of scripts/diag-trap.ts (rebuild after editing TS) |
 | `bkargs.txt` | `cmd /c dir C:\Windows` (inject via BK_ARGS) |
-| `dump-iat3.cjs` | Working IAT resolver |
+| `dump-iat3.cjs` | IAT resolver (regular imports only; delay-load slots NOT covered) |
+| `cmd-fix49.log` | previous session's log (pre-Bug11; has the "C:\Windows\Windows" evidence) |
 
 ## Quick Commands
 
@@ -204,30 +183,33 @@ node node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/bin/esbuild \
 
 # Run. Sandbox blocks literal `cmd /c` — args come via BK_ARGS.
 BK_ARGS="$(cat node_modules/.cache/bkargs.txt)" node node_modules/.cache/diag-trap.cjs \
-  "C:/Windows/SysWOW64/cmd.exe" > node_modules/.cache/cmd-fix50.log 2>&1
+  "C:/Windows/SysWOW64/cmd.exe" > node_modules/.cache/cmd-fix50-out.bin 2> node_modules/.cache/cmd-fix50.log
 
 # Disassemble a window (VA, not RVA)
 PYEXE=$(ls /c/Users/HUAWEI/.workbuddy/binaries/python/envs/*/Scripts/python.exe 2>/dev/null | head -1)
 "$PYEXE" scripts/disasm-win.py "C:/Windows/SysWOW64/cmd.exe" <va-hex> <len-hex>
+
+# Find msgId constants / callers in .text (node one-liners, see session history)
 ```
 
-## Active diag-trap.ts probes (TK list — keep, they are the breadcrumbs)
-Parser/main: 0x40df9d/40dfe9/40e088/40e19c/40e155, 0x40b743/40b7c4/40b8de/40bac2/415d02,
-0x415d66/415d6a, 0x411d24/411d30/41005f.
-Dispatch: 0x410800 (slot dump), 0x4108a9, 0x4108f6 (token dump), 0x41090a, 0x410c28/410c5f.
-Dir chain: 0x40bf53 (obj+ret), 0x40a9e9 (targetParam+ret), 0x40a320 (ctx), 0x409b0a (ctx),
-0x40c1a6 (param parse), 0x40c1d6 (0x40fed0 ret), 0x40dc0d (string copy), 0x40dc53,
-0x40dc77/40dc89/40dcb9 (0x40dc53 internals — NOTE these belong to 0x40dc53 which never runs),
-0x41afe9 (FindFirstFileExW wrapper w/ retInto), 0x41916d (alt caller — not reached),
-0x417ed4 (concat args), 0x414ad6 (path-obj concat: obj, [obj+208], src, retInto),
-0x40a4ac/40a4b6 (obj+208 state), 0x40a60f (globals [44ef10]/44ed08/[ebp-0x18]),
-0x40a376 (obj+208 after 0x41ee28 — NOT a block start, misses), 0x41eccc (vswprintf wrapper
-args — shows the 5 forwarded args incl. stale fmt).
-NOTE: onStep is BLOCK-level — mid-block addresses will NOT fire (0x40a376, 0x40a4ac missed).
+## Active diag-trap.ts probes (keep, they are the breadcrumbs)
 
-## Success criteria
-1. FindFirstFileExW path == `"C:\Windows\*"` (currently `"C:\Windows\Windows"`).
-2. Log shows FindNextFileW + WriteConsoleW with real rows: "Volume in drive C has no label.",
-   " Directory of C:\Windows", file names/sizes/dates.
-3. `dir` output appears on stdout; cmd exits 0 (or 1 only for the /c command's exit code).
-4. dir handler 0x40bf53 target stays `"C:\Windows"` (Bug10 fix must not regress).
+Parser/main, dispatch, dir chain probes as before (0x40a320/0x40a9e9/0x40bf53/
+0x40c1a6/0x40dc0d/0x41afe9/0x417ed4/0x414ad6/0x40a4ac/0x40a4b6/0x40a60f/0x41eccc).
+New this session:
+- `0x417ed4` probe now dumps the dir-tree NODE: `node(edi) [n+0] [n+4] [n+c] [[n+c]]`
+  (edi is a HEAP address 0x02xxxxxx — the probe checks `edi>=0x2000000 && <0x3000000`).
+- LoggingInterceptor dumps: WriteConsoleW/WriteFile buffer content (wide or hex),
+  FindFirstFileExW/W path + findData fields, vswprintf fmt+va args, FormatMessageW
+  args + vaList chain + `44f240` content.
+- `0x408ba9`/`0x408b1c`/`0x42529c` TK probes were added but **DO NOT FIRE**
+  (not block starts) — remove or leave as no-ops; use 0x417ed4 instead.
+
+## Success criteria (status)
+
+1. FindFirstFileExW path == `"C:\Windows\*"` — currently `"C:\Windows"` (functionally
+   correct for directory enumeration; "C:\Windows\*" would be ideal after fix #1).
+2. Log shows WriteConsoleW rows: volume header ✓, " Directory of C:\Windows" (path
+   still `C:\`), file rows ✓ (layout/size WIP), summary ✓.
+3. `dir` output on stdout ✓; cmd exit 0 — **still exits 1**.
+4. dir handler 0x40bf53 target stays `"C:\Windows"` ✓ (no regression).

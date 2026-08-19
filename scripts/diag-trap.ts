@@ -463,7 +463,12 @@ async function main(): Promise<void> {
         return null;
       }
     },
-    onOutput: (bytes, stderr) => process[stderr ? 'stderr' : 'stdout'].write(Buffer.from(bytes)),
+    onOutput: (bytes, stderr) => {
+      const h = [...bytes.subarray(0, 96)].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+      const nz = [...bytes].filter((b) => b !== 0).length;
+      console.error(`[out] ${stderr ? 'ERR' : 'OUT'} len=${bytes.length} nonzero=${nz} hex=${h}`);
+      process[stderr ? 'stderr' : 'stdout'].write(Buffer.from(bytes));
+    },
     onStep: (eip, rt) => {
       // Keep the last 64 block starts for the fault/limit trace dump below.
       trace.push(eip);
@@ -594,6 +599,26 @@ async function main(): Promise<void> {
         0x40a60f, // after 0x40dc0d("Windows"): dump globals
         0x408ba9, // dir exec core entry (node in ecx)
         0x408b1c, // dir exec entry
+        0x40652b, // output state finalize (ecx=state obj)
+        0x4064f2, // line-count calc (ecx=state obj)
+        0x406507, // line-count calc post-wcschr (ebx=[obj+8])
+        0x40656a, // output state finalize v2 (ecx=state obj)
+        0x409c4b, // obj-init gate: eax=0x4125b0 ret
+        0x40a061, // obj-init (ecx=&[ebp-0x880])
+        0x425a9e, // obj-init fail paths
+        0x425ac3,
+        0x425ad9,
+        0x40a022, // list-free loop exit (restores esi from [ebp-0x880])
+        0x40a04f, // final 0x40652b call site (ecx=esi)
+        0x409ca6, // post-0x40a320 esi check
+        0x409fd4, // free-loop entry
+        0x409cce, // post-0x414ad6
+        0x409e77, // post-0x408b1c esi check
+        0x409df9, // pre-0x40656a esi check
+        0x409f82, // post-0x430b52 esi check
+        0x430cb1, // 0x430b52 pre-return (saved esi check)
+        0x430b52, // 0x430b52 entry
+        0x430cb2, // 0x430b52 pre-return alt (je target)
         0x42529c, // " Directory of %s" FormatMessageW call site
         0x410800, // dispatch entry (ecx=?, edx=slot string)
         0x4108a9, // [0x4406dc] = [ebp-4] = slot
@@ -1116,6 +1141,141 @@ async function main(): Promise<void> {
         };
         extra = ` eip=0x${eip.toString(16)} node(ecx)=0x${node.toString(16)} [n+0]=${f(node)} [n+4]=${f(node + 4)} [n+8]=${f(node + 8)} [n+c]=${f(node + 0xc)} [n+10]=${f(node + 0x10)} [n+14]=${f(node + 0x14)} [n+18]=${f(node + 0x18)} [[n+c]]=${f(rd32m(node + 0xc))} esp=0x${esp.toString(16)} retInto=0x${(rd32m(esp) >>> 0).toString(16)}`;
       }
+      if (eip === 0x40652b || eip === 0x4064f2 || eip === 0x40656a) {
+        const obj = rt.getReg('ecx') >>> 0;
+        const esp = rt.getReg('esp') >>> 0;
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const readW = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 256);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          let s = '';
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          return s;
+        };
+        const f = (a: number) => {
+          const v = rd32m(a) >>> 0;
+          const s = v >= 0x400000 && v < 0x500000 ? ` ${JSON.stringify(readW(v))}` : '';
+          return `0x${v.toString(16)}${s}`;
+        };
+        let d = ` obj(ecx)=0x${obj.toString(16)}`;
+        for (let off = 0; off <= 0x30; off += 4) d += ` [+${off.toString(16)}]=${f(obj + off)}`;
+        const p8 = rd32m(obj + 8) >>> 0;
+        if (p8 >= 0x2000000 && p8 < 0x3000000 || (p8 >= 0x7fe0000 && p8 < 0x8000000)) {
+          d += ` | *obj+8: [+0]=${f(p8)} [+4]=${f(p8 + 4)} [+8]=${f(p8 + 8)} [+c]=${f(p8 + 0xc)} [+10]=${f(p8 + 0x10)} [+20]=${f(p8 + 0x20)} str=${JSON.stringify(readW(p8))}`;
+        }
+        const p10 = rd32m(obj + 0x10) >>> 0;
+        if (p10 >= 0x400000 && p10 < 0x500000) d += ` [+10]str=${JSON.stringify(readW(p10))}`;
+        extra = ` eip=0x${eip.toString(16)}${d} esp=0x${esp.toString(16)} retInto=0x${(rd32m(esp) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x406507) {
+        const ebx = rt.getReg('ebx') >>> 0;
+        const esi = rt.getReg('esi') >>> 0;
+        const ecx = rt.getReg('ecx') >>> 0;
+        const edi = rt.getReg('edi') >>> 0;
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        extra = ` ebx=0x${ebx.toString(16)} [ebx+8]=0x${(rd32m(ebx + 8) >>> 0).toString(16)} [ebx+0x20]=0x${(rd32m(ebx + 0x20) >>> 0).toString(16)} esi=0x${esi.toString(16)} ecx=0x${ecx.toString(16)} edi=0x${edi.toString(16)} [0x7ffeb08]=0x${(rd32m(0x7ffeb08) >>> 0).toString(16)} [0x7ffeb10]=0x${(rd32m(0x7ffeb10) >>> 0).toString(16)} [0x7ffeb28]=0x${(rd32m(0x7ffeb28) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x409c4b) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        extra = ` eax(4125b0 ret)=0x${(rt.getReg('eax') >>> 0).toString(16)} ebp=0x${ebp.toString(16)} [ebp-0x880]=0x${(rd32m(ebp - 0x880) >>> 0).toString(16)} [ebp-0x884]=0x${(rd32m(ebp - 0x884) >>> 0).toString(16)} &[ebp-0x880]=0x${((ebp - 0x880) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x40a061) {
+        const ecx = rt.getReg('ecx') >>> 0;
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        extra = ` ecx(&obj)=0x${ecx.toString(16)} [ecx]=0x${(rd32m(ecx) >>> 0).toString(16)} [ecx+4]=0x${(rd32m(ecx + 4) >>> 0).toString(16)} [0x44089c]=0x${(rd32m(0x44089c) >>> 0).toString(16)} [0x440890]=0x${(rd32m(0x440890) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x425a9e || eip === 0x425ac3 || eip === 0x425ad9) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        extra = ` [ebp-0x880]=0x${(rd32m(ebp - 0x880) >>> 0).toString(16)} [ebp-0x884]=0x${(rd32m(ebp - 0x884) >>> 0).toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} eax=0x${(rt.getReg('eax') >>> 0).toString(16)}`;
+      }
+      if (eip === 0x40a022 || eip === 0x40a04f) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        const esi = rt.getReg('esi') >>> 0;
+        extra = ` eip=0x${eip.toString(16)} ebp=0x${ebp.toString(16)} [ebp-0x880]=0x${(rd32m(ebp - 0x880) >>> 0).toString(16)} [ebp-0x884]=0x${(rd32m(ebp - 0x884) >>> 0).toString(16)} [ebp-0x874]=0x${(rd32m(ebp - 0x874) >>> 0).toString(16)} esi=0x${esi.toString(16)} &[ebp-0x880]=0x${((ebp - 0x880) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x409ca6) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        extra = ` eax(40a320 ret)=0x${(rt.getReg('eax') >>> 0).toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} edi=0x${(rt.getReg('edi') >>> 0).toString(16)} ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)} [ebp-0x880]=0x${(rd32m(ebp - 0x880) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x409fd4 || eip === 0x409cce) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        extra = ` eip=0x${eip.toString(16)} eax=0x${(rt.getReg('eax') >>> 0).toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} edi=0x${(rt.getReg('edi') >>> 0).toString(16)} ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)} ecx=0x${(rt.getReg('ecx') >>> 0).toString(16)} [ebp-0x880]=0x${(rd32m(ebp - 0x880) >>> 0).toString(16)} [ebx+8]=0x${(rd32m((rt.getReg('ebx') >>> 0) + 8) >>> 0).toString(16)} [ebx+4]=0x${(rd32m((rt.getReg('ebx') >>> 0) + 4) >>> 0).toString(16)} [ebx]=0x${(rd32m(rt.getReg('ebx') >>> 0) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x409e77 || eip === 0x409df9) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        extra = ` eip=0x${eip.toString(16)} eax=0x${(rt.getReg('eax') >>> 0).toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} edi=0x${(rt.getReg('edi') >>> 0).toString(16)} ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)} ecx=0x${(rt.getReg('ecx') >>> 0).toString(16)} [ebp-0x870]=0x${(rd32m(ebp - 0x870) >>> 0).toString(16)} [ebp-0x874]=0x${(rd32m(ebp - 0x874) >>> 0).toString(16)} [ebp-0x880]=0x${(rd32m(ebp - 0x880) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x409f82) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        extra = ` eax(430b52 ret)=0x${(rt.getReg('eax') >>> 0).toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} edi=0x${(rt.getReg('edi') >>> 0).toString(16)} ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)} ecx=0x${(rt.getReg('ecx') >>> 0).toString(16)} [ebp-0x880]=0x${(rd32m(ebp - 0x880) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x430cb1) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        const esp = rt.getReg('esp') >>> 0;
+        extra = ` ebp=0x${ebp.toString(16)} esp=0x${esp.toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} savedEsi@[ebp-0x24c]=0x${(rd32m(ebp - 0x24c) >>> 0).toString(16)} savedEdi@[ebp-0x250]=0x${(rd32m(ebp - 0x250) >>> 0).toString(16)} savedEbx@[ebp-0x254]=0x${(rd32m(ebp - 0x254) >>> 0).toString(16)} [esp+0]=0x${(rd32m(esp) >>> 0).toString(16)} [esp+4]=0x${(rd32m(esp + 4) >>> 0).toString(16)} [esp+8]=0x${(rd32m(esp + 8) >>> 0).toString(16)} [0x7ffeb08]=0x${(rd32m(0x7ffeb08) >>> 0).toString(16)} [0x7ffeaf8]=0x${(rd32m(0x7ffeaf8) >>> 0).toString(16)} [0x7ffeb00]=0x${(rd32m(0x7ffeb00) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x430b52) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const esp = rt.getReg('esp') >>> 0;
+        extra = ` ecx=0x${(rt.getReg('ecx') >>> 0).toString(16)} edx=0x${(rt.getReg('edx') >>> 0).toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} edi=0x${(rt.getReg('edi') >>> 0).toString(16)} [esp+4]=0x${(rd32m(esp + 4) >>> 0).toString(16)} [esp+8]=0x${(rd32m(esp + 8) >>> 0).toString(16)}`;
+      }
+      if (eip === 0x430cb2) {
+        const rd32m = (a: number) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ebp = rt.getReg('ebp') >>> 0;
+        const esp = rt.getReg('esp') >>> 0;
+        extra = ` ebp=0x${ebp.toString(16)} esp=0x${esp.toString(16)} esi=0x${(rt.getReg('esi') >>> 0).toString(16)} savedEsi@[ebp-0x22c]=0x${(rd32m(ebp - 0x22c) >>> 0).toString(16)} [esp+4]=0x${(rd32m(esp + 4) >>> 0).toString(16)} [esp+8]=0x${(rd32m(esp + 8) >>> 0).toString(16)} [ebp-0x230]=0x${(rd32m(ebp - 0x230) >>> 0).toString(16)} [ebp-0x220]=0x${(rd32m(ebp - 0x220) >>> 0).toString(16)}`;
+      }
       if (eip === 0x42529c) {
         const ebp = rt.getReg('ebp') >>> 0;
         const rd32m = (a: number) => {
@@ -1145,6 +1305,21 @@ async function main(): Promise<void> {
     onFault: (rt, res) => {
       console.error('[trace] last blocks:');
       for (const e of trace) console.error(`  [trace]   0x${e.toString(16)}`);
+      // dump the faulting state object region raw bytes
+      const rd32m = (a: number) => {
+        const b = rt.readBytes(a >>> 0, 4);
+        return b.byteLength < 4 ? NaN : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+      };
+      console.error(
+        `[fobj] ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)} [ebx+8]=0x${(rd32m((rt.getReg('ebx') >>> 0) + 8) >>> 0).toString(16)} [ebx+0x20]=0x${(rd32m((rt.getReg('ebx') >>> 0) + 0x20) >>> 0).toString(16)}`,
+      );
+      for (const base of [0x7ffeb00, 0x7ffe9c0]) {
+        const b = rt.readBytes(base, 0x60);
+        if (b.byteLength === 0) continue;
+        console.error(
+          `[fobj] 0x${base.toString(16)}: ${[...b].map((x) => x.toString(16).padStart(2, '0')).join(' ')}`,
+        );
+      }
       dumpFault(rt, res.eip, is64, sectionOf, res.error);
     },
   });

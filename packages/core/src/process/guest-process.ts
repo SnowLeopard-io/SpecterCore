@@ -3309,8 +3309,15 @@ export class GuestProcessRunner {
         if (wide) {
           const raw = host.memory.read(buffer, nChars * 2);
           const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+          // cmd.exe passes the full line-buffer capacity as nChars (e.g. 0x220
+          // chars for a 34-char header line), so the tail is NUL padding.
+          // Stop at the first NUL so stdout has no stray \0 bytes.
           let s = '';
-          for (let i = 0; i + 1 < raw.byteLength; i += 2) s += String.fromCharCode(view.getUint16(i, true));
+          for (let i = 0; i + 1 < raw.byteLength; i += 2) {
+            const c = view.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
           out = new TextEncoder().encode(s);
         } else {
           out = host.memory.read(buffer, nChars);

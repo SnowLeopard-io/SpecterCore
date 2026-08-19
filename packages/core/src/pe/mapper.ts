@@ -205,6 +205,11 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getvolumeinformationw': 8,
   'getdiskfreespacea': 5,
   'getdiskfreespacew': 5,
+  // GetDiskFreeSpaceExW/A take 4 params (stdcall, ret 16). Missing entries
+  // made the stub `ret 0`, leaking 16 bytes per call; cmd.exe's dir summary
+  // then read garbage stack -> 0/0 div fault at 0x406515 (fix session 6).
+  'getdiskfreespaceexw': 4,
+  'getdiskfreespaceexa': 4,
   'expandenvironmentstringsa': 3,
   'expandenvironmentstringsw': 3,
   'getcurrentprocess': 0,
