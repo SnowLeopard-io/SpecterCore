@@ -119,3 +119,84 @@ cmd 判定"没有命令行"，进入**交互模式**调用 `ReadConsoleW`（返�
 - `scripts/diag-trap.ts` — 诊断运行器（BK_ARGS → options.commandLine）。
 - `scripts/disasm-win.py` — 反汇编。
 - `node_modules/.cache/cmd-fix5.log` — 最新运行轨迹。
+
+---
+
+## 最新交接附录（2026-08-19）
+
+### 当前结论
+
+目标仍未完成：`cmd /c dir C:\Windows` 尚未产生 dir 输出，运行结果仍为
+`status=exit eip=0x0`，随后进入 `ReadConsoleW` 交互路径并以 `_o_exit(0)` 结束。
+
+但问题范围已进一步收窄：
+
+- CRT 窄 argv 已确认正常：`argc=4`，`argv` 指针有效。
+- `GetCommandLineW` 已返回 guest 内存中的完整命令行。
+- 控制台模式、文件类型、`GetFullPathNameW` 和目标 exe 的 `FindFirstFileW` 校验已通过。
+- `_o_towupper`、`_o_iswalpha` 等 CRT 宽字符 handler 已实际命中并返回正确值。
+- tokenizer 仍没有把命令尾写入调用者槽数组，因此 `[0x4406dc]` 仍为 0。
+
+### 本轮已完成的代码修复
+
+1. `packages/core/src/api/handlers.ts`
+  - 增加 `wcschr` 宽字符串查找。
+  - 增加 `_o_iswspace` / `iswspace`。
+  - 增加 `_o_towupper` / `towupper`。
+  - 增加 `_o_iswalpha` / `iswalpha`。
+
+2. `packages/core/src/process/guest-process.ts`
+  - 增加 `GetFullPathNameW`：支持相对路径拼接、写入 UTF-16 缓冲区、返回文件名部分指针。
+  - 动态桩按函数名匹配 handler 时改为大小写不敏感。
+
+3. `scripts/diag-trap.ts`
+  - `buildExeFs().findFirstFile()` 对目标 exe 返回一个有效的 `FindData`，使 cmd 的自身文件存在性检查能够通过。
+  - 已移除本轮临时的 `[cmd]` 槽数组断点日志；保留原有诊断断点。
+
+### 重要验证结果
+
+```text
+pnpm typecheck
+通过
+
+pnpm exec vitest run packages/core/src/api/interceptor.test.ts packages/core/src/pe/mapper.test.ts
+1 个测试文件，7 个测试通过
+
+最新运行关键轨迹：
+GetFullPathNameW(...) -> 0x3
+FindFirstFileW(...) -> 0x7001
+_o_towupper(0x43, ...) -> 0x43
+_o_iswalpha(0x43, ...) -> 0x1
+ReadConsoleW(...) -> 0x0
+_o_exit(0)；status=exit eip=0x0
+```
+
+注意：`get_errors` 对 `scripts/diag-trap.ts` 的单文件诊断会报告 Node 类型和 workspace alias 缺失；这是该文件不在根 tsconfig 编译范围内造成的工具诊断，根级 `pnpm typecheck` 已通过。
+
+### 当前最值得追的控制流
+
+cmd 命令行解析器：`0x40b743`。
+
+- 入口：`ecx = callerSlots`，即 main 的 `[ebp-0x14]`。
+- 获取命令行：`0x40b82d -> GetCommandLineW`。
+- tokenizer：`0x40b8d9 -> 0x40df9d`。
+- 成功写入第三个槽的指令：`0x40e1bd: mov [eax+8], esi`。
+- tokenizer 失败/跳转汇合点：`0x426f7a`。
+- parser 返回后：`0x40b8de`，随后 main 在 `0x415d6a` 读取三个槽。
+
+当前没有观察到 `0x40e1bd` 被执行；因此下一步应确认 tokenizer 为什么没有走到该指令，而不是继续修改 `[0x4406dc]` 或伪造 main 的槽值。
+
+### 下一步建议
+
+1. 在 `scripts/diag-trap.ts` 的 `onStep` 中临时只增加 `0x40e1bd`、`0x426f7a`、`0x40e299` 三个断点，打印 `eip/esi/edi/ebx` 和 `[esp+0x14]`，确认 tokenizer 走的是成功路径还是失败汇合路径。
+2. 反汇编并跟踪 `0x40e37e` 的返回值。它负责从 tokenizer 输入中寻找特殊字符；当前 `/` 已由 `wcschr` 正确返回，但还需确认 `0x40e37e` 对 `cmd /c ...` 的后续扫描没有因其他 CRT 分类函数返回值而失败。
+3. 从最新 API 轨迹中筛选 `-> 0x0` 的 tokenizer 区间调用，优先补真正影响分支的 API；不要把所有默认 0 的 API 一次性改成成功值。
+4. 若确认 tokenizer 已成功生成临时结构但 callerSlots 仍为 0，再检查 `0x40df9d` 的参数约定和 `0x4136f0` 的 UTF-16 拷贝长度；目前尚无证据支持直接改 `_setjmp3` 或栈语义。
+5. 修复完成后，重新生成 `node_modules/.cache/diag-trap.cjs`，运行命令如下：
+
+```powershell
+node node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/bin/esbuild --bundle scripts/diag-trap.ts --outfile=node_modules/.cache/diag-trap.cjs --platform=node --format=cjs --target=es2020 --external:typescript
+$env:BK_ARGS='cmd /c dir C:\Windows'; $env:BK_TRACE='api'; node node_modules/.cache/diag-trap.cjs "C:/Windows/SysWOW64/cmd.exe" > node_modules/.cache/cmd-latest.log 2>&1
+```
+
+成功标准：日志中不再出现 `ReadConsoleW` 作为首次命令输入路径，出现 `FindFirstFileW`/`FindNextFileW` 或 `WriteFile` 输出轨迹，并且最终不再因 `[0x4406dc]==0` 走 `longjmp(2)`。

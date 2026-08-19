@@ -1140,6 +1140,24 @@ export class GuestProcessRunner {
       }
       return { returnValue: this.cwd.length, errorCode: E.NO_ERROR };
     });
+    this.interceptor.hook('kernel32.dll', 'GetFullPathNameW', (ctx) => {
+      const input = readW(ctx.rawArgs[0] ?? 0);
+      const cap = ctx.rawArgs[1] ?? 0;
+      const buf = ctx.rawArgs[2] ?? 0;
+      const filePart = ctx.rawArgs[3] ?? 0;
+      const absolute = /^[A-Za-z]:[\\/]/.test(input) ? input : `${this.cwd.replace(/[\\/]$/, '')}\\${input}`;
+      if (!buf || !cap) return { returnValue: absolute.length, errorCode: E.NO_ERROR };
+      if (absolute.length >= cap) {
+        writeW(buf, absolute, cap);
+        return { returnValue: absolute.length + 1, errorCode: E.NO_ERROR };
+      }
+      writeW(buf, absolute, cap);
+      if (filePart) {
+        const slash = Math.max(absolute.lastIndexOf('\\'), absolute.lastIndexOf('/'));
+        this.runtime.writeInt32(filePart, (buf + Math.max(0, slash + 1) * 2) >>> 0);
+      }
+      return { returnValue: absolute.length, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('kernel32.dll', 'SetCurrentDirectoryW', (ctx) => {
       const p = readW(ctx.rawArgs[0] ?? 0);
       this.cwd = p || this.cwd;
