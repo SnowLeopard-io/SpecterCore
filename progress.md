@@ -1,19 +1,108 @@
-# specter-core Windows PE Emulator — Handover (2026-08-20, session 15/16)
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 16)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
-> Sessions 10-14 full handovers are preserved unchanged below.
+> Session 15 and earlier are preserved unchanged below as historical.
 
-## Session 15 summary — notepad open-on-launch layer 2: THREE root causes found & fixed;
-> file-open now reaches CreateFileW but still fails (-1) then the guest faults (eip=0xc80).
-> The open is 90% of the way: the arg survives to 0x4137b2 and the /A //.SETUP switch
-> misparse is gone — what remains is the exact path handed to CreateFileW.
+## Session 16 summary — notepad open-on-launch LAYER 2 FULLY FIXED: open-check PASS
+> `scripts/notepad-open-check.ts` now exits 0 with `EDIT="Hello from the virtual disk!\r\n"`.
+> Real notepad.exe opens a command-line file and loads its content into the EDIT control.
+> The "CreateFileW returns -1 → fault at 0xc80" frontier from session 15 is CLOSED.
 
-**Status: LAYER 2 is PARTIALLY FIXED.** The "file arg never reaches the open logic" chain is
-fully root-caused and fixed (three independent emulator bugs, below). notepad now tokenizes
-correctly, keeps the arg alive through window init, and CALLS CreateFileW — but the open
-still returns -1 and the error path then faults at eip=0xc80 (RuntimeError: unreachable).
-That is the current frontier.
+**Four-layer root-cause chain, all fixed this session (verified: tsc exit 0; eslint 0;
+vitest 52/52 on jit+bridge+interceptor; open-check PASS):**
+
+### Root cause 1 (FIXED, the big one) — JIT decoder GROUP2 table bug: every `sar` became `shl`
+- `d1 fe` = SAR esi,1 (ModRM.reg=7) decoded as **shl**. GROUP2 in
+  `packages/core/src/jit/x86-decoder.ts` was `['rol','ror','rcl','rcr','shl','shr','sar']`
+  — 7 entries: index 6='sar' (x86 reg=6 is SAL/SHL!), index 7=undefined → `?? 'shl'` fallback.
+  So **every `sar reg,1` in guest code compiled to a LEFT SHIFT (×2)** and every
+  `shl/sal reg,1` (reg=6) became SAR (÷2).
+- How it killed the file open: notepad's wcslen scan (0x40cbe6) computes the path length as
+  `sub esi,ebx; sar esi,1` at 0x40cc25-0x40cc28. With sar→shl, 64 became 128, then
+  `add esi,esi` (0x40cc48) pushed srcBytes=256 instead of 64 into the internal memcpy_s
+  (0x4067d5, destSize=66). `cmp edi(66),esi(256); jb` → ERANGE path → `_errno` +
+  `_invalid_parameter_noinfo` (api#378/379) → path buffer (0x20039c8) stayed empty →
+  FindFirstFileW("")/CreateFileW("")=-1 → GetLastError=2 → error dialog → fault at 0xc80.
+- Fix: `GROUP2 = ['rol','ror','rcl','rcr','shl','shr','shl','sar']`. Codegen already maps
+  'sar'→i32ShrS correctly; only the decode table was wrong.
+- Evidence: register dump at `_errno` dispatch showed `edi=0x42 esi=0x100` (srcBytes=256);
+  the 0x7ffed30 buffer dump at api#376 showed the path with a proper NUL at char 32, proving
+  the scan (not the buffer) was corrupted. `scripts/jit-scanloop-test.ts` decodes `2b f3 d1 fe`
+  → after fix: `sub esi,ebx; sar esi,1`.
+- **Likely explains several historical mystery bugs (Bug18/Bug19, cmd `dir` column
+  formatting, GS-cookie stack overrun in the custom cmd). Any guest code doing `sar`/`sal`
+  was silently wrong. Re-run cmd-cwd-check.ts / sample tests after this change.**
+
+### Root cause 2 (FIXED) — GetFileInformationByHandle had no handler
+- After RC1 the open chain advanced: memcpy_s OK → FindFirstFileW→0x20 → CreateFileW→0x10 —
+  but `GetFileInformationByHandle(0x10, &info)` returned `{0, ERROR_NOT_IMPLEMENTED}`
+  (GetLastError=0x78) → notepad showed an error dialog and skipped the read.
+- Fix: added `FileSystemBridge.getFileInformation(handle)` (contracts
+  `GetFileInformationResult` + `packages/bridges/src/fs.ts` impl: path/size/attrs/modified
+  from the handle record + store.stat) and a `GetFileInformationByHandle` handler in
+  `handlers.ts` filling x86 BY_HANDLE_FILE_INFORMATION (52 bytes: attrs @0, 3×FILETIME
+  @4/12/20, volume serial @28 (volumeSerial of the root), size @32/36, links @40, index
+  @44/48), returns 1.
+
+### Root cause 3 (FIXED) — CreateFileMappingW/MapViewOfFile missing + `mapviewoffile` argCount 4→5
+- notepad reads files via **memory mapping**, not ReadFile. CreateFileMappingW returned 0 →
+  notepad fell back to an EMPTY local buffer → blank document despite the handle chain being
+  OK. Also `mapviewoffile: 4` in X86_API_ARG_COUNT was wrong (MapViewOfFile has 5 args) →
+  4-byte stack leak per call; fixed to 5. Added `flushviewoffile: 2`.
+- Fix (guest-process.ts): file mapping backed by bump-heap memory —
+  `CreateFileMappingW`: resolve handle→path/size via host.fs.getFileInformation, bumpAlloc
+  `max(size, requested)`, copy file content in (host.fs.readFile), return synthetic handle
+  (0x60+); `MapViewOfFile`: return mapping.ptr+offset; `UnmapViewOfFile`/`FlushViewOfFile`:
+  no-op success; `CloseHandle`: release mapping handles first, else delegate to fs.closeHandle.
+
+### Root cause 4 (FIXED) — EM_SETHANDLE (0xBC) not handled by SendMessageW
+- After mapping worked, notepad converted the content (MultiByteToWideChar → 30 chars,
+  api#407/413) into the EDIT's LocalAlloc'd buffer (api#411-415) and handed it over with
+  `SendMessageW(EDIT, EM_SETHANDLE=0xbc, wParam=bufferHandle, 0)` (api#429, at 0x411797).
+  Our sendMessage handler only tracked WM_SETTEXT(0xc)/EM_REPLACESEL(0xc2), so rec.text
+  stayed '' → renderer/check saw empty text even though the flow was correct.
+- Fix: EM_SETHANDLE case — wParam is an LMEM_FIXED handle, i.e. the guest pointer to the
+  UTF-16 text; `rec.text = readWStr(wParam)`, fire onTextChanged.
+
+**Final validation:** `scripts/notepad-open-check.ts` PASS (exit 0), EDIT text =
+"Hello from the virtual disk!\r\n" (from `Users/Guest/Desktop/hello.txt`).
+
+## Files changed (session 16)
+- `packages/core/src/jit/x86-decoder.ts` — GROUP2 fix (sar/shl/sal).
+- `packages/core/src/pe/mapper.ts` — mapviewoffile 4→5, flushviewoffile: 2.
+- `packages/contracts/src/bridge/fs.ts` — GetFileInformationResult + `getFileInformation` on FileSystemBridge.
+- `packages/bridges/src/fs.ts` — getFileInformation impl (handle→path/size/attrs/modified).
+- `packages/core/src/api/handlers.ts` — GetFileInformationByHandle handler (BY_HANDLE_FILE_INFORMATION).
+- `packages/core/src/process/guest-process.ts` — file mappings (CreateFileMappingW/MapViewOfFile/
+  UnmapViewOfFile/FlushViewOfFile), CloseHandle mapping release, EM_SETHANDLE in sendMessage.
+- `packages/core/src/process/sample-integration.test.ts` — mock now implements getFileInformation.
+- `scripts/notepad-open-check.ts` — LoggingInterceptor upgraded: per-call CALLER return address,
+  full arg dumps (GetFullPathNameW/FindFirstFileW/FindClose/SendMessageW), register dumps on
+  `_errno`/`_invalid_parameter`, src-buffer dumps on CoTaskMemAlloc(0x42); probes at function
+  entries 0x40cbe6 / 0x4067d5 (block boundaries only!) and open-path markers.
+- `scripts/jit-scanloop-test.ts` — NEW: decoder regression test for the GROUP2 scan loop.
+
+## Debugging notes for the next session
+- GuestProcessOptions.probes fire ONLY at JIT block starts (onStep). Mid-block addresses
+  silently never fire — probe function ENTRY points (call targets) instead.
+- The LoggingInterceptor caller-address dump (read [esp] at dispatch) is the fastest way to
+  map api# → disasm site; combined with `resolve-iat.ts` for IAT slots.
+- pe-dump/disasm offsets: verify against real eip before trusting a decode; starting a disasm
+  mid-instruction produces garbage (`popfd;cwde;std` etc.).
+
+## Next steps / open items
+- **Browser check:** reload the desktop, double-click a .txt in File Explorer → notepad should
+  now display the file content. (launchGuestWindow already passes commandLine per session 14.)
+- Re-run `scripts/notepad-dialog-check.ts` (Save As) — EM_SETHANDLE adoption must not regress it.
+- Re-run full vitest (all packages) + cmd-cwd-check.ts before committing.
+- open-check's `title=""` (titleOk=false): window title isn't "hello.txt - Notepad" — frame
+  WM_SETTEXT tracking is separate from the EDIT; content works, low priority.
+- The GROUP2 fix could change behavior in cmd/sample paths — watch for regressions, but also
+  check whether it RESOLVES old bugs (Bug18/Bug19 formatting, GS cookie).
+- Historical open items: Settings window (Wipe Virtual Disk), cut/move clipboard ops, console-
+  exe detection for double-clicked non-cmd exes, taskbar large icon.
+
 
 ## Session 15 work (verified: tsc exit 0; eslint 0 errors; notepad-dialog-check PASS)
 

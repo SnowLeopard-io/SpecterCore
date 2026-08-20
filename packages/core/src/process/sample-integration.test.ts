@@ -106,6 +106,11 @@ function buildExeFs(exePath: string, exeBytes: Uint8Array): FileSystemBridge {
     async getFileSize() {
       return exeBytes.length;
     },
+    async getFileInformation(handle) {
+      const rec = handles.get(handle);
+      if (!rec) return { path: '', size: 0, attributes: 0, modified: 0, error: invalidHandle };
+      return { path: exePath, size: exeBytes.length, attributes: 0x80, modified: 0, error: ok0 };
+    },
     getFilePointer(handle) {
       return handles.get(handle)?.ptr ?? 0;
     },

@@ -3237,6 +3237,17 @@ export class GuestProcessRunner {
           }
           case 0x00b6: // EM_GETLINECOUNT
             return { returnValue: rec.text === '' ? 1 : rec.text.split('\n').length, errorCode: E.NO_ERROR };
+          case 0x00bc: { // EM_SETHANDLE: notepad hands the EDIT a LocalAlloc'd
+            // buffer containing the loaded file text (LMEM_FIXED here, so the
+            // "handle" is the guest pointer). Adopt it as rec.text so the
+            // renderer and the save path (EM_GETHANDLE) see the loaded content.
+            const s = readWStr(wParam);
+            if (rec.text !== s) {
+              rec.text = s;
+              this.onTextChanged?.(hwnd, rec.text);
+            }
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
           case 0x00bd: { // EM_GETHANDLE: notepad's Save As asks the EDIT
             // control for its text handle, then reads the buffer directly
             // (GetWindowTextW path is NOT used). Allocate a guest buffer with
