@@ -6,6 +6,7 @@ import type {
   FindFirstResult,
   FindNextResult,
   GetFileAttributesResult,
+  GetFileInformationResult,
   ReadFileResult,
   SetFilePointerResult,
   WinError,
@@ -240,6 +241,22 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
     if (!record) return 0;
     const stat = await this.store.stat(record.path);
     return stat?.size ?? 0;
+  }
+
+  async getFileInformation(handle: number): Promise<GetFileInformationResult> {
+    const record = this.handles.get(handle);
+    if (!record) return { path: '', size: 0, attributes: 0, modified: 0, error: E.ERROR_INVALID_HANDLE };
+    const stat = await this.store.stat(record.path);
+    if (!stat) return { path: record.path, size: 0, attributes: 0, modified: 0, error: E.ERROR_FILE_NOT_FOUND };
+    const attributes =
+      this.attributes.get(normalizePath(record.path)) ?? this.inferAttributes(stat.kind, stat.name);
+    return {
+      path: record.path,
+      size: stat.size,
+      attributes,
+      modified: stat.modified,
+      error: E.NO_ERROR,
+    };
   }
 
   async setEndOfFile(handle: number): Promise<WinError> {

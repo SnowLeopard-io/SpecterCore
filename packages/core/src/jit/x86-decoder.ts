@@ -30,7 +30,16 @@ const REG16_EXT: readonly RegName[] = [...REG16, 'r8w', 'r9w', 'r10w', 'r11w', '
 const REG8_EXT: readonly RegName[] = ['al', 'cl', 'dl', 'bl', 'spl', 'bpl', 'sil', 'dil', 'r8b', 'r9b', 'r10b', 'r11b', 'r12b', 'r13b', 'r14b', 'r15b'] as const;
 
 const GROUP1: readonly Op[] = ['add', 'or', 'adc', 'sbb', 'and', 'sub', 'xor', 'cmp'] as const;
-const GROUP2: readonly Op[] = ['rol', 'ror', 'rcl', 'rcr', 'shl', 'shr', 'sar'] as const;
+// Group-2 rotate/shift table indexed by ModRM.reg. x86 layout:
+//   0=rol 1=ror 2=rcl 3=rcr 4=shl/sal 5=shr 6=sal/shl 7=sar
+// Note index 6 is SAL/SHL (NOT sar!) and index 7 is SAR. This was previously
+// ['rol','ror','rcl','rcr','shl','shr','sar'] (7 entries) which mapped reg=7
+// to undefined -> 'shl' fallback, silently turning every `sar r,1` into a
+// left shift (and reg=6 SAL into SAR). That corrupted notepad's wcslen scan
+// (0x40cbe6: `sub esi,ebx; sar esi,1` became `shl esi,1`), making the copied
+// path buffer size wrong (256 vs 64) so its internal memcpy_s failed with
+// ERANGE and the file-open path died. See progress.md session 16.
+const GROUP2: readonly Op[] = ['rol', 'ror', 'rcl', 'rcr', 'shl', 'shr', 'shl', 'sar'] as const;
 const GROUP3: readonly Op[] = ['test', 'test', 'not', 'neg', 'mul', 'imul', 'div', 'idiv'] as const;
 const GROUP5: readonly Op[] = ['inc', 'dec', 'call', 'nop', 'jmp', 'nop', 'push', 'nop'] as const;
 

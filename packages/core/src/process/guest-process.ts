@@ -1807,6 +1807,73 @@ export class GuestProcessRunner {
       returnValue: 0x80040154, // REGDB_E_CLASSNOTREG
       errorCode: E.NO_ERROR,
     }));
+
+    // ---------------------------------------------------------------------
+    // File mappings (CreateFileMappingW / MapViewOfFile / UnmapViewOfFile).
+    // notepad opens files through a memory-mapped view instead of ReadFile:
+    // right after GetFileInformationByHandle it calls CreateFileMappingW +
+    // MapViewOfFile and reads the content straight out of the mapped pointer.
+    // With no handler, CreateFileMappingW returned 0 and notepad fell back to
+    // an EMPTY local buffer — every command-line file open showed a blank
+    // document even though the handle chain (open -> info) succeeded.
+    // We back the mapping with bump-heap memory and copy the file content in
+    // at CreateFileMappingW time; MapViewOfFile just returns the pointer.
+    // ---------------------------------------------------------------------
+    const fileMappings = new Map<number, { ptr: number; size: number; path: string; fileHandle: number }>();
+    let nextMapping = 0x60;
+    this.interceptor.hook('kernel32.dll', 'CreateFileMappingW', async (ctx, host) => {
+      const hFile = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const sizeHigh = (ctx.rawArgs[3] ?? 0) >>> 0;
+      const sizeLow = (ctx.rawArgs[4] ?? 0) >>> 0;
+      const requested = sizeHigh * 0x100000000 + sizeLow;
+      let path = '';
+      let size = Math.max(0x1000, requested || 0);
+      if (hFile !== 0xffffffff) {
+        const info = await host.fs.getFileInformation(hFile);
+        if (info.error !== E.NO_ERROR) {
+          return { returnValue: 0, errorCode: info.error };
+        }
+        path = info.path;
+        size = Math.max(info.size, requested || 0);
+      }
+      const ptr = bumpAlloc(Math.max(8, size));
+      if (path && size > 0) {
+        // Read the file content into the mapping (handle pointer is still 0
+        // here — notepad maps right after CreateFileW/GetFileInformationByHandle).
+        const r = await host.fs.readFile(hFile, size);
+        if (r.error === E.NO_ERROR && r.data.length > 0) {
+          this.runtime.writeBytes(ptr, r.data);
+        }
+      }
+      const handle = nextMapping++;
+      fileMappings.set(handle, { ptr, size, path, fileHandle: hFile });
+      return { returnValue: handle, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'MapViewOfFile', (ctx) => {
+      const handle = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const mapping = fileMappings.get(handle);
+      if (!mapping) return { returnValue: 0, errorCode: E.ERROR_INVALID_HANDLE };
+      const offsetLow = (ctx.rawArgs[3] ?? 0) >>> 0;
+      return { returnValue: (mapping.ptr + offsetLow) >>> 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'UnmapViewOfFile', () => ({
+      returnValue: 1,
+      errorCode: E.NO_ERROR,
+    }));
+    this.interceptor.hook('kernel32.dll', 'FlushViewOfFile', () => ({
+      returnValue: 1,
+      errorCode: E.NO_ERROR,
+    }));
+    // CloseHandle must also release mapping handles (notepad closes the
+    // mapping after the document is loaded).
+    this.interceptor.hook('kernel32.dll', 'CloseHandle', async (ctx, host) => {
+      const handle = (ctx.rawArgs[0] ?? 0) >>> 0;
+      if (fileMappings.delete(handle)) {
+        return { returnValue: 1, errorCode: E.NO_ERROR };
+      }
+      const err = await host.fs.closeHandle(handle);
+      return { returnValue: err === E.NO_ERROR ? 1 : 0, errorCode: err };
+    });
     this.interceptor.hook('kernel32.dll', 'LocalReAlloc', (ctx) => {
       const old = ctx.rawArgs[0] ?? 0;
       const size = ctx.rawArgs[1] ?? 0;

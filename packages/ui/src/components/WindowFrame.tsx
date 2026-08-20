@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { WindowHandle } from '@specter-core/contracts';
 import { useUi } from '../context';
@@ -46,10 +46,27 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
   const { kernel } = useUi();
   const [dragging, setDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [closing, setClosing] = useState(false);
+  const closeTimers = useRef<number[]>([]);
 
   void kernel;
 
+  useEffect(() => {
+    const timers = closeTimers.current;
+    return () => timers.forEach((id) => window.clearTimeout(id));
+  }, []);
+
   if (win.state === 'minimized') return null;
+
+  const onClose = (): void => {
+    if (closing) return;
+    setClosing(true);
+    const closeTimer = window.setTimeout(() => {
+      void controller.close(win.id);
+      setClosing(false);
+    }, 160);
+    closeTimers.current.push(closeTimer);
+  };
 
   const isMaximized = win.state === 'maximized';
   const bounds = isMaximized
@@ -81,7 +98,7 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
 
   return (
     <div
-      className={`sc-window ${focused ? 'focused' : ''} ${isMaximized ? 'maximized' : ''}`}
+      className={`sc-window ${focused ? 'focused' : ''} ${isMaximized ? 'maximized' : ''} ${closing ? 'closing' : ''}`}
       style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex: win.zIndex }}
       onPointerDown={() => void controller.focus(win.id)}
     >
@@ -110,7 +127,7 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
             </button>
           )}
           {win.options.closable !== false && (
-            <button className="sc-caption-btn close" aria-label="Close" onClick={() => void controller.close(win.id)}>
+            <button className="sc-caption-btn close" aria-label="Close" onClick={onClose}>
               {CloseIcon}
             </button>
           )}

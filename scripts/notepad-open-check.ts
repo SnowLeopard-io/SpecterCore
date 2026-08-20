@@ -93,7 +93,7 @@ class LoggingInterceptor extends ApiInterceptorImpl {
       const extra = s ? ` str=${JSON.stringify(s)}` : '';
       const extraPath = pathStr ? ` path=${JSON.stringify(pathStr)}` : '';
       let extraArgs = '';
-      if (/GetFullPathNameW|FindFirstFileW|FindClose/i.test(ctx.proc)) {
+      if (/GetFullPathNameW|FindFirstFileW|FindClose|SendMessageW/i.test(ctx.proc)) {
         const dump = (a: number | undefined, maxB: number): string => {
           if (!a) return '0';
           try {
@@ -129,6 +129,20 @@ class LoggingInterceptor extends ApiInterceptorImpl {
           const ebp = this.rt.getReg('ebp') >>> 0;
           const b = this.rt.readBytes(ebp + 4, 4);
           regDump += ` callerOf40cbe6=0x${(new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true) >>> 0).toString(16)}`;
+        } catch {
+          /* ignore */
+        }
+        // Dump the memcpy_s source buffer content right when the failure fires.
+        try {
+          const src = this.rt.getReg('ebx') >>> 0;
+          const b = this.rt.readBytes(src, 320);
+          const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+          const words: string[] = [];
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = v.getUint16(i, true);
+            words.push(c === 0 ? '.' : String.fromCharCode(c));
+          }
+          regDump += ` srcMem@0x${src.toString(16)}=${JSON.stringify(words.join(''))}`;
         } catch {
           /* ignore */
         }

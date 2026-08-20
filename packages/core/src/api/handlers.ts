@@ -1036,6 +1036,42 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       const size = await host.fs.getFileSize(numArg(ctx, 'handle', raw(ctx, 0)));
       return ok(size);
     },
+    // GetFileInformationByHandle(hFile, lpFileInformation): notepad's open path
+    // calls this right after CreateFileW and bails with an error dialog if it
+    // fails. Without a handler the interceptor returned 0 + ERROR_NOT_IMPLEMENTED,
+    // so every command-line file open died before the read. Fill the x86
+    // BY_HANDLE_FILE_INFORMATION (52 bytes) from the handle's path/size/attrs.
+    GetFileInformationByHandle: async (ctx, host) => {
+      const handle = numArg(ctx, 'handle', raw(ctx, 0));
+      const out = raw(ctx, 1);
+      if (!out) return fail(E.ERROR_INVALID_PARAMETER);
+      const info = await host.fs.getFileInformation(handle);
+      if (info.error !== E.NO_ERROR) return fail(info.error);
+      const w = new Uint8Array(52);
+      const view = new DataView(w.buffer);
+      view.setUint32(0, info.attributes >>> 0, true); // dwFileAttributes
+      // FILETIME = 100ns since 1601-01-01; convert ms since epoch.
+      const filetime = (ms: number): bigint =>
+        ms > 0 ? (BigInt(Math.floor(ms)) + 11644473600000n) * 10000n : 0n;
+      const writeFt = (offset: number, ms: number): void => {
+        const ft = filetime(ms);
+        view.setUint32(offset, Number(ft & 0xffffffffn), true);
+        view.setUint32(offset + 4, Number(ft >> 32n), true);
+      };
+      writeFt(4, info.modified); // ftCreationTime
+      writeFt(12, info.modified); // ftLastAccessTime
+      writeFt(20, info.modified); // ftLastWriteTime
+      view.setUint32(28, volumeSerial(info.path.replace(/[\\/]+.*$/, '')) >>> 0, true); // dwVolumeSerialNumber
+      view.setUint32(32, 0, true); // nFileSizeHigh
+      view.setUint32(36, info.size >>> 0, true); // nFileSizeLow
+      view.setUint32(40, 1, true); // nNumberOfLinks
+      // Stable pseudo file index from the path.
+      const idx = volumeSerial(info.path);
+      view.setUint32(44, 0, true); // nFileIndexHigh
+      view.setUint32(48, idx >>> 0, true); // nFileIndexLow
+      host.memory.write(out, w);
+      return ok(1);
+    },
     // GetFileAttributesW/A: cmd.exe's dir handler calls this to decide whether
     // the target is a directory (FILE_ATTRIBUTE_DIRECTORY=0x10) or a file/
     // wildcard. Without a handler the interceptor returns 0 (not -1), so cmd's

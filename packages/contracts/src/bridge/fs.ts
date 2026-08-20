@@ -118,6 +118,16 @@ export interface GetFileAttributesResult {
   error: WinError;
 }
 
+/** GetFileInformationByHandle 所需的按句柄文件信息。 */
+export interface GetFileInformationResult {
+  path: string;
+  size: number;
+  attributes: number;
+  /** 最后修改时间（ms 时间戳），0 表示未知 */
+  modified: number;
+  error: WinError;
+}
+
 export interface FindData extends FileStat {
   attributes: number;
 }
@@ -149,6 +159,8 @@ export interface FileSystemBridge {
   setEndOfFile(handle: number): Promise<WinError>;
   getFileSize(handle: number): Promise<number>;
   getFilePointer(handle: number): number;
+  /** GetFileInformationByHandle：按句柄取路径/大小/属性/修改时间 */
+  getFileInformation(handle: number): Promise<GetFileInformationResult>;
   closeHandle(handle: number): Promise<WinError>;
   /** FindFirstFile：支持 * 与 ? 通配符 */
   findFirstFile(path: string, pattern: string): Promise<FindFirstResult>;

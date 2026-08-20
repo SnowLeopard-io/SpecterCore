@@ -1,5 +1,31 @@
 /* SpecterCore - L6 desktop shell styles (Windows 11 Dark Mode / Fluent inspired) */
 
+/* ---------- Animations ---------- */
+@keyframes scFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes scFadeInUp {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@keyframes scScaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+@keyframes scScaleOut {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.9); }
+}
+
+@keyframes scShimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
 :root {
   --sc-accent: #0078D4;
   --sc-accent-hover: #1a8cd8;
@@ -89,7 +115,11 @@
   cursor: pointer;
   font-size: 12px;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
-  transition: background-color 0.12s ease, border-color 0.12s ease;
+  transition: background-color 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+}
+
+.sc-desktop-icon:active {
+  transform: scale(0.96);
 }
 
 .sc-desktop-icon:hover {
@@ -145,6 +175,14 @@
   min-width: 220px;
   min-height: 140px;
   overflow: hidden;
+  animation: scScaleIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
+}
+
+.sc-window.closing {
+  animation: scScaleOut 0.15s cubic-bezier(0.4, 0, 1, 1);
+  pointer-events: none;
+  opacity: 0;
 }
 
 .sc-titlebar {
@@ -236,7 +274,11 @@
   justify-content: center;
   cursor: pointer;
   border-radius: 0;
-  transition: background-color 0.08s ease, color 0.08s ease;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.sc-caption-btn:active {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .sc-caption-btn svg {
@@ -371,11 +413,35 @@
   display: flex;
   align-items: center;
   opacity: 0.85;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  cursor: pointer;
+}
+
+.sc-tray-icon:hover {
+  opacity: 1;
+  transform: translateY(-1px);
 }
 
 .sc-tray-icon svg {
   width: 16px;
   height: 16px;
+}
+
+.sc-tray-icon img {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.sc-taskbar-sys-icon {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.sc-taskbar-sys-icon.large {
+  width: 24px;
+  height: 24px;
 }
 
 .sc-tray-clock {
@@ -407,6 +473,9 @@
   z-index: 1001;
   padding: 28px 28px 0;
   overflow: hidden;
+  transform-origin: bottom center;
+  animation: scFadeInUp 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
 }
 
 .sc-start-search {
@@ -459,7 +528,17 @@
   color: var(--sc-text);
   font-size: 11.5px;
   text-align: center;
-  transition: background-color 0.1s ease;
+  transition: background-color 0.15s ease, transform 0.12s ease, border-color 0.15s ease;
+  animation: scFadeIn 0.25s ease both;
+}
+
+.sc-start-tile:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+.sc-start-tile:active {
+  transform: scale(0.94);
 }
 
 .sc-start-tile:hover {
@@ -476,6 +555,11 @@
   border-radius: 8px;
   font-size: 22px;
   background: rgba(255, 255, 255, 0.04);
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sc-start-tile:hover .sc-start-tile-icon {
+  transform: scale(1.1);
 }
 
 .sc-start-tile-icon img {
@@ -537,6 +621,14 @@
   color: #fff;
   font-size: 13px;
   font-weight: 700;
+  object-fit: cover;
+  border: 1.5px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2);
+  transition: transform 0.15s ease;
+}
+
+.sc-start-user:hover .sc-start-avatar {
+  transform: scale(1.08);
 }
 
 .sc-start-power {
@@ -1207,13 +1299,17 @@
   color: var(--sc-text-dim);
   cursor: pointer;
   font-size: 14px;
-  transition: background-color 0.1s ease, color 0.1s ease;
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.12s ease, border-color 0.15s ease;
 }
 
 .sc-explorer-btn:hover:not(:disabled) {
   background: var(--sc-hover);
   color: var(--sc-text);
   border-color: rgba(255, 255, 255, 0.06);
+}
+
+.sc-explorer-btn:active:not(:disabled) {
+  transform: scale(0.94);
 }
 
 .sc-explorer-btn:disabled {
@@ -1378,6 +1474,7 @@
 
 .sc-explorer-row {
   cursor: pointer;
+  transition: background-color 0.12s ease;
 }
 
 .sc-explorer-row.selected {
