@@ -1,4 +1,5 @@
 import type { DesktopAppInfo } from '@specter-core/contracts';
+import { AppIcon } from '../AppIcon';
 
 interface StartMenuProps {
   open: boolean;
@@ -41,7 +42,7 @@ export function StartMenu({ open, apps, onLaunch, onShutdown }: StartMenuProps) 
       <div className="sc-start-grid">
         {apps.map((app) => (
           <button key={app.appId} className="sc-start-tile" onClick={() => onLaunch(app.appId)} title={app.description}>
-            <span className="sc-start-tile-icon">{app.icon}</span>
+            <AppIcon icon={app.icon} className="sc-start-tile-icon" />
             <span className="sc-start-tile-label">{app.name}</span>
           </button>
         ))}

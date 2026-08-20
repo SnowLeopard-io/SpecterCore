@@ -3,6 +3,7 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { WindowHandle } from '@specter-core/contracts';
 import { useUi } from '../context';
 import type { UiController } from '../types';
+import { AppIcon } from '../AppIcon';
 
 interface WindowFrameProps {
   window: WindowHandle;
@@ -91,7 +92,7 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
       >
-        <span className="sc-title-icon">{win.options.icon ?? '▣'}</span>
+        <AppIcon icon={win.options.icon ?? '▣'} className="sc-title-icon" />
         <span className="sc-title">{win.title}</span>
         <span className="sc-title-controls">
           {win.options.minimizable !== false && (

@@ -12,6 +12,7 @@ import { collectDropFiles, importFiles } from '../import-files';
 import { downloadBytes } from '../download';
 import { uiClipboard, type UiClipboardEntry } from '../ui-clipboard';
 import type { UiController } from '../types';
+import { AppIcon } from '../AppIcon';
 
 interface DesktopProps {
   controller: DesktopController;
@@ -282,7 +283,7 @@ export function Desktop({ controller }: DesktopProps) {
             onPointerDown={(e) => e.stopPropagation()}
             onClick={() => launch(app.appId)}
           >
-            <span className="sc-desktop-icon-img">{app.icon}</span>
+            <AppIcon icon={app.icon} className="sc-desktop-icon-img" />
             <span className="sc-desktop-icon-label">{app.name}</span>
           </button>
         ))}
