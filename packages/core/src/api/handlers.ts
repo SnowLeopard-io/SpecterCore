@@ -77,7 +77,7 @@ function vswprintfImpl(host: ApiHost, ctx: ApiCallContext): ApiResult {
   const isDigit = (ch: string): boolean => ch >= '0' && ch <= '9';
   let i = 0;
   while (i < f.length) {
-    const ch = f[i];
+    const ch = f[i] ?? '';
     if (ch !== '%') {
       put(ch.charCodeAt(0));
       i += 1;
@@ -106,7 +106,7 @@ function vswprintfImpl(host: ApiHost, ctx: ApiCallContext): ApiResult {
       width = nextArg();
       i += 1;
     } else {
-      while (i < f.length && isDigit(f[i])) {
+      while (i < f.length && isDigit(f[i] ?? '')) {
         width = width * 10 + (f.charCodeAt(i) - 48);
         i += 1;
       }
@@ -125,7 +125,7 @@ function vswprintfImpl(host: ApiHost, ctx: ApiCallContext): ApiResult {
         i += 1;
       } else {
         precision = 0;
-        while (i < f.length && isDigit(f[i])) {
+        while (i < f.length && isDigit(f[i] ?? '')) {
           precision = precision * 10 + (f.charCodeAt(i) - 48);
           i += 1;
         }
@@ -157,7 +157,7 @@ function vswprintfImpl(host: ApiHost, ctx: ApiCallContext): ApiResult {
       }
     }
     if (i >= f.length) break;
-    const conv = f[i];
+    const conv = f[i] ?? '';
     i += 1;
 
     if (conv === '%') {
@@ -235,8 +235,8 @@ function vswprintfImpl(host: ApiHost, ctx: ApiCallContext): ApiResult {
   if (buf !== 0 && count > 0) {
     const bytes = new Uint8Array(out.length * 2 + 2);
     for (let k = 0; k < out.length; k++) {
-      bytes[k * 2] = out[k] & 0xff;
-      bytes[k * 2 + 1] = (out[k] >> 8) & 0xff;
+      bytes[k * 2] = (out[k] ?? 0) & 0xff;
+      bytes[k * 2 + 1] = ((out[k] ?? 0) >> 8) & 0xff;
     }
     host.memory.write(buf, bytes);
   }
