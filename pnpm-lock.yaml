@@ -162,6 +162,9 @@ importers:
 
   packages/ui:
     dependencies:
+      '@specter-core/bridges':
+        specifier: workspace:*
+        version: link:../bridges
       '@specter-core/contracts':
         specifier: workspace:*
         version: link:../contracts

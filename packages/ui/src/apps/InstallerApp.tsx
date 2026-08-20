@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AppPackage } from '@specter-core/contracts';
 import { loadPackageFile } from '@specter-core/shared';
 import { useUi } from '../context';
@@ -25,6 +25,8 @@ export function InstallerApp({ initialPackagePath }: InstallerProps) {
   const [step, setStep] = useState<Step>('overview');
   const [error, setError] = useState<string | null>(null);
   const [installed, setInstalled] = useState<AppPackage | null>(null);
+  /** Double-clicked .bkapp installs immediately — no overview confirm page. */
+  const autoInstallRef = useRef(false);
 
   // 从包清单加载（.bkapp 为 JSON 清单，.exe 为真实 PE 可执行文件）。
   useEffect(() => {
@@ -37,6 +39,15 @@ export function InstallerApp({ initialPackagePath }: InstallerProps) {
       .catch((err: unknown) => setError(`Cannot load package: ${String(err)}`));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialPackagePath, fs]);
+
+  // Double-clicked .bkapp: install straight away (skips the overview page).
+  useEffect(() => {
+    if (initialPackagePath && pkg && step === 'overview' && !autoInstallRef.current) {
+      autoInstallRef.current = true;
+      void runInstall();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPackagePath, pkg, step]);
 
   const alreadyInstalled =
     pkg !== null && controller.listInstalledApps().some((a) => a.packageId === pkg.packageId);

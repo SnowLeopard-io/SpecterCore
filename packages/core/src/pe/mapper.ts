@@ -170,6 +170,20 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getprocessheapex': 1,
   'getacp': 0,
   'getoemcp': 0,
+  // ANSI/UTF-16 conversion (notepad's save path converts EDIT text before
+  // writing). stdcall; argCounts matter for the dynamic stub `ret N`.
+  'widechartomultibyte': 8,
+  'multibytetowidechar': 6,
+  'wcsnlen': 2,
+  // GetFileAttributesExW/A(lpFileName, fInfoLevelId, lpFileInformation) —
+  // 3-arg stdcall. Missing this leaks 12 bytes/call; notepad calls it right
+  // before the GS-cookie check in WinMain's tail (0x40f304), so the drift
+  // shifted the cookie copy at [esp+0x4c] and fail-fasted 0xC0000409.
+  'setendoffile': 1,
+  'getfileattributesexw': 3,
+  'getfileattributesexa': 3,
+  'pathfindextensionw': 1,
+  'pathfindfilenamew': 1,
   'getcpex': 2,
   // GetCPInfo(UINT CodePage, LPCPINFO) — 2 params stdcall, ret 8. Was 1 (ret 4)
   // -> 4 bytes leaked per call -> pop ebx picked up the unpopped arg (0x1b5) ->
@@ -185,6 +199,19 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'versetconditionmask': 4, // maskLow, maskHigh, type, cond = 16 bytes (was 3 -> leaked 4B/call)
   'getfullpathnamea': 4,
   'getfullpathnamew': 4,
+  // comdlg32 common file dialogs (notepad delay-loads these via .didat):
+  // stdcall, 1 arg (LPOPENFILENAME). A wrong/missing argCount leaks 4 bytes
+  // per call and drifts the guest stack (same family as the cmd.exe leaks).
+  'getopenfilenamew': 1,
+  'getopenfilenamea': 1,
+  'getsavefilenamew': 1,
+  'getsavefilenamea': 1,
+  // shlwapi / file helpers notepad uses in the save path (delay-loaded):
+  'deletefilew': 1,
+  'deletefilea': 1,
+  'pathfileexistsw': 1,
+  'pathfileexistsa': 1,
+  'commdlgextendederror': 0,
   // Get/SetCurrentDirectoryW/A: missing argCounts -> stub ret 0 -> 8 bytes
   // leaked per GetCurrentDirectoryW call -> GS cookie copy shifted in the
   // caller frame -> __security_check_cookie fails -> __report_gsfailure
@@ -328,12 +355,6 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'loadstringa': 4,
   'exitwindowsex': 2,
   'dispatchmessagew': 1,
-  // GetFileAttributesExW/A(lpFileName, fInfoLevelId, lpFileInformation) —
-  // 3-arg stdcall. Missing this leaks 12 bytes/call; notepad calls it right
-  // before the GS-cookie check in WinMain's tail (0x40f304), so the drift
-  // shifted the cookie copy at [esp+0x4c] and fail-fasted 0xC0000409.
-  'getfileattributesexw': 3,
-  'getfileattributesexa': 3,
   // SetWinEventHook is 7-arg stdcall (eventMin,eventMax,hmod,pfn,pid,tid,flags);
   // UnhookWinEvent is 1-arg. Missing the count drifts the stack into the
   // message loop (notepad calls it at 0x40f2d5 / before GetMessageW).
@@ -417,11 +438,17 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'localfree': 1,
   'localrealloc': 3,
   'localsize': 1,
+  // LocalLock/LocalUnlock: 1-arg stdcall. Missing argCount -> stub ret 0 ->
+  // 4 bytes leak per call. notepad's save routine calls LocalLock between
+  // CreateFileW and WideCharToMultiByte; the drift shifts every later
+  // [esp+X] read by +4, so the encoding value written at [esp+0x18] by
+  // 0x410d2a is read at [esp+0x14] instead and the write helper bails.
+  'locallock': 1,
+  'localunlock': 1,
   'virtualprotect': 3,
   'virtualqueryex': 4,
   'queryperformancefrequency': 1,
   'queryperformancecounter': 1,
-  'setendoffile': 1,
   'setfilepointerex': 5,
   'setfileattributesa': 2,
   'setfileattributesw': 2,
@@ -445,14 +472,10 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'createdirectoryw': 2,
   'removedirectorya': 1,
   'removedirectoryw': 1,
-  'deletefilea': 1,
-  'deletefilew': 1,
   'movefilea': 3,
   'movefilew': 3,
   'createprocessa': 10,
   'createprocessw': 10,
-  'widechartomultibyte': 8,
-  'multibytetowidechar': 6,
   'formatmessagea': 7,
   'formatmessagew': 7,
   'getconsolecp': 0,

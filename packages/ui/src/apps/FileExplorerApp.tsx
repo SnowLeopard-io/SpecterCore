@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DragEvent as ReactDragEvent } from 'react';
+import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from 'react';
 import type { DirEntry, FileStore } from '@specter-core/contracts';
-import { decodeText } from '@specter-core/shared';
+import { copyRecursive, decodeText, deleteRecursive, moveRecursive, uniqueName } from '@specter-core/shared';
 import { useUi } from '../context';
 import { collectDropFiles, importFiles } from '../import-files';
 import { downloadBytes } from '../download';
+import { FileContextMenu } from '../components/FileContextMenu';
+import { uiClipboard, type UiClipboardEntry } from '../ui-clipboard';
 
 const MAX_PREVIEW_BYTES = 64 * 1024;
 
@@ -21,6 +23,12 @@ function parentPath(path: string): string {
 function basenameOf(path: string): string {
   const segs = path.split('/').filter(Boolean);
   return segs[segs.length - 1] ?? path;
+}
+
+/** Map a virtual-disk store path to a Windows path cmd.exe understands. */
+function toWindowsPath(storePath: string): string {
+  if (!storePath || storePath === '/') return 'C:\\';
+  return 'C:\\' + storePath.replace(/\//g, '\\');
 }
 
 function iconFor(entry: DirEntry): string {
@@ -59,6 +67,12 @@ interface FileExplorerProps {
   initialPath?: string;
 }
 
+interface MenuState {
+  x: number;
+  y: number;
+  entryName: string | null;
+}
+
 /** File Explorer (Windows 11 style): browse the virtual disk via the FileStore. */
 export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const { controller } = useUi();
@@ -74,6 +88,33 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const [dropActive, setDropActive] = useState(false);
   const dragDepth = useRef(0);
   const reqRef = useRef(0);
+  const [clipboard, setClipboard] = useState<UiClipboardEntry | null>(null);
+  useEffect(() => uiClipboard.subscribe(() => setClipboard(uiClipboard.get())), []);
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const explorerRef = useRef<HTMLDivElement | null>(null);
+
+  // Open the context menu at the mouse position, expressed RELATIVE to the
+  // explorer container (the menu is absolute-positioned inside it). Using
+  // viewport-fixed coordinates breaks here: .sc-desktop is itself
+  // position:fixed + overflow:hidden, which traps/offsets nested fixed
+  // menus, so they never appear.
+  const openContextMenu = (e: ReactMouseEvent, entryName: string | null): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (entryName) setSelected(entryName);
+    const rect = explorerRef.current?.getBoundingClientRect();
+    let mx = e.clientX - (rect?.left ?? 0);
+    let my = e.clientY - (rect?.top ?? 0);
+    if (rect) {
+      // Keep the menu inside the window (flip toward the top-left when the
+      // click is near the bottom/right edge).
+      if (mx + 210 > rect.width) mx = Math.max(0, rect.width - 210);
+      if (my + 260 > rect.height) my = Math.max(0, rect.height - 260);
+    }
+    setMenu({ x: mx, y: my, entryName });
+  };
 
   const load = useCallback(
     (target: string, navHistory = true): void => {
@@ -198,8 +239,8 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
     if (!entry) return;
     const full = joinPath(path, entry.name);
     try {
-      if (entry.kind === 'directory') await fs.removeDirectory(full);
-      else await fs.deleteFile(full);
+      await deleteRecursive(fs, full);
+      if (clipboard && clipboard.path === full) uiClipboard.set(null);
       await load(path);
     } catch (err: unknown) {
       setError(`Cannot delete "${entry.name}": ${String(err)}`);
@@ -225,6 +266,51 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
     }
   };
 
+  const copySelected = (): void => {
+    const entry = entries.find((e) => e.name === selected);
+    if (!entry) return;
+    uiClipboard.set({ path: joinPath(path, entry.name), name: entry.name, isDir: entry.kind === 'directory' });
+  };
+
+  const pasteHere = async (): Promise<void> => {
+    if (!fs || !clipboard) return;
+    const dstName = uniqueName(clipboard.name, entries);
+    const dst = joinPath(path, dstName);
+    try {
+      await copyRecursive(fs, clipboard.path, dst);
+      await load(path);
+    } catch (err: unknown) {
+      setError(`Cannot paste "${clipboard.name}": ${String(err)}`);
+    }
+  };
+
+  const beginRename = (name: string): void => {
+    setRenaming(name);
+    setMenu(null);
+    // Focus after the input renders (next frame).
+    setTimeout(() => renameInputRef.current?.select(), 0);
+  };
+
+  const commitRename = async (oldName: string, newName: string): Promise<void> => {
+    setRenaming(null);
+    if (!fs || !newName || newName === oldName) return;
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return;
+    const from = joinPath(path, oldName);
+    const to = joinPath(path, trimmed);
+    try {
+      if (entries.some((e) => e.name === trimmed)) {
+        setError(`A file or folder named "${trimmed}" already exists.`);
+        return;
+      }
+      await moveRecursive(fs, from, to);
+      setSelected(trimmed);
+      await load(path);
+    } catch (err: unknown) {
+      setError(`Cannot rename "${oldName}": ${String(err)}`);
+    }
+  };
+
   const downloadPreview = async (): Promise<void> => {
     if (!fs || !preview) return;
     try {
@@ -245,6 +331,25 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const canBack = nav.index > 0;
   const canUp = path !== '';
 
+  const selectedEntry = entries.find((e) => e.name === selected) ?? null;
+  const selectedIsDir = selectedEntry?.kind === 'directory';
+  const selectedIsExe =
+    selectedEntry?.kind === 'file' && selectedEntry.name.toLowerCase().endsWith('.exe');
+
+  const openCmdHere = (): void => {
+    // Open cmd.exe with the current folder as its initial working directory.
+    void controller.openCommandPrompt(undefined, toWindowsPath(path));
+  };
+  const openCmdInSelected = (): void => {
+    if (!selectedEntry || selectedEntry.kind !== 'directory') return;
+    void controller.openCommandPrompt(undefined, toWindowsPath(joinPath(path, selectedEntry.name)));
+  };
+  const runSelectedExe = (): void => {
+    if (!selectedEntry || selectedEntry.kind !== 'file') return;
+    const full = joinPath(path, selectedEntry.name);
+    void controller.openCommandPrompt(`start "" "${toWindowsPath(full)}"`, toWindowsPath(path));
+  };
+
   // 拖入真实文件 → 导入当前目录并刷新。
   const onDrop = async (e: ReactDragEvent): Promise<void> => {
     e.preventDefault();
@@ -260,6 +365,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
 
   return (
     <div
+      ref={explorerRef}
       className="sc-explorer"
       onDragEnter={(e) => {
         e.preventDefault();
@@ -306,6 +412,27 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
         >
           ⬇
         </button>
+        <button className="sc-explorer-btn" onClick={openCmdHere} aria-label="Open command prompt here" title="Open command prompt in this folder">
+          🖥
+        </button>
+        <button
+          className="sc-explorer-btn"
+          disabled={!selectedIsDir}
+          onClick={openCmdInSelected}
+          aria-label="Open command prompt in selected folder"
+          title="Open command prompt in selected folder"
+        >
+          📁🖥
+        </button>
+        <button
+          className="sc-explorer-btn"
+          disabled={!selectedIsExe}
+          onClick={runSelectedExe}
+          aria-label="Run executable"
+          title="Run selected executable in command prompt"
+        >
+          ▶
+        </button>
         <div className="sc-explorer-address">
           <span className="sc-explorer-crumb" onClick={() => load('')}>
             C:
@@ -326,7 +453,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
 
       {error && <div className="sc-explorer-error">{error}</div>}
 
-      <div className="sc-explorer-list">
+      <div className="sc-explorer-list" onContextMenu={(e) => openContextMenu(e, null)}>
         {loading && <div className="sc-explorer-empty">Loading…</div>}
         {!loading && !fs && (
           <div className="sc-explorer-empty">No virtual disk available in this environment.</div>
@@ -341,9 +468,25 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
               className={`sc-explorer-row ${selected === entry.name ? 'selected' : ''}`}
               onClick={() => setSelected(entry.name)}
               onDoubleClick={() => openEntry(entry)}
+              onContextMenu={(e) => openContextMenu(e, entry.name)}
             >
               <span className="sc-explorer-icon">{iconFor(entry)}</span>
-              <span className="sc-explorer-name">{entry.name}</span>
+              {renaming === entry.name ? (
+                <input
+                  ref={renameInputRef}
+                  className="sc-explorer-rename"
+                  defaultValue={entry.name}
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void commitRename(entry.name, (e.target as HTMLInputElement).value);
+                    else if (e.key === 'Escape') setRenaming(null);
+                  }}
+                  onBlur={(e) => void commitRename(entry.name, e.target.value)}
+                />
+              ) : (
+                <span className="sc-explorer-name">{entry.name}</span>
+              )}
               <span className="sc-explorer-size">
                 {entry.kind === 'directory' ? '' : formatSize(entry.size)}
               </span>
@@ -371,6 +514,83 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
           </pre>
         </div>
       )}
+
+      {menu &&
+        (() => {
+          const entry = menu.entryName ? (entries.find((e) => e.name === menu.entryName) ?? null) : null;
+          return (
+            <>
+              {entry ? (
+                <FileContextMenu
+                  x={menu.x}
+                  y={menu.y}
+                  entry={entry}
+                  onClose={() => setMenu(null)}
+                  actions={{
+                    onOpen: () => openEntry(entry),
+                    onDownload: () => {
+                      setSelected(entry.name);
+                      void downloadSelected();
+                    },
+                    onRun: () => {
+                      setSelected(entry.name);
+                      runSelectedExe();
+                    },
+                    onCopy: () => {
+                      setSelected(entry.name);
+                      copySelected();
+                    },
+                    onRename: () => beginRename(entry.name),
+                    onDelete: () => {
+                      setSelected(entry.name);
+                      void deleteSelected();
+                    },
+                  }}
+                />
+              ) : (
+                <>
+                  <div
+                    className="sc-file-menu-overlay"
+                    onClick={() => setMenu(null)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu(null);
+                    }}
+                  />
+                  <div className="sc-file-menu" style={{ left: menu.x, top: menu.y }}>
+                    <button
+                      onClick={() => {
+                        void newFolder();
+                        setMenu(null);
+                      }}
+                    >
+                      <span className="sc-context-icon">📁</span> New Folder
+                    </button>
+                    {clipboard && (
+                      <button
+                        onClick={() => {
+                          void pasteHere();
+                          setMenu(null);
+                        }}
+                      >
+                        <span className="sc-context-icon">📋</span> Paste
+                      </button>
+                    )}
+                    <hr />
+                    <button
+                      onClick={() => {
+                        load(path);
+                        setMenu(null);
+                      }}
+                    >
+                      <span className="sc-context-icon">↻</span> Refresh
+                    </button>
+                  </div>
+                </>
+              )}
+            </>
+          );
+        })()}
 
       {dropActive && (
         <div className="sc-explorer-drop">Drop files to import into this folder</div>

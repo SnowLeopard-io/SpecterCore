@@ -1,5 +1,4 @@
 import type { DesktopAppInfo } from '@specter-core/contracts';
-import { NotepadApp } from './apps/NotepadApp';
 import { SystemInfoApp } from './apps/SystemInfoApp';
 import { MinesweeperApp } from './apps/MinesweeperApp';
 import { FileExplorerApp } from './apps/FileExplorerApp';
@@ -83,7 +82,7 @@ export const DEFAULT_APPS: AppDefinition[] = [
   },
   {
     appId: 'windows-notepad',
-    name: 'Notepad (Windows)',
+    name: 'Notepad',
     icon: '📝',
     description: 'Run the bundled Windows notepad.exe with its MUI resources',
     group: 'System',

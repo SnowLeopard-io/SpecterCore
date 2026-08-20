@@ -32,11 +32,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck, lint and test
-        run: |
-          pnpm typecheck
-          pnpm lint
-          pnpm test
+      # Verification (typecheck/lint/test) is CI's job (ci.yml runs on every
+      # push); keep this deploy job to install + build only to avoid duplicating
+      # the same checks on every push.
 
       - name: Build web app
         run: pnpm build

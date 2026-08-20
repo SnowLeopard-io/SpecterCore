@@ -44,6 +44,30 @@ class LoggingInterceptor extends ApiInterceptorImpl {
     console.error(
       `[api] esp=0x${espNow.toString(16)} ${ctx.module}!${ctx.proc}(${args.join(', ')}) -> 0x${(result.returnValue >>> 0).toString(16)}${result.returnValueHigh !== undefined ? `:0x${(result.returnValueHigh >>> 0).toString(16)}` : ''}`,
     );
+    // Dump wide strings for cwd/path resolution calls to trace cmd's startup
+    // cwd override (which defeats our `cwd` option).
+    if (/currentdirectory|fullpathname|fileattributes|modulefilename|environmentvariable/i.test(ctx.proc)) {
+      const readW = (addr: number, max = 256): string => {
+        if (!addr) return '';
+        const raw = this.memHost.memory.read(addr >>> 0, max);
+        const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+        let s = '';
+        for (let i = 0; i + 1 < raw.byteLength; i += 2) {
+          const c = view.getUint16(i, true);
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      };
+      const inStr = readW(ctx.rawArgs[0] ?? 0);
+      const outAddr = /GetCurrentDirectory|GetModuleFileName/.test(ctx.proc)
+        ? (ctx.rawArgs[1] ?? 0)
+        : /GetFullPathName/.test(ctx.proc)
+          ? (ctx.rawArgs[2] ?? 0)
+          : 0;
+      const outStr = outAddr ? readW(outAddr) : '';
+      console.error(`[str] ${ctx.proc} in=${JSON.stringify(inStr)} out=${JSON.stringify(outStr)}`);
+    }
     // Dump the wide string at a GetCommandLineW return address to verify the
     // guest actually received the intended command line (not an empty string).
     if (ctx.proc.toLowerCase() === 'getcommandlinew') {
@@ -454,14 +478,23 @@ async function main(): Promise<void> {
     interceptor,
   );
 
-  // TEMP: scripted interactive input to reproduce the browser pipeline.
+  // TEMP: scripted interactive input to reproduce the browser pipeline
+  // (cd into a folder, list it, then exit).
   setTimeout(() => {
-    console.error('[feed] dir');
-    runner.postInput('dir\r\n');
+    console.error('[feed] echo %CD%');
+    runner.postInput('echo %CD%\r\n');
     setTimeout(() => {
-      console.error('[feed] exit');
-      runner.postInput('exit\r\n');
-    }, 2000);
+      console.error('[feed] cd (print cwd)');
+      runner.postInput('cd\r\n');
+      setTimeout(() => {
+        console.error('[feed] dir');
+        runner.postInput('dir\r\n');
+        setTimeout(() => {
+          console.error('[feed] exit');
+          runner.postInput('exit\r\n');
+        }, 1500);
+      }, 1500);
+    }, 1500);
   }, 2000);
 
   // Section info for mapping an address back to a PE section name.
@@ -482,6 +515,7 @@ async function main(): Promise<void> {
     modulePath,
     commandLine: process.env.BK_ARGS ?? '',
     interactive: true,
+    cwd: process.env.BK_CWD || undefined,
     patches: [{ va: 0x41dea0, bytes: [0xc3] }], // neutralize __security_check_cookie (GS fast-fail)
     readFile: async (p) => {
       if (process.env.BK_NO_MUI === '1') return null; // mimic browser env
@@ -1389,13 +1423,13 @@ async function main(): Promise<void> {
           return s;
         };
         // dump the 64-bit value at valPtr (lo, hi) and the fmt string
-        const valLo = valPtr ? rd32(valPtr) : 0;
-        const valHi = valPtr ? rd32(valPtr + 4) : 0;
-        const fmtStr = readW(rt.getReg('edx') >>> 0);
+        const _valLo = valPtr ? rd32(valPtr) : 0;
+        const _valHi = valPtr ? rd32(valPtr + 4) : 0;
+        const _fmtStr = readW(rt.getReg('edx') >>> 0);
         // dump obj fields
         const obj = rt.getReg('ecx') >>> 0;
         const o8 = obj ? rd32(obj + 8) : 0;
-        const oC = obj ? rd32(obj + 0xc) : 0;
+        const _oC = obj ? rd32(obj + 0xc) : 0;
         const o10 = obj ? rd32(obj + 0x10) : 0;
         const retAddr = rd32(rt.getReg('esp') >>> 0) >>> 0;
         // Also dump current buffer content and savedLen
