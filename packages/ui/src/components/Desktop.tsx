@@ -10,6 +10,7 @@ import { ContextMenu } from './ContextMenu';
 import { FileContextMenu } from './FileContextMenu';
 import { collectDropFiles, importFiles } from '../import-files';
 import { downloadBytes } from '../download';
+import { uiClipboard, type UiClipboardEntry } from '../ui-clipboard';
 import type { UiController } from '../types';
 
 interface DesktopProps {
@@ -54,6 +55,8 @@ export function Desktop({ controller }: DesktopProps) {
   const [itemMenu, setItemMenu] = useState<{ x: number; y: number; name: string } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const [clipboard, setClipboard] = useState<UiClipboardEntry | null>(null);
+  useEffect(() => uiClipboard.subscribe(() => setClipboard(uiClipboard.get())), []);
   const dragDepth = useRef(0);
 
   const fs = controller.getFileSystem();
@@ -128,16 +131,24 @@ export function Desktop({ controller }: DesktopProps) {
     void controller.openCommandPrompt(`start "" "C:\\${full.replace(/\//g, '\\')}"`, `C:\\${DESKTOP_DIR.replace(/\//g, '\\')}`);
   };
   const copyItem = (item: DirEntry): void => {
-    // Selection is implicit; openFile won't copy. The clipboard is local to
-    // the desktop — File Explorer has its own. Cross-app copy/paste can be
-    // added later via a shared store.
-    void item;
+    uiClipboard.set({ path: `${DESKTOP_DIR}/${item.name}`, name: item.name, isDir: item.kind === 'directory' });
+  };
+  const pasteToDesktop = async (): Promise<void> => {
+    if (!fs || !clipboard) return;
+    const dstName = uniqueName(clipboard.name, desktopItems);
+    try {
+      await copyRecursive(fs, clipboard.path, `${DESKTOP_DIR}/${dstName}`);
+      refreshDesktop();
+    } catch {
+      /* ignore */
+    }
   };
   const deleteItem = async (item: DirEntry): Promise<void> => {
     if (!fs) return;
     const full = `${DESKTOP_DIR}/${item.name}`;
     try {
       await deleteRecursive(fs, full);
+      if (clipboard && clipboard.path === full) uiClipboard.set(null);
       refreshDesktop();
     } catch {
       /* ignore */
@@ -352,6 +363,7 @@ export function Desktop({ controller }: DesktopProps) {
           onRefresh={refreshDesktop}
           onNewFolder={createFolder}
           onOpenExplorer={() => void controller.launch('file-explorer')}
+          onPaste={clipboard ? () => void pasteToDesktop() : null}
           onClose={() => setMenu(null)}
         />
       )}

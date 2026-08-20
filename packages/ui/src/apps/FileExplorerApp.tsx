@@ -6,6 +6,7 @@ import { useUi } from '../context';
 import { collectDropFiles, importFiles } from '../import-files';
 import { downloadBytes } from '../download';
 import { FileContextMenu } from '../components/FileContextMenu';
+import { uiClipboard, type UiClipboardEntry } from '../ui-clipboard';
 
 const MAX_PREVIEW_BYTES = 64 * 1024;
 
@@ -66,12 +67,6 @@ interface FileExplorerProps {
   initialPath?: string;
 }
 
-interface ClipboardItem {
-  path: string;
-  name: string;
-  isDir: boolean;
-}
-
 interface MenuState {
   x: number;
   y: number;
@@ -93,7 +88,8 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const [dropActive, setDropActive] = useState(false);
   const dragDepth = useRef(0);
   const reqRef = useRef(0);
-  const [clipboard, setClipboard] = useState<ClipboardItem | null>(null);
+  const [clipboard, setClipboard] = useState<UiClipboardEntry | null>(null);
+  useEffect(() => uiClipboard.subscribe(() => setClipboard(uiClipboard.get())), []);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
@@ -244,7 +240,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
     const full = joinPath(path, entry.name);
     try {
       await deleteRecursive(fs, full);
-      setClipboard((c) => (c && c.path === full ? null : c));
+      if (clipboard && clipboard.path === full) uiClipboard.set(null);
       await load(path);
     } catch (err: unknown) {
       setError(`Cannot delete "${entry.name}": ${String(err)}`);
@@ -273,7 +269,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const copySelected = (): void => {
     const entry = entries.find((e) => e.name === selected);
     if (!entry) return;
-    setClipboard({ path: joinPath(path, entry.name), name: entry.name, isDir: entry.kind === 'directory' });
+    uiClipboard.set({ path: joinPath(path, entry.name), name: entry.name, isDir: entry.kind === 'directory' });
   };
 
   const pasteHere = async (): Promise<void> => {
