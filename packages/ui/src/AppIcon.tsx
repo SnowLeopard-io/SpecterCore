@@ -2,11 +2,6 @@ import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { fetchIcoAsPng } from './ico';
 
-/** True if the icon is a resource path (e.g. /icons/foo.ico) — otherwise emoji. */
-function isIconPath(icon: string): boolean {
-  return /^(https?:)?\//.test(icon) || /\.(ico|png|svg|jpg|jpeg|webp|gif|bmp)$/i.test(icon);
-}
-
 interface AppIconProps {
   icon: string;
   /** Fallback shown while the icon loads (or if the .ico has no PNG payload). */

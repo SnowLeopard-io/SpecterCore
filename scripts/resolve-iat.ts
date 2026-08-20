@@ -14,7 +14,6 @@ async function main(): Promise<void> {
   const imgBase = dv.getUint32(peOff + 24 + 28, true);
   const secTab = peOff + 24 + optSize;
   const impDirRva = dv.getUint32(peOff + 24 + 104, true); // import table RVA
-  const impDirSize = dv.getUint32(peOff + 24 + 108, true);
 
   const rvaToOff = (rva: number): number | null => {
     for (let i = 0; i < numSections; i++) {
@@ -33,7 +32,6 @@ async function main(): Promise<void> {
     console.error('no import dir');
     process.exit(2);
   }
-  const targetRva = target - imgBase;
   for (let d = 0; d < 64; d++) {
     const desc = impOff + d * 20;
     const nameRva = dv.getUint32(desc + 12, true);

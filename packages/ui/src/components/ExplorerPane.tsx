@@ -10,16 +10,17 @@ import { BackIcon, UpIcon, RefreshIcon } from './icons';
 
 /** Real Windows file-type icon (extracted from the OS via SHGetFileInfo). */
 export function iconPathFor(entry: DirEntry): string {
-  if (entry.kind === 'directory') return '/icons/folder.png';
+  if (entry.kind === 'directory') return '/icons/folder.svg';
   const lower = entry.name.toLowerCase();
-  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return '/icons/application.png';
+  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return '/icons/application.svg';
   if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.log') || lower.endsWith('.ini') || lower.endsWith('.json'))
-    return '/icons/text-document.png';
+    return '/icons/text-document.svg';
   if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.bmp'))
-    return '/icons/image-file.png';
-  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg')) return '/icons/audio-file.png';
-  if (lower.endsWith('.bkapp')) return '/icons/package.png';
-  return '/icons/document.png';
+    return '/icons/image-file.svg';
+  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg')) return '/icons/audio-file.svg';
+  if (lower.endsWith('.mp4') || lower.endsWith('.webm') || lower.endsWith('.mov') || lower.endsWith('.mkv') || lower.endsWith('.avi')) return '/icons/video-file.svg';
+  if (lower.endsWith('.bkapp')) return '/icons/package.svg';
+  return '/icons/document.svg';
 }
 
 export function formatSize(bytes: number): string {
@@ -52,9 +53,9 @@ export function typeOf(name: string): string {
 }
 
 const QUICK_ACCESS: ReadonlyArray<{ label: string; path: string; icon: string }> = [
-  { label: 'Desktop', path: 'Desktop', icon: '/icons/folder.png' },
-  { label: 'Users', path: 'Users', icon: '/icons/folder.png' },
-  { label: 'Windows', path: 'Windows', icon: '/icons/folder.png' },
+  { label: 'Desktop', path: 'Desktop', icon: '/icons/folder.svg' },
+  { label: 'Users', path: 'Users', icon: '/icons/folder.svg' },
+  { label: 'Windows', path: 'Windows', icon: '/icons/folder.svg' },
 ];
 
 export interface ExplorerPaneProps {
@@ -228,7 +229,7 @@ export function ExplorerPane(props: ExplorerPaneProps): React.JSX.Element {
                 onClick={() => onNavigate('')}
                 title="Local Disk (C:)"
               >
-                <img className="sc-navpane-icon" src="/icons/local-disk.png" alt="" draggable={false} />
+                <img className="sc-navpane-icon" src="/icons/local-disk.svg" alt="" draggable={false} />
                 <span className="sc-navpane-label">Local Disk (C:)</span>
               </button>
             </div>

@@ -2,6 +2,7 @@ import type { DesktopAppInfo } from '@specter-core/contracts';
 import { SystemInfoApp } from './apps/SystemInfoApp';
 import { FileExplorerApp } from './apps/FileExplorerApp';
 import { ImageViewerApp } from './apps/ImageViewerApp';
+import { VideoViewerApp } from './apps/VideoViewerApp';
 import type { AppDefinition } from './types';
 
 /**
@@ -13,7 +14,7 @@ export const DEFAULT_APPS: AppDefinition[] = [
   {
     appId: 'system-info',
     name: 'System Information',
-    icon: '/icons/this-pc.png',
+    icon: '/icons/this-pc.svg',
     description: 'Kernel, processes and disk status',
     group: 'System',
     render: () => <SystemInfoApp />,
@@ -21,7 +22,7 @@ export const DEFAULT_APPS: AppDefinition[] = [
   {
     appId: 'file-explorer',
     name: 'File Explorer',
-    icon: '/icons/explorer.png',
+    icon: '/icons/explorer.svg',
     description: 'Browse the virtual disk',
     group: 'System',
     render: (args) => <FileExplorerApp initialPath={args?.path} />,
@@ -29,7 +30,7 @@ export const DEFAULT_APPS: AppDefinition[] = [
   {
     appId: 'command-prompt',
     name: 'Command Prompt',
-    icon: '/icons/cmd.png',
+    icon: '/icons/cmd.svg',
     description: 'Run the bundled Windows cmd.exe (real x86 PE) over the virtual disk',
     group: 'System',
     // Launch is special-cased in DesktopController: it runs the bundled
@@ -40,15 +41,23 @@ export const DEFAULT_APPS: AppDefinition[] = [
   {
     appId: 'image-viewer',
     name: 'Photos',
-    icon: '/icons/image-file.png',
+    icon: '/icons/photos.svg',
     description: 'View images from the virtual disk',
     group: 'Accessories',
     render: (args) => <ImageViewerApp initialFile={args?.path} />,
   },
   {
+    appId: 'video-viewer',
+    name: 'Video Player',
+    icon: '/icons/video-player.svg',
+    description: 'Play videos from the virtual disk',
+    group: 'Accessories',
+    render: (args) => <VideoViewerApp initialFile={args?.path} />,
+  },
+  {
     appId: 'windows-notepad',
     name: 'Notepad',
-    icon: '/icons/notepad.png',
+    icon: '/icons/notepad.svg',
     description: 'Run the bundled Windows notepad.exe with its MUI resources',
     group: 'System',
     // Launch is special-cased in DesktopController: it runs the bundled

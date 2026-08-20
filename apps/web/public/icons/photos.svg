@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <defs>
+    <linearGradient id="photoBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1d29"/>
+      <stop offset="1" stop-color="#0d0f15"/>
+    </linearGradient>
+    <linearGradient id="photoAccent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00B4D8"/>
+      <stop offset="1" stop-color="#0077B6"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="40" height="40" rx="6" fill="url(#photoBg)"/>
+  <circle cx="16" cy="14" r="4" fill="#FFD56B"/>
+  <path d="M4 36 L16 22 L22 28 L30 18 L38 30 L44 30 L44 38 Q44 44 38 44 L10 44 Q4 44 4 38 Z" fill="url(#photoAccent)" opacity="0.8"/>
+  <path d="M4 36 L16 22 L22 28 L30 18 L38 30 L44 30" fill="none" stroke="#00B4D8" stroke-width="1.5" stroke-linejoin="round"/>
+  <rect x="30" y="8" width="14" height="14" rx="3" fill="none" stroke="#00B4D8" stroke-width="1.5"/>
+  <circle cx="37" cy="15" r="1" fill="#00B4D8"/>
+  <rect x="33" y="19" width="8" height="2" rx="1" fill="#00B4D8" opacity="0.6"/>
+</svg>

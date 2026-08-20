@@ -37,14 +37,15 @@ const DESKTOP_DIR = 'Desktop';
 /** Return the real Windows file-type icon (extracted from the OS) for a desktop item. */
 function desktopFileIcon(name: string): string {
   const lower = name.toLowerCase();
-  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return '/icons/application.png';
+  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return '/icons/application.svg';
   if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.log') || lower.endsWith('.ini') || lower.endsWith('.json'))
-    return '/icons/text-document.png';
+    return '/icons/text-document.svg';
   if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.bmp'))
-    return '/icons/image-file.png';
-  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg')) return '/icons/audio-file.png';
-  if (lower.endsWith('.bkapp')) return '/icons/package.png';
-  return '/icons/document.png';
+    return '/icons/image-file.svg';
+  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg')) return '/icons/audio-file.svg';
+  if (lower.endsWith('.mp4') || lower.endsWith('.webm') || lower.endsWith('.mov') || lower.endsWith('.mkv') || lower.endsWith('.avi')) return '/icons/video-file.svg';
+  if (lower.endsWith('.bkapp')) return '/icons/package.svg';
+  return '/icons/document.svg';
 }
 
 /** Full Windows-style desktop: wallpaper, icons, windows, taskbar, start menu. */
@@ -309,7 +310,7 @@ export function Desktop({ controller }: DesktopProps) {
               onContextMenu={(e) => openItemMenu(e, item.name)}
             >
                             {isDir ? (
-                <img className="sc-desktop-icon-img" src="/icons/folder.png" alt="" draggable={false} />
+                <img className="sc-desktop-icon-img" src="/icons/folder.svg" alt="" draggable={false} />
               ) : (
                 <img className="sc-desktop-icon-img" src={desktopFileIcon(item.name)} alt="" draggable={false} />
               )}

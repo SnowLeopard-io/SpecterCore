@@ -109,11 +109,11 @@ function reactContent(node: ReactNode): WindowContent {
 /** Real icon for a hosted guest window, chosen from the exe's name. */
 function guestIconFor(name: string): string {
   const lower = name.toLowerCase();
-  if (lower.includes('notepad')) return '/icons/notepad.png';
-  if (lower.includes('cmd') || lower.includes('command') || lower.includes('console')) return '/icons/cmd.png';
-  if (lower.includes('explorer')) return '/icons/explorer.png';
-  if (lower.includes('paint') || lower.includes('photo') || lower.includes('image')) return '/icons/image-file.png';
-  return '/icons/application.png';
+  if (lower.includes('notepad')) return '/icons/notepad.svg';
+  if (lower.includes('cmd') || lower.includes('command') || lower.includes('console')) return '/icons/cmd.svg';
+  if (lower.includes('explorer')) return '/icons/explorer.svg';
+  if (lower.includes('paint') || lower.includes('photo') || lower.includes('image')) return '/icons/image-file.svg';
+  return '/icons/application.svg';
 }
 
 /** Map a virtual-disk store path to a Windows path the guest understands. */
@@ -219,16 +219,20 @@ export class DesktopControllerImpl implements DesktopController {
       icon: app.icon,
       width:
         app.appId === 'file-explorer'
-          ? 660
+          ? 760
           : app.appId === 'image-viewer'
-            ? 640
-            : 520,
+            ? 720
+            : app.appId === 'video-viewer'
+              ? 800
+              : 680,
       height:
         app.appId === 'file-explorer'
-          ? 460
+          ? 500
           : app.appId === 'image-viewer'
-            ? 460
-            : 380,
+            ? 500
+            : app.appId === 'video-viewer'
+              ? 540
+              : 460,
       content: reactContent(app.render(args)),
       appId: app.appId,
     });
@@ -354,7 +358,7 @@ export class DesktopControllerImpl implements DesktopController {
           title: opts.title || (kind === 'open' ? 'Open' : 'Save As'),
           width: 620,
           height: 460,
-          icon: '/icons/explorer.png',
+          icon: '/icons/explorer.svg',
           resizable: true,
           appId: 'file-dialog',
           content: reactContent(
@@ -707,7 +711,7 @@ export class DesktopControllerImpl implements DesktopController {
       title: source.name,
       width: 680,
       height: 420,
-      icon: '/icons/cmd.png',
+      icon: '/icons/cmd.svg',
       resizable: true,
       appId: 'guest-console',
       content: reactContent(

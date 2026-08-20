@@ -5,7 +5,7 @@ export interface WindowManagerOptions {
   defaultWindowSize?: { width?: number; height?: number };
 }
 
-const DEFAULT_WINDOW = { width: 560, height: 420 };
+const DEFAULT_WINDOW = { width: 720, height: 480 };
 
 /**
  * Framework-agnostic window manager (design doc 6.2/6.3).

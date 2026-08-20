@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <defs>
+    <linearGradient id="wavBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E8E8E8"/>
+    </linearGradient>
+  </defs>
+  <path d="M12 6 L30 6 L38 14 L38 42 Q38 44 36 44 L12 44 Q10 44 10 42 L10 8 Q10 6 12 6 Z" fill="url(#wavBg)" stroke="#CCCCCC" stroke-width="0.5"/>
+  <path d="M30 6 L38 14 L32 14 Q30 14 30 12 Z" fill="#D0D0D0"/>
+  <circle cx="24" cy="28" r="7" fill="#9C27B0"/>
+  <circle cx="24" cy="28" r="4" fill="#FFFFFF"/>
+  <circle cx="24" cy="28" r="1.5" fill="#9C27B0"/>
+  <rect x="14" y="38" width="10" height="5" rx="1" fill="#9C27B0"/>
+  <text x="19" y="42" font-family="Segoe UI, sans-serif" font-size="3.5" font-weight="bold" fill="#FFF" text-anchor="middle">WAV</text>
+</svg>

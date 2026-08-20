@@ -16,6 +16,8 @@ const TEXT_EXTENSIONS = new Set([
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico']);
 
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi', 'mp3', 'wav']);
+
 /** 是否为可用记事本打开的文本文件。 */
 export function isTextFile(name: string): boolean {
   const dot = name.lastIndexOf('.');
@@ -30,6 +32,13 @@ export function isImageFile(name: string): boolean {
   return IMAGE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
 }
 
+/** 是否为视频文件（视频播放器可打开）。 */
+export function isVideoFile(name: string): boolean {
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) return false;
+  return VIDEO_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+}
+
 /**
  * 根据文件名推断关联的应用。
  * 返回 null 表示当前没有注册的应用可打开该文件（调用方可回退到预览等）。
@@ -37,8 +46,8 @@ export function isImageFile(name: string): boolean {
  * （真实 guest 进程 / 安装），不走应用注册表，这里返回 null。
  */
 export function appForFile(name: string): string | null {
-  const lower = name.toLowerCase();
   if (isImageFile(name)) return 'image-viewer';
+  if (isVideoFile(name)) return 'video-viewer';
   // Text files open in the REAL bundled Windows notepad.exe (windows-notepad,
   // launched via DesktopController). The old TS-simulated NotepadApp is gone.
   if (isTextFile(name)) return 'windows-notepad';
