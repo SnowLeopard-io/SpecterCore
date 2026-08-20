@@ -1,45 +1,49 @@
 # SpecterCore — Architecture
 
-> SpecterCore 在浏览器中通过 WASM + HLE（高级别模拟）运行 Windows x86 应用。
-> 本文件描述代码仓库的分层架构、解耦机制与扩展指南。
+> SpecterCore runs Windows x86 applications in the browser through WASM + high-level emulation (HLE).
+> This document describes the repository's layered architecture, the decoupling mechanisms, and how to extend it.
 
-## 分层一览
+## Layer overview
 
-仓库以 `packages/*` 反映设计文档的六层架构，`apps/web` 为浏览器入口。
+The repository mirrors the six-layer design in the `packages/*` directories; `apps/web` is the browser entry point.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ apps/web (Vite)  ─ 引导：组装 Kernel + 各层插件 + 挂载桌面     │
+│ apps/web (Vite)  ─ bootstrap: assemble Kernel + layer plugins    │
 ├─────────────────────────────────────────────────────────────┤
-│ L6  packages/ui         桌面外壳：窗口管理器 / 任务栏 / 开始菜单 │
-│ L4  packages/drivers    USB 驱动模型(IRP/URB) / PnP / 显示驱动  │
-│ L3  packages/core       进程/内存/内核对象 / API 拦截 / PE/JIT │
-│ L2  packages/bridges    FS/GDI/音频/USB 桥接（Win32 语义）     │
-│ L1  packages/host       OPFS / Worker 池 / WebUSB/GPU/Audio   │
-│     packages/kernel     DI 容器 / 事件总线 / 插件系统 / 生命周期 │
-│     packages/contracts  层间接口契约 + DI 令牌（唯一事实来源）   │
-│     packages/shared     跨层无框架工具（路径/通配符/异步）       │
+│ L6  packages/ui        Desktop shell: window manager / taskbar / start menu │
+│ L4  packages/drivers   USB driver model (IRP/URB) / PnP / display driver    │
+│ L3  packages/core      Process / memory / kernel objects / API interceptor / PE+JIT │
+│ L2  packages/bridges   FS / GDI / audio / USB bridging (Win32 semantics)    │
+│ L1  packages/host      OPFS / worker pool / WebUSB / WebGPU / WebAudio       │
+│     packages/kernel    DI container / event bus / plugin system / lifecycle  │
+│     packages/contracts Cross-layer interface contracts + DI tokens (single source of truth) │
+│     packages/shared    Framework-agnostic utilities (paths / wildcards / async)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 三条解耦机制
+Layer dependency order: `host → bridges → core → drivers → ui`, wired by the `Kernel` in `dependsOn` topological order.
 
-1. **契约优先（contracts-first）**
-   `@specter-core/contracts` 只含类型/枚举/常量，零实现。所有包只依赖它（+ `shared`）。
-   任一层换实现（如 `NullGdiBridge` → `CanvasGdiBridge`）都不影响其他层。
+## The three decoupling mechanisms
 
-2. **DI 令牌（tokens）**
-   `contracts/src/tokens.ts` 集中定义服务令牌。各层插件在 `setup()` 中
-   `container.registerInstance(tokens.xxx, impl)`，依赖方 `container.resolve(tokens.xxx)`。
-   层与层之间唯一的耦合点就是这些令牌——这就是扩展点。
+1. **Contracts-first**
+   `@specter-core/contracts` contains only types / enums / constants — zero implementation. Every package
+   depends on it (plus `shared`). Swapping a layer's implementation (e.g. `NullGdiBridge` → `CanvasGdiBridge`)
+   never touches another layer.
 
-3. **事件总线（event bus）**
-   `contracts/src/events.ts` 定义全系统事件表（USB 插拔、进程创建/退出、窗口事件…）。
-   层间通信只发事件，不互相 import。新事件加进事件表即可被任意层订阅。
+2. **DI tokens**
+   `contracts/src/tokens.ts` centrally defines the service tokens. Each layer plugin registers its
+   implementations in `setup()` via `container.registerInstance(tokens.xxx, impl)`; consumers resolve them with
+   `container.resolve(tokens.xxx)`. Tokens are the only coupling point between layers — and the extension point.
 
-## 插件生命周期
+3. **Event bus**
+   `contracts/src/events.ts` defines the system-wide event table (USB plug/unplug, process create/exit, window
+   events, …). Layers only publish events — they never import another layer to send a message. New events added
+   to the table can be subscribed by any layer.
 
-每个逻辑层是一个 `Plugin`（`contracts/kernel.ts`），Kernel 按 `dependsOn` 拓扑排序执行：
+## Plugin lifecycle
+
+Each logical layer is a `Plugin` (`contracts/kernel.ts`). The `Kernel` sorts them topologically by `dependsOn`
 
 ```
 host.layer → bridge.layer → core.layer → driver.layer → ui.layer
@@ -48,64 +52,64 @@ host.layer → bridge.layer → core.layer → driver.layer → ui.layer
 ```
 new Kernel({...})
   .use(HostLayerPlugin).use(BridgeLayerPlugin)…  // or plugins: [...]
-await kernel.init();   // setup: 注册服务、建立事件订阅
-await kernel.start();  // start: 启动硬件适配器（USB 监听等）
-await kernel.stop();   // 逆序 stop → 清空容器与事件总线
+await kernel.init();   // setup: register services, wire event subscriptions
+await kernel.start();  // start: spin up hardware adapters (USB listener, etc.)
+await kernel.stop();   // stop in reverse dependency order → dispose container + event bus
 ```
 
-## 端口与适配器（Ports & Adapters）
+## Ports & Adapters
 
-契约即端口，浏览器实现与测试实现都是适配器，可互换：
+A contract is a port; the browser implementation and the test implementation are interchangeable adapters:
 
-- `FileStore`（`contracts/host.ts`）
-  - 浏览器适配器：`OpfsFileStore`（`@specter-core/host`）
-  - 测试适配器：`MemoryFileStore`（`@specter-core/host`，纯内存）
-  - 上层 `FileSystemBridgeImpl` 完全不知道底层是哪种。
+- `FileStore` (`contracts/host.ts`)
+  - Browser adapter: `OpfsFileStore` (`@specter-core/host`)
+  - Test adapter: `MemoryFileStore` (`@specter-core/host`, pure in-memory)
+  - The upper `FileSystemBridgeImpl` is completely agnostic to which one is wired.
 
-## Win32 语义桥接
+## Win32 semantic bridging
 
-`@specter-core/bridges/fs.ts` 是 P0 里最完整的一条链路：
+`@specter-core/bridges/fs.ts` is the most complete end-to-end chain:
 
 ```
 CreateFile/ReadFile/WriteFile/SetFilePointer/FindFirstFile/…
-        │  (Win32 错误码、句柄表、共享模式、通配符)
+        │  (Win32 error codes, handle table, share modes, wildcards)
         ▼
-      FileStore（OPFS 或内存虚拟硬盘）
+      FileStore (OPFS or in-memory virtual disk)
 ```
 
-## 插件扩展指南
+## Plugin extension guide
 
-| 想做什么 | 怎么做 |
-| -------- | ------ |
-| 新的文件后端 | 实现 `FileStore`，注册到 `tokens.hostFileStore` |
-| 新的图形后端 | 实现 `GdiBridge`，注册到 `tokens.bridgeGdi` |
-| 新的 USB 类驱动 | 实现 `UsbDriver`，`registry.register(driver)` |
-| 新的桌面应用 | 在 `@specter-core/ui/src/apps.ts` 加一个 `AppDefinition` |
-| 新的 Windows API | `interceptor.hook('module.dll','Proc',handler)` |
-| 替换任意层实现 | 写自己的 Plugin 注册同令牌即可覆盖（后注册覆盖） |
+| What you want to do            | How |
+| ------------------------------ | --- |
+| New file backend               | implement `FileStore`, register at `tokens.hostFileStore` |
+| New graphics backend           | implement `GdiBridge`, register at `tokens.bridgeGdi` |
+| New USB class driver           | implement `UsbDriver`, `registry.register(driver)` |
+| New desktop app                | add an `AppDefinition` in `@specter-core/ui/src/apps.tsx` |
+| New Windows API                | `interceptor.hook('module.dll','Proc',handler)` |
+| Replace any layer implementation | write your own plugin registering the same token (last registered wins) |
 
-## 性能指标映射
+## Performance metric anchors
 
-设计文档 7.1 的指标已在契约层预留锚点：
+Design-doc section 7.1 metrics are pre-placed in the contract layer:
 
-- JIT 编译吞吐量 → `JitEngine.getStats()`
-- 系统调用延迟 → `ApiInterceptorImpl.dispatch()` 计时
-- 内存占用 → `MemoryManagerImpl` 区域统计 + `WasmRuntime`
-- 帧率 → `DisplayDriver.onVsync` / `GpuAdapter.onFrame`
+- JIT compile throughput → `JitEngine.getStats()`
+- Syscall latency → `ApiInterceptorImpl.dispatch()` timing
+- Memory usage → `MemoryManagerImpl` region stats + `WasmRuntime`
+- Frame rate → `DisplayDriver.onVsync` / `GpuAdapter.onFrame`
 
-## 里程碑
+## Milestones
 
-- P0（本次交付）：全部骨架可运行，`pnpm test/build/lint` 通过。
-- P1：PE 加载 + JIT（`wasm/` 工具链落地）。
-- 后续：见 `设计文档.md` 第十部分。
+- P0: full skeleton runnable — `pnpm test/build/lint` pass.
+- P1: PE loading + x86 JIT — delivered (see the table in the [README](../README.md)).
+- Ongoing: see the [development/handover log](PROGRESS.md).
 
-## 相关命令
+## Related commands
 
 ```bash
-pnpm install        # 安装依赖
-pnpm dev            # 启动 Vite 开发服务器（含 COOP/COEP 头）
-pnpm test           # Vitest 单元测试
-pnpm typecheck      # 全仓 TypeScript 检查
+pnpm install        # install dependencies
+pnpm dev            # start the Vite dev server (COOP/COEP headers)
+pnpm test           # Vitest unit tests
+pnpm typecheck      # workspace-wide TypeScript check
 pnpm lint           # ESLint
-pnpm build          # 构建可部署静态站点（apps/web/dist）
+pnpm build          # build the deployable static site (apps/web/dist)
 ```

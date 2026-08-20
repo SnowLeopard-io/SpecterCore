@@ -83,22 +83,29 @@ export const BUILTIN_IMAGE_FILES: Array<{ url: string; storePath: string }> = [
 const provisionInFlight = new Set<string>();
 
 /**
- * Make sure `path` exists as a directory. If a stale file entry is sitting
- * there (can happen if a previous provisioning run was interrupted and the
- * openFile write landed on the parent path by mistake), delete it first and
- * create the directory fresh. This is the self-heal path the background
- * music/image provision runs at every boot.
+ * Walk the full path, creating every missing segment as a directory. If a
+ * stale file entry is sitting at any segment (can happen if a previous
+ * provisioning run was interrupted and openFile write landed on the parent
+ * path), delete it and recreate the directory. This is the self-heal path
+ * the background music/image provision runs at every boot, and the safest
+ * single call to guarantee `path` exists as a directory before anything
+ * tries to write files underneath.
  */
 async function ensureDirectory(fs: FileStore, path: string): Promise<void> {
-  const existing = await fs.stat(path).catch(() => null);
-  if (existing && existing.kind === 'file') {
-    console.warn(`[specter-core] replacing stale file with directory: ${path}`);
-    await fs.deleteFile(path);
-  }
-  try {
-    await fs.createDirectory(path);
-  } catch (err) {
-    console.warn(`[specter-core] ensureDirectory failed for ${path}: ${String(err)}`);
+  const segs = path.split('/').filter(Boolean);
+  let cur = '';
+  for (const s of segs) {
+    cur = cur ? `${cur}/${s}` : s;
+    const existing = await fs.stat(cur).catch(() => null);
+    if (existing && existing.kind === 'file') {
+      console.warn(`[specter-core] replacing stale file with directory: ${cur}`);
+      await fs.deleteFile(cur);
+    }
+    try {
+      await fs.createDirectory(cur);
+    } catch (err) {
+      console.warn(`[specter-core] ensureDirectory failed for ${cur}: ${String(err)}`);
+    }
   }
 }
 

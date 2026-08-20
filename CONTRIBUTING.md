@@ -37,14 +37,14 @@ packages/
   ui            L6: React desktop shell, window manager, apps
 ```
 
-Layer dependencies follow the design doc: each package may only depend on
-`@specter-core/contracts` and the layers below it. See `设计文档.md` for the full spec.
+Layer dependencies follow the design in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): each package may
+only depend on `@specter-core/contracts` and the layers below it.
 
 ## Code style
 
 - TypeScript strict; run `pnpm typecheck` before pushing.
 - ESLint (`pnpm lint`) with the repository config; keep it at 0 errors.
-- UI text and comments are written in English; the design doc stays in Chinese.
+- UI text, comments, and all documentation are written in English.
 - No emoji in generated content unless the user explicitly requests it.
 
 ## Testing
@@ -72,7 +72,7 @@ Before opening a PR:
 
 1. Run `pnpm lint` and fix all errors.
 2. Run `pnpm typecheck` and `pnpm test` — all green.
-3. Update `设计文档.md` checkboxes for any requirement you completed.
+3. Update the milestone table in `docs/PROGRESS.md` if your change moves a milestone forward.
 4. Keep PRs focused on a single layer or feature.
 
 ## Branching and CI

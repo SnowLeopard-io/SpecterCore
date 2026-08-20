@@ -6,7 +6,7 @@ SpecterCore is a browser-based Windows compatibility layer that executes unmodif
 
 The project is currently at the **P1 milestone**: the PE loader, the x86 → WASM basic-block JIT, the `int 0x2E` trap dispatcher, and the API interceptor are wired end-to-end. `pnpm run:exe` runs a hand-assembled PE32 (`sample/hello.exe`) headless and prints its stdout; the L6 desktop shell can also launch and run a real `notepad.exe` (copied from Windows `SysWOW64`).
 
-See the [design doc](设计文档.md) and [architecture notes](docs/ARCHITECTURE.md) for the full spec.
+See the [architecture notes](docs/ARCHITECTURE.md) and the live [development/handover log](docs/PROGRESS.md) for the full spec.
 
 ---
 
@@ -305,8 +305,6 @@ scripts/       Dev tools: run-exe (headless PE runner), build-sample-exe, diag-*
 
 ## Browser Requirements
 
-(per the design doc, sections 1.1 / 1.2 / 1.6)
-
 - **Chromium ≥ 120** (Chrome / Edge) — for OPFS, WebGPU, and AudioWorklet support.
 - **Secure context** — the page must be served over `https://` or `http://localhost`. SpecterCore refuses to boot otherwise (`assertSecureContext`), because OPFS, WebUSB, and AudioWorklet all require a secure context.
 - **Cross-origin isolation** — the dev server sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`, which enables `SharedArrayBuffer` for cross-worker shared memory.
@@ -327,9 +325,9 @@ The test suite covers the PE loader round-trip, the x86 decoder against hand-cra
 | Stage | Goal | Status |
 |-------|------|--------|
 | P0 | Infrastructure + six-layer skeleton | ✅ Delivered |
-| P1 | PE loading + x86 JIT translation (wasm/ toolchain) | 🔶 Core complete: PE32 load/map + IAT trap-stub rewrite + x86→WASM basic-block JIT + executor + trap→API interceptor end-to-end. `pnpm run:exe` runs a PE headless and prints stdout/exit code; the L6 desktop can launch `notepad.exe`. |
-| P2 | L2 filesystem bridge runs console programs end-to-end | ⬜ |
-| P3 | Graphics bridge + L6 desktop running notepad.exe with full paint | ⬜ |
+| P1 | PE loading + x86 JIT translation | ✅ Delivered: PE32/PE32+ load + map + IAT trap-stub rewrite + x86→WASM basic-block JIT + executor + trap→API interceptor end-to-end. `pnpm run:exe` runs a PE headless; the L6 desktop launches real `notepad.exe`. |
+| P2 | Real GUI/console programs run in the browser | 🔶 In progress: a real `notepad.exe` (SysWOW64 x86) reaches a clean exit and drives its WndProc / GUI window tree; `cmd.exe` is being brought up (currently at the command-parsing stage). See [docs/PROGRESS.md](docs/PROGRESS.md). |
+| P3 | Graphics bridge + L6 desktop running notepad.exe with full paint | 🔶 Partial: a generic GDI bridge layer (software rasterizer + paint-command capture) plus an L6 "guest window" panel are implemented; WndProc-side host rendering is not yet bitmap-level. |
 | P4–P7 | Audio / 3D (WebGPU) / USB passthrough / perf targets | ⬜ |
 
 ## License
