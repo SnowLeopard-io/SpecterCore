@@ -44,64 +44,6 @@ import type { AppDefinition, UiController } from './types';
 
 const INSTALLED_PREFIX = 'installed:';
 
-/**
- * Runtime formatting probes for the bundled cmd.exe (ported from
- * scripts/diag-trap.ts, progress.md Bug18/Bug19). These JIT workarounds need
- * live registers/memory, so they run per-block from onStep instead of being
- * static `patches`. Without them cmd's dir formatters either skip padding or
- * mis-place the digit-group separator; with them the listing spacing is sane.
- */
-function cmdFormatProbes(): Array<{ eip: number; fn: (rt: WasmRuntimeImpl) => void }> {
-  const rd32 = (rt: WasmRuntimeImpl, a: number): number => {
-    const b = rt.readBytes(a >>> 0, 4);
-    return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
-  };
-  return [
-    {
-      // Space-padding formatter entry (Bug19): when called from the time->size
-      // gap (ret 0x430e52, 4 spaces) or size->name gap (ret 0x405b52, 2 spaces),
-      // the savedLen at [ecx+8] is stale, so the padding comparison skips the
-      // fill. Recompute the actual string length and write the gap + NUL +
-      // updated savedLen directly.
-      eip: 0x42e327,
-      fn: (rt) => {
-        const ecx = rt.getReg('ecx') >>> 0;
-        const esp = rt.getReg('esp') >>> 0;
-        const retAddr = rd32(rt, esp) >>> 0;
-        if (retAddr === 0x430e52 || retAddr === 0x405b52) {
-          const bufPtr = rd32(rt, ecx + 0x10) >>> 0;
-          let actualLen = 0;
-          for (let i = 0; i < 300; i++) {
-            const ch = rd32(rt, bufPtr + i * 2) & 0xffff;
-            if (ch === 0) break;
-            actualLen++;
-          }
-          const numSpaces = retAddr === 0x430e52 ? 4 : 2;
-          const space = new Uint8Array(2);
-          new DataView(space.buffer).setUint16(0, 0x20, true);
-          for (let i = 0; i < numSpaces; i++) rt.writeBytes(bufPtr + (actualLen + i) * 2, space);
-          rt.writeBytes(bufPtr + (actualLen + numSpaces) * 2, new Uint8Array(2));
-          const len = new Uint8Array(4);
-          new DataView(len.buffer).setUint32(0, actualLen + numSpaces, true);
-          rt.writeBytes(ecx + 8, len);
-        }
-      },
-    },
-    {
-      // 64-bit number formatter (Bug18): force the digit-group separator length
-      // to 1 — the wcslen in this build returns a wrong value here and the JIT
-      // format loop mis-positions the separator otherwise.
-      eip: 0x4317b4,
-      fn: (rt) => {
-        const ebp = rt.getReg('ebp') >>> 0;
-        const b = new Uint8Array(4);
-        new DataView(b.buffer).setUint32(0, 1, true);
-        rt.writeBytes((ebp - 0xd8) >>> 0, b);
-      },
-    },
-  ];
-}
-
 function reactContent(node: ReactNode): WindowContent {
   return { kind: 'react', render: (_controller: UiController) => node };
 }
@@ -743,7 +685,6 @@ export class DesktopControllerImpl implements DesktopController {
         commandLine: '',
         interactive: true,
         cwd: source.cwd,
-        probes: cmdFormatProbes(),
         // Neutralize cmd.exe's __security_check_cookie (VA 0x41dea0): the
         // interactive input reader overflows the stack cookie slot by a few
         // bytes (a JIT string-instruction boundary quirk), which otherwise

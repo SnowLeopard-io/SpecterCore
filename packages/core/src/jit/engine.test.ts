@@ -167,3 +167,73 @@ describe('JitEngine status contract', () => {
     expect(trap.entry!()).toBe(STATUS_TRAP);
   });
 });
+describe('shift CF correctness (dir padding regression)', () => {
+  it('shr reg,1 sets CF from bit0 (odd -> CF=1)', async () => {
+    const { runtime, jit } = makeEngine();
+    // mov ecx,13; shr ecx,1; hlt
+    const code = hex(0xb9, 0x0d, 0x00, 0x00, 0x00, 0xd1, 0xe9, 0xf4);
+    runtime.writeBytes(0x100000, code);
+    const executor = new Executor(runtime, jit);
+    runtime.setEip(0x100000);
+    runtime.setEflags(0x2);
+    await executor.run(0x100000);
+    expect(runtime.getReg('ecx')).toBe(6);
+    expect(runtime.getEflags() & 1).toBe(1);
+  });
+
+  it('shr reg,1 sets CF from bit0 (even -> CF=0)', async () => {
+    const { runtime, jit } = makeEngine();
+    // mov ecx,12; shr ecx,1; hlt
+    const code = hex(0xb9, 0x0c, 0x00, 0x00, 0x00, 0xd1, 0xe9, 0xf4);
+    runtime.writeBytes(0x100000, code);
+    const executor = new Executor(runtime, jit);
+    runtime.setEip(0x100000);
+    runtime.setEflags(0x2);
+    await executor.run(0x100000);
+    expect(runtime.getReg('ecx')).toBe(6);
+    expect(runtime.getEflags() & 1).toBe(0);
+  });
+
+  it('sar reg,1 sets CF from bit0', async () => {
+    const { runtime, jit } = makeEngine();
+    // mov ecx,13; sar ecx,1; hlt
+    const code = hex(0xb9, 0x0d, 0x00, 0x00, 0x00, 0xd1, 0xf9, 0xf4);
+    runtime.writeBytes(0x100000, code);
+    const executor = new Executor(runtime, jit);
+    runtime.setEip(0x100000);
+    runtime.setEflags(0x2);
+    await executor.run(0x100000);
+    expect(runtime.getReg('ecx')).toBe(6);
+    expect(runtime.getEflags() & 1).toBe(1);
+  });
+
+  it('shr reg,2 sets CF from bit1', async () => {
+    const { runtime, jit } = makeEngine();
+    // mov ecx,13; shr ecx,2; hlt  -> 13>>2=3, CF=bit1(13)=0
+    const code = hex(0xb9, 0x0d, 0x00, 0x00, 0x00, 0xc1, 0xe9, 0x02, 0xf4);
+    runtime.writeBytes(0x100000, code);
+    const executor = new Executor(runtime, jit);
+    runtime.setEip(0x100000);
+    runtime.setEflags(0x2);
+    await executor.run(0x100000);
+    expect(runtime.getReg('ecx')).toBe(3);
+    expect(runtime.getEflags() & 1).toBe(0);
+  });
+
+  it('shl reg,1 sets CF from bit31', async () => {
+    const { runtime, jit } = makeEngine();
+    // mov eax,0x80000000; shl eax,1; hlt -> CF=1
+    const code = hex(
+      0xb8, 0x00, 0x00, 0x00, 0x80, // mov eax,0x80000000
+      0xd1, 0xe0, // shl eax,1
+      0xf4,
+    );
+    runtime.writeBytes(0x100000, code);
+    const executor = new Executor(runtime, jit);
+    runtime.setEip(0x100000);
+    runtime.setEflags(0x2);
+    await executor.run(0x100000);
+    expect(runtime.getReg('eax')).toBe(0);
+    expect(runtime.getEflags() & 1).toBe(1);
+  });
+});

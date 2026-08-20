@@ -203,11 +203,23 @@ async function main(): Promise<void> {
   console.error(listing);
   console.error('----------------------');
   // Checks: digit-group separators present for 1,024 / 1,234,567; no
-  // overflowing concatenated sizes; the file names appear.
+  // overflowing concatenated sizes; the file names appear. The weird-digit
+  // check runs on the listing only (the cmd banner version string
+  // 10.0.32768.1819033888 contains 5+ digit runs but is cosmetic).
   const hasSep1024 = /\b1,024\b/.test(clean) || /\b1024\b/.test(clean);
   const hasSepBig = /\b1,234,567\b/.test(clean) || /\b1234567\b/.test(clean);
   const hasNames = clean.includes('b-999.txt') && clean.includes('c-1024.txt') && clean.includes('d-4096.txt') && clean.includes('e-99k.txt') && clean.includes('big-file.txt') && clean.includes('a.txt');
-  const weird = /\d{5,}/.test(clean); // a 5+ digit run with no separator = broken grouping
+  const weird = /\d{5,}/.test(listing); // a 5+ digit run with no separator = broken grouping
+  if (weird) {
+    const re = /\d{5,}/g;
+    let m: RegExpExecArray | null;
+    let shown = 0;
+    while ((m = re.exec(clean)) !== null && shown < 5) {
+      const s = Math.max(0, m.index - 24);
+      console.error(`[diag] weird-digit "${m[0]}" ctx=${JSON.stringify(clean.slice(s, m.index + m[0].length + 12))}`);
+      shown++;
+    }
+  }
   const ok = hasNames && !weird;
   console.error(`[diag] probes=${NO_PROBES ? 'OFF' : 'ON'} gsPatch=${NO_GS ? 'OFF' : 'ON'} bug18=${NO_BUG18 ? 'OFF' : 'ON'} bug19=${NO_BUG19 ? 'OFF' : 'ON'} names=${hasNames} noWeirdDigits=${!weird} sep1024=${hasSep1024} sepBig=${hasSepBig}`);
   console.error(`[diag] dir format check ${ok ? 'PASS' : 'FAIL'}`);

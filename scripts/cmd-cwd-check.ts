@@ -102,48 +102,11 @@ async function main(): Promise<void> {
     interceptor,
   );
 
-  // Runtime formatting probes ported from scripts/diag-trap.ts (Bug18/19):
-  // without them cmd's dir/echo formatters hit JIT bugs and never emit output.
-  const probes = [
-    {
-      eip: 0x42e327,
-      fn: (rt: WasmRuntimeImpl) => {
-        const rd32 = (a: number): number => {
-          const b = rt.readBytes(a >>> 0, 4);
-          return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
-        };
-        const ecx = rt.getReg('ecx') >>> 0;
-        const esp = rt.getReg('esp') >>> 0;
-        const retAddr = rd32(esp) >>> 0;
-        if (retAddr === 0x430e52 || retAddr === 0x405b52) {
-          const bufPtr = rd32(ecx + 0x10) >>> 0;
-          let actualLen = 0;
-          for (let i = 0; i < 300; i++) {
-            const ch = rd32(bufPtr + i * 2) & 0xffff;
-            if (ch === 0) break;
-            actualLen++;
-          }
-          const numSpaces = retAddr === 0x430e52 ? 4 : 2;
-          const space = new Uint8Array(2);
-          new DataView(space.buffer).setUint16(0, 0x20, true);
-          for (let i = 0; i < numSpaces; i++) rt.writeBytes(bufPtr + (actualLen + i) * 2, space);
-          rt.writeBytes(bufPtr + (actualLen + numSpaces) * 2, new Uint8Array(2));
-          const len = new Uint8Array(4);
-          new DataView(len.buffer).setUint32(0, actualLen + numSpaces, true);
-          rt.writeBytes(ecx + 8, len);
-        }
-      },
-    },
-    {
-      eip: 0x4317b4,
-      fn: (rt: WasmRuntimeImpl) => {
-        const ebp = rt.getReg('ebp') >>> 0;
-        const b = new Uint8Array(4);
-        new DataView(b.buffer).setUint32(0, 1, true);
-        rt.writeBytes((ebp - 0xd8) >>> 0, b);
-      },
-    },
-  ];
+  // Session 17: the old Bug18/Bug19 formatting probes (0x42e327 padding,
+  // 0x4317b4 separator) are REMOVED — the JIT shift-CF operand-order bug
+  // (codegen.ts emitShift) that made them necessary was fixed, and cmd's
+  // dir/echo formatters now emit correctly formatted output on their own.
+  // Verified: BK_NO_PROBES=1 passes with identical output.
 
   setTimeout(() => runner.postInput('cd Windows\r\n'), 2000);
   setTimeout(() => runner.postInput('cd\r\n'), 2500);
@@ -157,7 +120,6 @@ async function main(): Promise<void> {
     interactive: true,
     cwd,
     patches: [{ va: 0x41dea0, bytes: [0xc3] }],
-    probes: process.env.BK_NO_PROBES === '1' ? undefined : probes,
     readFile: async (p: string) => {
       const segs = p.split(/[\\/]/).filter(Boolean);
       if (segs.length && /^[A-Za-z]:$/.test(segs[0]!)) segs.shift();

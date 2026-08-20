@@ -151,15 +151,6 @@ async function main(): Promise<void> {
           const b = rt.readBytes(a >>> 0, 4);
           return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
         };
-        const rw = (addr: number, max = 32): string => {
-          let s = '';
-          for (let i = 0; i < max; i++) {
-            const c = rd32(addr + i * 2) & 0xffff;
-            if (c === 0) break;
-            s += String.fromCharCode(c);
-          }
-          return s;
-        };
         const esp = rt.getReg('esp') >>> 0;
         const retAddr = rd32(esp) >>> 0;
         // the dst is in ecx? No — at ret, ecx is modified by the copy loop.
