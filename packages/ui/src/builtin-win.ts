@@ -46,10 +46,7 @@ export const BUILTIN_WIN_FILES: Array<{ url: string; storePath: string }> = [
  * default multimedia content (music / images / videos).
  */
 export const BUILTIN_MUSIC_FILES: Array<{ url: string; storePath: string }> = [
-  { url: 'media/music/Dream It Possible.mp3', storePath: 'Users/Public/Music/Dream It Possible.mp3' },
-  { url: 'media/music/Over the Horizon.mp3', storePath: 'Users/Public/Music/Over the Horizon.mp3' },
   { url: 'media/music/We Are The Brave.mp3', storePath: 'Users/Public/Music/We Are The Brave.mp3' },
-  { url: 'media/music/Windows95.mp3', storePath: 'Users/Public/Music/Windows95.mp3' },
 ];
 
 /**
@@ -65,18 +62,8 @@ export const BUILTIN_MUSIC_FILES: Array<{ url: string; storePath: string }> = [
  * See apps/web/public/media/README.md for the full guide.
  */
 
-/** Expand a contiguous `NN.jpg` sequence (01..14) into builtin image entries. */
-function imageRange(from: number, to: number): Array<{ url: string; storePath: string }> {
-  const out: Array<{ url: string; storePath: string }> = [];
-  for (let i = from; i <= to; i++) {
-    const name = `${String(i).padStart(2, '0')}.jpg`;
-    out.push({ url: `media/images/${name}`, storePath: `Users/Public/Pictures/${name}` });
-  }
-  return out;
-}
-
 export const BUILTIN_IMAGE_FILES: Array<{ url: string; storePath: string }> = [
-  ...imageRange(1, 14),
+  { url: 'media/images/space.jpg', storePath: 'Users/Public/Pictures/space.jpg' },
 ];
 
 /** Store paths currently being provisioned (dedupes concurrent writes). */
@@ -109,7 +96,35 @@ async function ensureDirectory(fs: FileStore, path: string): Promise<void> {
   }
 }
 
-/** Idempotent: writes each bundled file when missing/empty (fetch + write). */
+/**
+ * Fetch a bundled file with a few retries and exponential backoff. Large media
+ * downloads can be aborted (ERR_ABORTED) on slow or flaky connections, so a
+ * transient failure is retried instead of silently skipping the file.
+ */
+async function fetchWithRetry(url: string, maxAttempts = 3): Promise<Uint8Array> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return new Uint8Array(await res.arrayBuffer());
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 2 ** (attempt - 1) * 500));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Idempotent: writes each bundled file when missing/empty (fetch + write).
+ * Single-file fault isolation: a download/write failure for one file is logged
+ * and only skips that file (with retries) — it never aborts the rest of the
+ * list, so an interrupted fetch along a slow CDN can't strand the default
+ * music/images and prevent the remaining folders from being provisioned.
+ */
 async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePath: string }>): Promise<void> {
   for (const f of files) {
     // Dedupe concurrent provisions of the same path (e.g. the background boot
@@ -134,12 +149,7 @@ async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePa
         // missing directory tree or other FS error — rewrite below
       }
       if (existing && existing.kind === 'file' && existing.size > 0) continue;
-      const res = await fetch(f.url);
-      if (!res.ok) {
-        console.warn(`[specter-core] builtin fetch failed ${f.url}: ${res.status}`);
-        continue;
-      }
-      const data = new Uint8Array(await res.arrayBuffer());
+      const data = await fetchWithRetry(f.url);
       const file = await fs.openFile(f.storePath, 'write');
       try {
         await file.write(0, data);
@@ -147,6 +157,8 @@ async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePa
         await file.close();
       }
       console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
+    } catch (err) {
+      console.warn(`[specter-core] provision failed ${f.storePath}: ${String(err)}`);
     } finally {
       provisionInFlight.delete(f.storePath);
     }

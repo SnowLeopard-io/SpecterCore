@@ -35,7 +35,9 @@ At startup, `apps/web/src/bootstrap.ts` copies the files listed in
 
 All three run through `provisionBundledFilesInBackground()`, which the bootstrap
 **fires AFTER the desktop mounts** so a cold boot is never blocked by fetching
-and writing the ~40 MB of bundled content. On a first visit the Music/Pictures
+and writing the bundled content. Each file download is retried on transient
+failure and a single file's error never aborts the rest, so the Music/Pictures
+folders always end up populated. On a first visit the Music/Pictures
 folders may briefly appear empty while the background provisioning fills them;
 navigate away and back (or hit Refresh) to see the latest files. Guest apps
 (notepad/cmd) lazily re-ensure the win files if launched before provisioning
