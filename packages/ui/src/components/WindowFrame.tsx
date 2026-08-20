@@ -13,28 +13,28 @@ interface WindowFrameProps {
 }
 
 const MinimizeIcon = (
-  <svg viewBox="0 0 12 12" aria-hidden>
-    <line x1="2.5" y1="9" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+  <svg viewBox="0 0 10 10" aria-hidden>
+    <line x1="2" y1="7" x2="8" y2="7" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
   </svg>
 );
 
 const MaximizeIcon = (
-  <svg viewBox="0 0 12 12" aria-hidden>
-    <rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.1" />
+  <svg viewBox="0 0 10 10" aria-hidden>
+    <rect x="2" y="2" width="6" height="6" rx="0.5" fill="none" stroke="currentColor" strokeWidth="1" />
   </svg>
 );
 
 const RestoreIcon = (
-  <svg viewBox="0 0 12 12" aria-hidden>
-    <rect x="2.5" y="2.5" width="5.5" height="5.5" fill="none" stroke="currentColor" strokeWidth="1.1" />
-    <rect x="4" y="4" width="5.5" height="5.5" fill="var(--sc-titlebar)" stroke="currentColor" strokeWidth="1.1" />
+  <svg viewBox="0 0 10 10" aria-hidden>
+    <rect x="1.5" y="3" width="5" height="5" rx="0.5" fill="none" stroke="currentColor" strokeWidth="1" />
+    <path d="M3.5 3 V1.5 H8.5 V6.5 H7" fill="none" stroke="currentColor" strokeWidth="1" />
   </svg>
 );
 
 const CloseIcon = (
-  <svg viewBox="0 0 12 12" aria-hidden>
-    <line x1="3" y1="3" x2="9" y2="9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    <line x1="9" y1="3" x2="3" y2="9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+  <svg viewBox="0 0 10 10" aria-hidden>
+    <line x1="2.5" y1="2.5" x2="7.5" y2="7.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+    <line x1="7.5" y1="2.5" x2="2.5" y2="7.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
   </svg>
 );
 

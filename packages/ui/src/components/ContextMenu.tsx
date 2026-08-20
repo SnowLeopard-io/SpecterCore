@@ -1,3 +1,5 @@
+import { FolderIcon, OpenIcon, PasteIcon, RefreshIcon, WindowsLogoIcon } from './icons';
+
 interface ContextMenuProps {
   x: number;
   y: number;
@@ -19,7 +21,7 @@ export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onPa
           onClose();
         }}
       >
-        <span className="sc-context-icon">📂</span> Open File Explorer
+        <span className="sc-context-icon"><OpenIcon /></span> Open File Explorer
       </button>
       <button
         onClick={() => {
@@ -27,7 +29,7 @@ export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onPa
           onClose();
         }}
       >
-        <span className="sc-context-icon">📁</span> New Folder
+        <span className="sc-context-icon"><FolderIcon /></span> New Folder
       </button>
       {onPaste && (
         <button
@@ -36,7 +38,7 @@ export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onPa
             onClose();
           }}
         >
-          <span className="sc-context-icon">📋</span> Paste
+          <span className="sc-context-icon"><PasteIcon /></span> Paste
         </button>
       )}
       <hr />
@@ -46,10 +48,10 @@ export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onPa
           onClose();
         }}
       >
-        <span className="sc-context-icon">↻</span> Refresh
+        <span className="sc-context-icon"><RefreshIcon /></span> Refresh
       </button>
       <button onClick={onClose}>
-        <span className="sc-context-icon">⚙</span> Properties
+        <span className="sc-context-icon"><WindowsLogoIcon /></span> Properties
       </button>
     </div>
   );

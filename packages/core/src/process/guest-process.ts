@@ -1350,7 +1350,22 @@ export class GuestProcessRunner {
     // GetCommandLineW/A: return pointers to the (possibly empty) command line
     // in guest memory. Returning 0 makes CRT arg parsing walk address 0 and
     // spin forever (e.g. notepad's tokenizer + CharNextW).
-    const cmdLine = this.commandLine;
+    // Windows convention: the FULL command line starts with the executable
+    // (quoted, full path), followed by the arguments. notepad tokenizes it
+    // and treats the first token as argv[0] (the exe) — if only the file
+    // argument is present it lands in argv[0] and notepad never opens it.
+    const exeName = this.modulePath.split(/[\\/]/).pop() ?? 'app.exe';
+    // Empty commandLine => custom cmd (session 10) requires GetCommandLineW to
+    // be empty so it enters interactive mode; non-empty => full command line so
+    // notepad's tokenizer can skip the exe name and open the file argument.
+    const fullCmdLine = this.commandLine
+      ? `${this.modulePath} ${this.commandLine}`
+      : '';
+    const cmdLine = fullCmdLine;
+    // WinMain's lpCmdLine is the ARGUMENTS ONLY (no exe name) — Windows
+    // convention. notepad's wWinMain treats lpCmdLine as the file to open, so
+    // it must NOT start with the exe name.
+    const cmdLineArgs = this.commandLine;
     // Environment entries shared by the wide/narrow blocks and _environ.
     // cmd.exe walks the GetEnvironmentStringsW block with wcslen-style loops
     // (0x40b836) and reads COMSPEC/PATH/PROMPT; returning 0 makes it spin on
@@ -1386,17 +1401,37 @@ export class GuestProcessRunner {
       for (let i = 0; i < cmdLine.length; i++) w[i] = cmdLine.charCodeAt(i) & 0xff;
       this.runtime.writeBytes(cmdLineA, w);
     }
+    // WinMain lpCmdLine (arguments only, wide).
+    const cmdLineArgsW = bumpAlloc((cmdLineArgs.length + 1) * 2);
+    {
+      const w = new Uint8Array((cmdLineArgs.length + 1) * 2);
+      for (let i = 0; i < cmdLineArgs.length; i++) {
+        w[i * 2] = cmdLineArgs.charCodeAt(i) & 0xff;
+        w[i * 2 + 1] = (cmdLineArgs.charCodeAt(i) >> 8) & 0xff;
+      }
+      this.runtime.writeBytes(cmdLineArgsW, w);
+    }
     this.interceptor.hook('kernel32.dll', 'GetCommandLineW', () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
     this.interceptor.hook('kernel32.dll', 'GetCommandLineA', () => ({ returnValue: cmdLineA, errorCode: E.NO_ERROR }));
     // UCRT's wide command-line accessor (imported via api-ms-win-crt-private,
     // normalized to ucrtbase.dll). Returning 0 makes the CRT arg tokenizer
     // call CharNextW(0) forever.
-    this.interceptor.hook('ucrtbase.dll', '_o__get_wide_winmain_command_line', () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('ucrtbase.dll', '_get_wide_winmain_command_line', () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
-    // UCRT __argv/__argc (and the private _o__ variants): console programs
-    // like cmd.exe read argc/argv through these; returning 0 makes main()
-    // see a NULL argv and exit immediately.
-    const argvParts = this.commandLine.trim().split(/\s+/).filter(Boolean);
+    this.interceptor.hook('ucrtbase.dll', '_o__get_wide_winmain_command_line', () => ({ returnValue: cmdLineArgsW, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('ucrtbase.dll', '_get_wide_winmain_command_line', () => ({ returnValue: cmdLineArgsW, errorCode: E.NO_ERROR }));
+    // __argc/__argv (and the private _o__ variants): console programs like
+    // cmd.exe read argc/argv through these; returning 0 makes main() see a
+    // NULL argv and exit immediately. Windows convention: argv[0] is the
+    // executable path, argv[1..] are the command-line arguments. The
+    // commandLine option carries ONLY the arguments (CreateProcess-style),
+    // so the exe name is prepended here — without it, notepad treats the
+    // first file argument as argv[0] and never opens it.
+    // Windows convention: argv[0] is the executable path, argv[1..] the args.
+    // BUT the custom cmd build (session 10) treats `__argc == 0` as "plain
+    // interactive shell" and `__argc > 0` as "invoked with args" (silently
+    // skips dir/echo output). So the exe-name prefix is added ONLY when real
+    // arguments exist — an empty commandLine must yield __argc == 0.
+    const argTokens = this.commandLine.trim().split(/\s+/).filter(Boolean);
+    const argvParts = argTokens.length > 0 ? [exeName, ...argTokens] : [];
     const argvSlot = bumpAlloc((argvParts.length + 1) * 4);
     const argvStrings: number[] = [];
     for (const part of argvParts) {

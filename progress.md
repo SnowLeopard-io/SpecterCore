@@ -1,8 +1,166 @@
-# specter-core Windows PE Emulator — Handover (2026-08-20, session 12)
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 14/15)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
-> Sessions 10 & 11 full handovers are preserved unchanged below.
+> Sessions 10-12 full handovers are preserved unchanged below.
+
+## Session 14 summary — File Explorer Windows-ized + real icons + app pruning
+> and the notepad "double-click opens blank / Save As instead of Save" investigation.
+
+**Status: File Explorer / dialogs / icons all done and verified. notepad open-on-
+launch is PARTIALLY fixed (command line now reaches the guest correctly) but notepad
+still never opens the file inside the emulator — root cause of the second layer is
+pinned down with runtime probes + disassembly (details below).**
+
+---
+
+## Session 14 work (all verified: tsc exit 0; shared+core vitest 110 pass)
+
+### 1. ExplorerPane — reusable Windows-style file browser (user: "把资源管理器做成可以复用的")
+- NEW `packages/ui/src/components/ExplorerPane.tsx`: address bar (Back/Up/Refresh +
+  breadcrumbs, SVG icons), optional left nav pane (Quick access: Desktop/Users/Windows;
+  This PC: Local Disk C:, real PNG icons), column headers (Name / Date modified / Type /
+  Size), file rows (real Windows PNG icons via `iconPathFor`), status bar ("N items"),
+  `footer` slot (dialog file-name row), `children` slot (absolute overlays: context
+  menus / preview), internal drag-drop highlight, `containerRef` (menu coordinates),
+  `showNavpane` / `showToolbar` / `showStatusbar` switches.
+- Utility exports moved here: `iconPathFor` / `formatSize` / `formatDate` / `typeOf`.
+- `FileExplorerApp.tsx` now renders `<ExplorerPane>` (keeps: FileContextMenu, preview,
+  clipboard, inline rename, drag-drop import, NewFolder toolbar button via
+  `toolbarExtra`). Deleted local duplicates: formatSize/formatDate/iconPathFor/typeOf/
+  QUICK_ACCESS, dragDepth/dropActive state, openCmdHere/openCmdInSelected/
+  selectedIsDir/selectedIsExe.
+- `FileDialogApp.tsx` (comdlg32 Open/Save provider) now renders `<ExplorerPane>` too
+  (`showNavpane={false}`, `footer` = file-name input + Open/Save/Cancel). Dialog and
+  File Explorer now look identical.
+- **Lessons**: (a) `ExplorerPane` needs `children` rendered INSIDE `.sc-explorer`
+  because context menus are absolutely positioned against it; (b) after removing state,
+  always `tsc` — the deleted `{preview && (` opener got eaten by a bad Edit (TS1381).
+
+### 2. Real Windows icons — extracted from the host OS (user: "从C盘找可用图标，别用 emoji")
+- **Final method: `SHGetFileInfo` + `SHGFI_USEFILEATTRIBUTES`** by extension returns the
+  EXACT system icon for each file type, saved at native 32x32 (no upscaling → crisp).
+  Rejected earlier attempts: SHDefExtractIcon by guessed index (wrong glyphs), upscaled
+  PNGs (blurry).
+- Scripts (PowerShell, core logic in C# inside Add-Type to dodge PS 5.1 nested-type
+  reflection; needs `-ReferencedAssemblies System.Drawing.dll`):
+  - `scripts/extract-icons.ps1` — file-type icons → `apps/web/public/icons/`
+    (folder, text-document, image-file, audio-file, application, document, package.png
+    + variants). Run: `powershell -NoProfile -ExecutionPolicy Bypass -File
+    scripts/extract-icons.ps1 apps/web/public/icons`.
+  - `scripts/extract-shell-icons.ps1` — This PC (CLSID `::{20D04FE0-...}`) → this-pc.png,
+    `C:\` drive → local-disk.png.
+  - Windows 11 icon resources live in `C:\Windows\SystemResources\*.dll.mun`
+    (System32 DLLs are stubs); SHGetFileInfo resolves them transparently.
+- `apps.tsx` icons now: System Info → this-pc.png, File Explorer → explorer.png
+  (extracted from explorer.exe assoc), Photos → image-file.png, Command Prompt →
+  cmd.png, Notepad → notepad.png. User deletes `Photos.ico` / `SystemInfomation.ico` /
+  `File Explorer.ico` (no code refs remain).
+- `Desktop.tsx` `desktopFileIcon()` returns `/icons/*.png` paths; desktop items render
+  `<img>`. `FileExplorerApp` rows + navpane use real PNGs (SVG line icons kept only in
+  the toolbar).
+- `desktop-controller.tsx` `guestIconFor(name)` — guest window title-bar icon by exe
+  name (notepad.png/cmd.png/explorer.png/image-file.png/application.png fallback);
+  console window + file dialog icons fixed (were emoji).
+- **Lesson**: `svg()` helpers must use `dangerouslySetInnerHTML` for path strings —
+  string children in `<svg>` are dropped by React → blank icons (user saw "缺少非常多的图").
+
+### 3. Desktop app pruning (user: 扫雷/Installer/Run Executable 都不要)
+- Removed `minesweeper`, `installer`, `exe-runner` from `DEFAULT_APPS` (apps.tsx).
+- `DesktopController.openFile` now handles: `.exe` → `launchGuestExecutable` direct;
+  `.bkapp` → new `installPackageFile` (read manifest, base64-decode files, installPkg);
+  else `appForFile` → 'image-viewer' / 'windows-notepad'.
+- `shared/shell/assoc.ts` `appForFile` no longer returns removed appIds (.exe/.bkapp →
+  null, handled by openFile). launch() width/height ternary cleaned of exe-runner/
+  minesweeper branches. Desktop drag-drop .exe → `controller.openFile` (was launch
+  'exe-runner').
+
+### 4. notepad double-click open — investigation (PARTIALLY FIXED, see frontier)
+**Layer 1 (FIXED — command line now reaches notepad correctly):**
+- `launch('windows-notepad', {path})` used to IGNORE `args.path` → notepad always
+  started empty → double-click txt showed blank + Ctrl+S went to Save As.
+- `desktop-controller` `launchGuestWindow` gained `commandLine`; windows-notepad branch
+  passes `toWindowsPath(args.path)`; new module-level `toWindowsPath` helper.
+- **Emulator fixes in `guest-process.ts`** (Windows command-line semantics were wrong):
+  - `GetCommandLineW/A` now return the FULL command line: `"<modulePath>" <args>`
+    (quoted exe path + args). Previously it returned only the args → notepad's
+    tokenizer treated the file arg as argv[0] and never opened it.
+  - WinMain `lpCmdLine` (`_o__get_wide_winmain_command_line` /
+    `_get_wide_winmain_command_line`) returns the ARGS ONLY (no exe name) — separate
+    buffer `cmdLineArgsW`. (Bug we introduced: when both returned the full line,
+    notepad tried to open `"notepad.exe"` as a file.)
+  - `__argv/__wargv` now prefix the exe name (argv[0] = exe path, args from argv[1])
+    — Windows convention; commandLine option carries args only.
+- **Verified by NEW `scripts/notepad-open-check.ts`** (esbuild-bundled, same harness as
+  dialog-check): lpCmdLine = `C:\Users\Guest\Desktop\hello.txt`, GetCommandLineW =
+  `"C:\Windows\SysWOW64\notepad.exe" C:\Users\Guest\Desktop\hello.txt`, tokenizer
+  (0x40f04c) returns the file arg. NOTICE: Git Bash MSYS converts `\` in env vars to
+  `/` — the check hardcodes the backslash path internally.
+
+**Layer 2 (NOT FIXED — notepad never calls any file API inside the emulator):**
+- With a valid file arg, notepad runs but **zero file APIs fire** (CreateFileW/ReadFile/
+  GetFileAttributesW: 0 calls across the whole run, confirmed with unconditional
+  logging). Disassembly + probes traced the real startup path:
+  - wWinMain ≈ `0x40f10b` (NOT call-reachable; entered by CRT). Tokenizer = `0x40f04c`
+    (skip-exe-name; called from `0x40f17f`, returns file arg in eax; pe-dump has a
+    1-byte offset — cross-check probe addresses against real eip before trusting them).
+  - `0x40f189` calls `0x41325f` (init + CreateWindowExW; sets window title to the file
+    arg via WM_SETTEXT at `0x4138a3`), then `0x40f196` calls `0x40f0b1` (token check
+    that immediately returns 0 — normal). File arg is stored to locals `[ebp-0xc18]`
+    etc. at `0x4138de+` and then **never used** — no file-open branch is reached.
+  - A `lock cmpxchg` spinlock at `0x413902` works (eax=0 after → proceeds).
+  - `0x413934` (HeapAlloc prep branch) / `0x41403c` (jnz target) / `0x413eaf` (fail
+    return) probes never fired as BLOCK BOUNDARIES — note probes fire only at JIT
+    block starts (onStep), so mid-block addresses never hit; don't misread that as
+    "not executed".
+- **Frontier**: find where real notepad opens the file and why the emulator never
+  reaches it. Likely candidates: (a) notepad opens on WM_CREATE in WndProc `0x40e9c0`
+  (nested executor) — verify WM_CREATE handling; (b) some unimplemented API early in
+  startup makes notepad skip the open branch. Suggestion: probe WndProc `0x40e9c0`
+  (log msg) and dump `0x41325f` post-`0x4139c0` for the file API call site; compare
+  against a REAL-Windows trace if possible. Once open works, Ctrl+S should save
+  directly (no Save As).
+
+### New debugging scripts (keep for the next session)
+- `scripts/pe-dump.ts <exe> <va-hex> <len-hex>` — dump raw bytes at a VA (section map).
+  **May be off by ~1 byte — verify against real eip when probing.**
+- `scripts/resolve-iat.ts <iat-va-hex>` — resolve an IAT address to `DLL!Function`.
+- `scripts/scan-calls.ts` — find `call rel32` targets in .text (validated against
+  runtime: tokenizer call confirmed at 0x40f17f).
+- `scripts/notepad-open-check.ts` — notepad command-line-open verifier (PASS on layer 1
+  plumbing; FAIL on "edit text never populated" = layer 2).
+- Build+run pattern (all scripts):
+  ```bash
+  BS=$(ls -d node_modules/.pnpm/esbuild@*/node_modules/esbuild/bin/esbuild | head -1)
+  "$BS" --bundle scripts/<name>.ts --outfile=node_modules/.cache/<name>.cjs \
+    --platform=node --format=cjs --target=es2020 --external:typescript
+  "C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe" \
+    node_modules/.cache/<name>.cjs [args]
+  ```
+- `notepad-dialog-check.ts` still PASSES (Save As via comdlg32 dialog flow is intact —
+  the dialog path works; only open-on-launch is broken).
+
+## Verification loop (current)
+- `tsc --noEmit` exit 0
+- `eslint .` exit 0
+- `vitest run packages/shared packages/core` → 110 pass (vitest process lingers;
+  `timeout` exit 124 = timeout, not failure)
+- `scripts/notepad-dialog-check.ts` PASS (save via dialog)
+- `scripts/notepad-open-check.ts`: layer-1 plumbing PASS, file-open FAIL (layer 2)
+
+## Still open / next
+1. **notepad open-on-launch (layer 2)** — the main frontier (see above).
+2. **Taskbar large icon** — user flagged a big yellow/blue taskbar icon (ICO decoded
+   late → renders at native size briefly). `.sc-taskbar-icon` is 24x24 with
+   `object-fit: contain`; consider a placeholder while ICO decodes.
+3. **Settings window** — host `DesktopController.wipeStorage()` (was removed from
+   desktop menu per user, waiting for Settings window).
+4. Cut/move not implemented (clipboard is copy-only by user request).
+5. Console .exe detection for double-clicked non-GUI exes (may hang in message loop).
+
+---
+
+# Session 12 historical handover — preserved unchanged
 
 ## Session 12 summary — notepad Save As ROOT-CAUSED & GREEN; file ops + direct .exe launch
 

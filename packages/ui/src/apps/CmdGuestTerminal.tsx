@@ -27,11 +27,24 @@ export function CmdGuestTerminal({ runner, channel, onClose }: CmdGuestTerminalP
   const [exited, setExited] = useState<{ code: number; message: string | null } | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const decoder = useRef(new TextDecoder('utf-8'));
+  // cmd's CRT writes the line in the current console codepage (e.g. GBK on
+  // Chinese Windows), not UTF-8. Decoding raw bytes as UTF-8 turns Chinese
+  // output into ¥Æ¥Äu-style garbage. Try UTF-8 first (covers ASCII / English
+  // cmd); if it produced replacement characters (U+FFFD), retry with GB18030
+  // (browser-native decoder that covers GBK).
+  const decodeBytes = (bytes: Uint8Array): string => {
+    const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    if (!utf8.includes('\uFFFD')) return utf8;
+    try {
+      return new TextDecoder('gb18030', { fatal: false }).decode(bytes);
+    } catch {
+      return utf8;
+    }
+  };
 
   useEffect(() => {
     const render = (bytes: Uint8Array, _stderr: boolean): void => {
-      const text = decoder.current.decode(bytes, { stream: true });
+      const text = decodeBytes(bytes);
       setLines((prev) => [...prev, { text, kind: 'system' }]);
     };
     channel.attach(render);
