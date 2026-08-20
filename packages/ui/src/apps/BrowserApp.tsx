@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
-import type { FileStore } from '@specter-core/contracts';
 import { useUi } from '../context';
-import { sanitizeName } from '../import-files';
-
-const DOWNLOAD_DIR = 'Users/SpecterCore/Downloads';
 
 const DEFAULT_TABS: TabState[] = [
   { id: 'tab-1', title: 'New Tab', url: '', loading: false, history: [], hIndex: -1 },
@@ -18,29 +14,6 @@ interface TabState {
   loading: boolean;
   history: string[];
   hIndex: number;
-}
-
-interface DownloadItem {
-  name: string;
-  url: string;
-  size: number;
-  time: number;
-  ok: boolean;
-  error?: string;
-}
-
-function joinPath(base: string, name: string): string {
-  return base === '' ? name : `${base}/${name}`;
-}
-
-function filenameFromUrl(url: string): string {
-  try {
-    const clean = url.split('?')[0]!.split('#')[0]!;
-    const seg = clean.split('/').filter(Boolean).pop() ?? 'download';
-    return sanitizeName(seg) || 'download';
-  } catch {
-    return 'download';
-  }
 }
 
 function normalizeUrl(raw: string): string {
@@ -115,20 +88,6 @@ const ExternalIcon = (
   </I>
 );
 
-const DownloadArrowIcon = (
-  <I>
-    <path d="M8 2.5 V9.5 M5.5 7 L8 9.5 10.5 7" />
-    <path d="M3 11.5 h10" />
-  </I>
-);
-
-const DownloadTrayIcon = (
-  <I>
-    <path d="M8 2.5 V9.5 M5.5 7 L8 9.5 10.5 7" />
-    <path d="M3.5 11 h1.2 M11.3 11 H12.5 M3.5 13.5 h9" />
-  </I>
-);
-
 const NewTabIcon = (
   <I size={14}>
     <path d="M3 3 H13 V13 H3 Z" transform="scale(1.05) translate(-0.4 -0.4)" />
@@ -143,12 +102,6 @@ const LockIcon = (
   </I>
 );
 
-const CaratDownIcon = (
-  <I size={12}>
-    <path d="M4 6.2 L8 10 12 6.2" />
-  </I>
-);
-
 const FileGlyph = () => (
   <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden>
     <path d="M5 4 a1.2 1.2 0 0 1 1.2-1.2 H12 L15 5.8 V16 a1.2 1.2 0 0 1-1.2 1.2 H6.2 A1.2 1.2 0 0 1 5 16 Z" fill="#e7edf5" />
@@ -160,15 +113,11 @@ let tabSeq = 1;
 
 export function BrowserApp() {
   const { controller } = useUi();
-  const fs = controller.getFileSystem() as FileStore | null;
 
   const [tabs, setTabs] = useState<TabState[]>(DEFAULT_TABS);
   const [activeId, setActiveId] = useState(DEFAULT_ACTIVE);
   const [address, setAddress] = useState('');
   const [iframeKey, setIframeKey] = useState(0);
-  const [downloads, setDownloads] = useState<DownloadItem[]>([]);
-  const [showDownloads, setShowDownloads] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
 
   const active = tabs.find((t) => t.id === activeId) ?? tabs[0]!;
 
@@ -264,47 +213,6 @@ export function BrowserApp() {
     if (e.key === 'Enter') goto(address);
   };
 
-  const writeToDisk = async (target: string, data: Uint8Array): Promise<void> => {
-    if (!fs) throw new Error('virtual disk unavailable');
-    const parent = target.split('/').filter(Boolean).slice(0, -1).join('/');
-    if (parent) await fs.createDirectory(parent).catch(() => {});
-    let handle;
-    try {
-      handle = await fs.openFile(target, 'create');
-    } catch {
-      handle = await fs.openFile(target, 'write');
-    }
-    try {
-      await handle.write(0, data);
-      await handle.truncate(data.byteLength);
-    } finally {
-      await handle.close();
-    }
-  };
-
-  const downloadUrl = async (raw: string): Promise<void> => {
-    if (!fs) return;
-    const url = normalizeUrl(raw);
-    const name = filenameFromUrl(url);
-    setStatus(`Downloading ${name}…`);
-    try {
-      const res = await fetch(url, { mode: 'cors', cache: 'no-cache' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = new Uint8Array(await res.arrayBuffer());
-      await writeToDisk(joinPath(DOWNLOAD_DIR, name), data);
-      setDownloads((prev) => [{ name, url, size: data.byteLength, time: Date.now(), ok: true }, ...prev]);
-      setStatus(`Saved ${name} (${data.byteLength} bytes) into \`${DOWNLOAD_DIR}\``);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setDownloads((prev) => [{ name, url, size: 0, time: Date.now(), ok: false, error: msg }, ...prev]);
-      setStatus(`Download failed: ${msg}`);
-    }
-  };
-
-  const downloadActive = (): void => {
-    if (active.url) void downloadUrl(active.url);
-  };
-
   const openExternal = (): void => {
     const url = normalizeUrl(address || active.url);
     if (!url) return;
@@ -382,22 +290,6 @@ export function BrowserApp() {
           >
             {ExternalIcon}
           </button>
-          <button
-            className="sc-browser-btn"
-            aria-label="Download current URL to virtual disk"
-            title="Download current URL into the virtual disk"
-            onClick={downloadActive}
-          >
-            {DownloadArrowIcon}
-          </button>
-          <button
-            className={`sc-browser-btn ${showDownloads ? 'active' : ''}`}
-            aria-label="Downloads"
-            title="Download history"
-            onClick={() => setShowDownloads((v) => !v)}
-          >
-            {DownloadTrayIcon}
-          </button>
         </div>
       </div>
 
@@ -431,7 +323,7 @@ export function BrowserApp() {
               </svg>
             </div>
             <div className="sc-browser-empty-title">SpecterCore Browser</div>
-            <div className="sc-browser-empty-sub">Browse the web, or save downloads straight into the virtual disk.</div>
+            <div className="sc-browser-empty-sub">Browse the web.</div>
             <div className="sc-browser-empty-input">
               {address.startsWith('https://') ? LockIcon : GoIcon}
               <input
@@ -447,46 +339,10 @@ export function BrowserApp() {
               <button className="sc-browser-empty-dl-external" onClick={openExternal}>
                 {ExternalIcon} Open in a new tab
               </button>
-              <button onClick={() => void downloadUrl(address)}>
-                {DownloadArrowIcon} Save to Files
-              </button>
-            </div>
-            <div className="sc-browser-empty-hint">
-              {CaratDownIcon} Files land in <code>{DOWNLOAD_DIR}</code>, visible in File Explorer
             </div>
           </div>
         )}
       </div>
-
-      {status && (
-        <div className="sc-browser-status">
-          <span className={`sc-browser-status-dot ${status.startsWith('Saved') ? 'ok' : 'warn'}`} />
-          {status}
-        </div>
-      )}
-
-      {showDownloads && (
-        <div className="sc-browser-downloads">
-          <div className="sc-browser-downloads-head">
-            <span>
-              {DownloadTrayIcon} Downloads → <code>{DOWNLOAD_DIR}</code>
-            </span>
-            <button className="sc-browser-downloads-close" aria-label="Close downloads" onClick={() => setShowDownloads(false)}>
-              {TabCloseIcon}
-            </button>
-          </div>
-          {downloads.length === 0 && <div className="sc-browser-downloads-empty">Nothing downloaded yet.</div>}
-          {downloads.map((d, i) => (
-            <div key={`${d.time}-${i}`} className={`sc-browser-download ${d.ok ? 'ok' : 'fail'}`}>
-              <FileGlyph />
-              <span className="sc-browser-download-name">{d.name}</span>
-              <span className="sc-browser-download-meta">
-                {d.ok ? `${d.size} bytes` : d.error ?? 'network/CORS'}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
