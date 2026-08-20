@@ -1,166 +1,220 @@
-# cmd.exe Emulator Debugging — Handover (2026-08-19, session 8 — ALL FIXED)
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 9)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
 
-## Goal
+## Goal (this session)
 
-Make the specter-core Windows PE emulator run `C:/Windows/SysWOW64/cmd.exe` with
-`cmd /c dir C:\Windows` and emit the directory listing to stdout.
+Take the session-8 milestone (`cmd /c dir` works headless) and turn it into a REAL
+interactive "Command Prompt" app in the browser desktop, then make `cd`/`dir`/`echo`
+work interactively, wire the File Explorer to cmd, and diagnose why notepad cannot
+save. Also copy a small set of real Windows fonts into the virtual disk.
 
-- Project root: `C:\Users\HUAWEI\Desktop\windows` (pnpm workspace, package `@specter-core`)
-- Target binary: `C:/Windows/SysWOW64/cmd.exe` (entry VA 0x41de90 = mainCRTStartup, narrow-argv CRT)
-- MUI satellite merged: `C:/Windows/System32/en-US/cmd.exe.mui` (message table type 11, merged OK)
+Project root: `C:\Users\HUAWEI\Desktop\windows` (pnpm workspace, package `@specter-core`).
+Target binary: `C:/Windows/SysWOW64/cmd.exe` (a CUSTOM build — its PE import table
+parses as absent/nonstandard, and it has quirks documented below).
 
 ## Current Status (one paragraph)
 
-**dir WORKS end-to-end, ALL 4 known problems FIXED, cmd EXITS 0.** Output (cmd-fix109-out.bin):
+**The browser desktop "Command Prompt" app now runs the REAL cmd.exe interactively:
+banner, prompt, `dir`, `echo`, `cd <path>` (absolute and relative), `exit` all work,
+and the cwd / volume label / serial are real.** File Explorer got three buttons that
+open cmd in a folder or run a selected .exe through it. Four real fonts are staged in
+`apps/web/public/win/Fonts/` and provisioned to `Windows\Fonts`. Two known cmd
+format-string artifacts remain (`Not enough storage is available...` on stderr at
+startup, and a `%0` tail on the banner) — they are pre-existing cmd quirks, harmless.
+notepad **cannot save**: root cause fully identified (comdlg32 `GetSaveFileNameW` not
+implemented + desktop launch doesn't pass a file path), fix pending user decision.
 
-```
- Volume in drive C has no label.
- Volume Serial Number is 1234-ABCD
+## How the desktop cmd works now (architecture)
 
- Directory of C:\Windows\
+- `apps.tsx`: `command-prompt` app → `render: () => null` (mirrors notepad's
+  special-casing so the controller intercepts it).
+- `desktop-controller.tsx` `launchGuestConsole()`:
+  - reads `Windows/SysWOW64/cmd.exe` from the virtual disk (provisioned by
+    `ensureBuiltinWinFiles`),
+  - builds `GuestProcessRunner` with:
+    - **`commandLine: ''` — CRITICAL.** A non-empty value (e.g. `'cmd.exe'`) makes
+      this custom cmd treat itself as invoked-with-args and SILENTLY skip all command
+      output (`dir`/`echo`/`cd` produce nothing). Empty = plain interactive shell.
+    - `interactive: true`,
+    - `cwd` (optional — cmd starts inside that folder),
+    - `patches: [{ va: 0x41dea0, bytes: [0xc3] }]` (neutralize `__security_check_cookie`
+      so the benign stack-cookie overflow in the interactive reader no longer fast-fails),
+    - `probes: cmdFormatProbes()` (see below),
+    - `readFile` → `toStorePath` → FileStore (MUI lookup works),
+    - `onOutput` → `CmdConsoleChannel.push` → `CmdGuestTerminal`.
+  - Terminal: `<pre>`-style output + input row; Enter → `runner.postInput(text + '\r\n')`.
+- stdin: `postInput` appends to `stdinBuffer`; `ReadConsoleW/A` and
+  `ReadFile(STD_INPUT_HANDLE)` go through `consoleRead` (blocks on empty buffer in
+  interactive mode — same suspend/resume pattern as `GetMessageW`; EOF otherwise).
+- stdout: `WriteFile`/`WriteConsoleW`/`WriteConsoleA` on the console pseudo-handles
+  are captured → `onOutput`. **WriteFile is captured as RAW bytes** (cmd's CRT
+  `printf` path; do NOT UTF-16-decode it — it corrupts `echo`/`dir`). WriteConsoleW is
+  decoded UTF-16LE → UTF-8, stopping at the first NUL (banner/prompt path).
 
-01/01/1601  12:00:00 AM    263,168  cmd.exe
-               1 File(s) 263,168 bytes
-               0 Dir(s)            0 bytes free
-```
+## Root causes found & fixed this session
 
-- `[diag] status=exit eip=0x0` — **exit code 0**.
-- stdout is clean (no stray NUL bytes; WriteConsoleW truncates at first NUL).
-- **Problem 1 FIXED**: header now shows `C:\Windows` (was `C:\`).
-- **Problem 2 FIXED (workaround)**: file size now shows `263,168` (was `263,`).
-- **Problem 3 FIXED (workaround)**: row fields now properly spaced — `12:00:00 AM    263,168  cmd.exe` (was `12:00:00 AM263,168cmd.exe`).
-- **Problem 4 FIXED**: WriteConsoleW nChars issue handled by NUL truncation (Bug16).
+| # | Symptom | Root cause | Fix |
+|---|---|---|---|
+| 1 | `dir`/`echo` produced NO output in browser (prompt only) | `commandLine: 'cmd.exe'` makes this custom cmd skip interactive command output entirely | Pass `commandLine: ''` in `launchGuestConsole` |
+| 2 | cwd artifact `C:\cmd.exe` seen in early screenshots | That was the **diag harness's fake FS** (`buildExeFs` returns DIRECTORY for any non-wildcard path, so cmd's startup probe `cwd\cmd.exe` "existed"); the real MemoryFileStore-based FS returns not-found → no override. Not a real bug | Added `GuestProcessOptions.cwd` for the desktop; validated with `scripts/cmd-cwd-check.ts` against the real FS |
+| 3 | `cd C:\Windows` failed with `ERROR_INVALID_DRIVE(0xf)` | `GetDriveTypeW/A` had NO handler → default 0 (DRIVE_UNKNOWN) → cmd thinks the drive doesn't exist | handlers.ts: `GetDriveTypeW/A` → `DRIVE_FIXED(3)` for drive-lettered roots; added `GetLogicalDrives` → `0x4` |
+| 4 | `cd` failed with `ERROR_DIRECTORY(0x10b)` | cmd calls `FindFirstFileW("C:\Windows\")` (trailing backslash); `splitFindPattern` turned the empty tail into the pattern → no match → `ERROR_NO_MORE_FILES(18)` | `splitFindPattern`: strip trailing `[\\/]+`; bare drive (`C:`) → `{dir:'', pattern:'*'}` |
+| 5 | `cd Windows` failed (relative) | cmd calls `GetFullPathNameW("\Windows", ...)` — leading-`\` = **relative to drive root, not cwd**; old handler prepended cwd → `C:\Desktop\Windows` (nonexistent) | `GetFullPathNameW`: 3-way — drive-absolute as-is; `\`-prefixed → prepend current drive letter; else prepend cwd |
+| 6 | `Volume in drive C has no label.` + `1234-ABCD` | hardcoded placeholders in `GetVolumeInformationW/A` | label `'Specter FS'`; serial = `volumeSerial(rootPath)` (djb2 of root path, folded to 16-bit halves → `C:\` = `CDC7-CDC7`) |
 
-## Bugs fixed this session
+## New core capability: runtime probes
 
-| Bug | Root cause | Fix |
-|---|---|---|
-| **Bug17** (Problem 1) Header shows `C:\` not `C:\Windows` | `GetFileAttributesW/A` not registered in handlers.ts → default returns 0 → cmd's `test al,0x10` fails → treats path as file → `wcsrchr` truncates at last backslash | handlers.ts: register `GetFileAttributesW/A` calling `host.fs.getFileAttributes()`; buildExeFs.getFileAttributes returns `FILE_ATTRIBUTE_DIRECTORY(0x10)` for non-wildcard paths |
-| **Bug18** (Problem 2) File size truncated to `263,` | 64-bit number formatter at `0x431749` computes thousand-separator length via wcslen loop. The loop's terminator `[ebp-0xd4]` is initialized by `and dword ptr [ebp-0xd4], 0` at `0x43175e`, but wcslen returns 4 instead of 1 for separator `","`. Root cause in JIT emulator not fully identified (all instruction encodings/implementations inspected look correct). Separator string at `0x446ad0` confirmed as `","`. | **Workaround** in diag-trap.ts: probe at `0x4317b4` (loop condition) overwrites `[ebp-0xd8]` (saved separator length) with 1 before each loop iteration. This forces correct separator insertion and file size formats as `263,168`. |
-| **Bug19** (Problem 3) Row fields run together — no spaces between time/size/name | Space-padding function at `0x42e327` is called twice during row formatting: (1) at `0x430df6` (ret=`0x430dfb`) before number formatting, (2) at `0x430e4d` (ret=`0x430e52`) after number formatting. The first call updates `savedLen` ([obj+8]) to its `targetLen` (87). The second call has `targetLen=76` but `savedLen=87`, so the comparison `savedLen >= targetLen` causes the function to skip padding entirely. A third padding call at ret=`0x405b52` (size→name gap) has `targetLen=105, savedLen=104`, filling only 1 space which gets overwritten by the subsequent append. The root cause is that the JIT-compiled padding function's fill loop (`rep stosd` at `0x42e3c3`) may not execute correctly, or the appended string overwrites the padded spaces. | **Workaround** in diag-trap.ts: probe at `0x42e327` (padding function entry) detects calls with ret=`0x430e52` (time→size gap) or ret=`0x405b52` (size→name gap). For each, it computes the actual `wcslen` of the buffer, directly writes 4 (or 2) space characters (`0x0020`) after the actual string, writes a NUL terminator, and updates `savedLen` ([obj+8]) to `actualLen + numSpaces`. This ensures the gap exists regardless of whether the padding function's fill loop executes correctly in the JIT. |
+`GuestProcessOptions.probes: Array<{ eip: number; fn: (rt: WasmRuntimeImpl) => void }>`
+— per-block runtime workarounds driven from `onStep` (fired at block starts). Needed
+because Bug18/Bug19-style fixes depend on live registers/memory and cannot be
+expressed as static `patches`. The runner composes the user's `onStep` with the probe
+dispatch when probes are provided.
 
-## Problem 2 investigation details (Bug18)
-
-- File size value: `263168` (0x40400), findData correct.
-- Number formatter: `0x431749` (64-bit grouped-number formatter).
-- Calls `0x424be0` (64-bit div-by-10), loop extracts digits low-to-high, inserts thousand separator every 3 digits.
-- Loop verified: executes 6 times correctly, quotient sequence `26316 → 2631 → 263 → 26 → 2 → 0`.
-- **Anomaly**: when inserting separator, buffer pointer `ebx` decreases by 10 bytes instead of expected 4. This means separator length `esi` = 4 (chars), not 1.
-- Separator string at `0x446ad0` confirmed as `","` (raw bytes `2c 00 00 00 ...`).
-- wcslen loop at `0x43177f-0x43178c`: `mov ax,[esi]; add esi,2; cmp ax,[ebp-0xd4]; jne loop`. Terminator `[ebp-0xd4]` initialized to 0 at `0x43175e`.
-- Probe at `0x4317b4` confirms `[ebp-0xd8]` (saved wcslen result) = 4.
-- Probes at `0x431767`, `0x43177f`, `0x431793` do NOT fire (addresses may be in JIT-compiled region not instrumented, or function entry differs).
-- All x86 instruction encodings verified correct via raw byte inspection.
-- JIT codegen for `and`, `cmp`, `jne`, `mov`, `sar`, `loadWidth/storeWidth` all inspected and appear correct.
-- **Root cause remains unidentified** — possibly a subtle JIT optimization or boundary case in the wasm codegen. Workaround is stable.
-
-## Problem 3 investigation details (row fields run together) — FIXED (Bug19)
-
-- dir row is built from **4 separate vswprintf calls**, then concatenated internally and output via a single WriteConsoleW:
-  1. Date: `fmt="%s  "` → `"01/01/1601  "` (has 2 trailing spaces)
-  2. Time: `fmt="%s"` → `"12:00:00 AM"` (NO trailing spaces)
-  3. Size: `fmt="%s"` → `"263,168"` (NO trailing spaces)
-  4. Name: `fmt="%s"` → `"cmd.exe"` (NO trailing spaces)
-- In real Windows cmd output, the row is:
-  `01/01/1601  12:00:00 AM    263,168 cmd.exe`
-  (time followed by 4 spaces, size followed by 1 space)
-- **Root cause identified**: Space-padding function at `0x42e327` is called during row formatting. The function compares `savedLen` ([obj+8]) with `targetLen` (edx); if `savedLen >= targetLen`, it skips padding. Due to stale `savedLen` from a previous padding call (87) being larger than the current `targetLen` (76), the time→size gap padding is skipped entirely. The size→name gap padding (ret=`0x405b52`, targetLen=105, savedLen=104) fills only 1 space which gets overwritten.
-- **JIT complication**: Probes placed inside the padding function's fill loop (e.g., `0x42e3b1`) and inside the vswprintf wrapper (e.g., `0x41d7cd`) do NOT fire, likely because these addresses are in JIT-compiled hot regions not instrumented by the probe mechanism. This makes it impossible to verify whether the fill loop executes correctly.
-- **Fix (workaround)**: Probe at `0x42e327` (padding function entry) detects calls with ret=`0x430e52` (time→size gap, 4 spaces) or ret=`0x405b52` (size→name gap, 2 spaces). For each, it computes actual `wcslen`, directly writes space characters after the string, writes NUL, and updates `savedLen`. This bypasses the potentially-broken JIT fill loop.
-- **Verified output**: `01/01/1601  12:00:00 AM    263,168  cmd.exe`
-
-## Problem 4 (WriteConsoleW nChars) — already fixed (Bug16)
-
-- cmd passes buffer capacity (e.g. 0x220=544) as nChars, not text length.
-- Fix in guest-process.ts: wide→UTF-8 loop stops at first NUL, so padding NULs never reach stdout.
-- Underlying cause unexplained but cosmetic.
-
-## Key Addresses (updated)
-
-### cmd.exe functions (dir chain)
-- `0x431749` — 64-bit grouped-number formatter (Bug18). wcslen loop at `0x43177f`, loop condition at `0x4317b4`, separator length saved at `[ebp-0xd8]`, terminator at `[ebp-0xd4]`.
-- `0x446ad0` — thousand separator string storage (content `","`).
-- `0x424be0` — 64-bit division helper (div-by-10).
-- `0x424ce1` — separator copy function.
-- `0x42e327` — **Space-padding function** (Bug19). Entry (hotpatch: `0x42e325`). Compares `savedLen` ([ecx+8]) with `targetLen` (edx); fills spaces if `savedLen < targetLen`. Fill loop at `0x42e3c3` (`rep stosd`). NUL write at `0x42e3dc`.
-- `0x430df6` — First padding call in file-size formatter (ret=`0x430dfb`). Updates savedLen to 87.
-- `0x430e4d` — Second padding call in file-size formatter (ret=`0x430e52`). **Bug19 trigger**: savedLen=87 >= targetLen=76, skips padding.
-- `0x405b52` — Return address of size→name gap padding call. targetLen=105, savedLen=104, fills 1 space (overwritten).
-- `0x41d755` — vswprintf wrapper (string copy + append). Calls `0x4142b6` to append to main buffer at `0x41d7cd`.
-- `0x408b1c` dir exec entry. `0x408ba9` dir exec core.
-- `0x40a320` dir outer handler. `0x4098e0` dispatcher.
-- `0x430b52` dir summary. `0x40652b` output-state finalize.
-- `0x41d730` grouped-number formatter (function-pointer dispatched).
-- `0x40d9f4` vswprintf wrapper → `0x40da2d` real vswprintf.
-
-### IAT slots
-- `0x4500dc`=GetDiskFreeSpaceExW, `0x4503ac`=gsfailure tail-call,
-  `0x450460`=wcschr, `0x450494`=memset,
-  `0x45042c`(delay)=_o___stdio_common_vswprintf, `0x450380`=_o__wcsicmp,
-  `0x45045c`=wcsrchr, `0x450100`=GetVolumeInformationW.
+`cmdFormatProbes()` (desktop-controller.tsx, ported from diag-trap.ts):
+- `0x42e327` — space-padding formatter entry: when called from ret `0x430e52`
+  (time→size gap, 4 spaces) or `0x405b52` (size→name gap, 2 spaces), recompute the
+  actual string length from `[ecx+0x10]`, write the gap spaces + NUL, update
+  `savedLen [ecx+8]`. (Bug19 — makes `dir` columns line up.)
+- `0x4317b4` — 64-bit number formatter loop condition: force `[ebp-0xd8]` (saved
+  separator length) to 1. (Bug18 — thousands separator for file sizes.)
 
 ## Files modified this session
 
 | File | Change |
 |---|---|
-| `packages/core/src/api/handlers.ts` | Added `GetFileAttributesW/A` handlers (Bug17). Added/removed vswprintf debug logging. |
-| `packages/core/src/api/buildExeFs.ts` (or fs module) | Improved `getFileAttributes` to return `FILE_ATTRIBUTE_DIRECTORY` for dirs. |
-| `scripts/diag-trap.ts` | Added Bug18 workaround at `0x4317b4` (forces separator length=1). Added Bug19 workaround at `0x42e327` (directly writes spaces for time→size and size→name gaps). Added multiple investigation probes (`0x42e3b1`, `0x41d7cd`, `0x430e60`, `0x41d755`, etc.). |
-| `packages/core/src/process/guest-process.ts` | Added/removed WriteConsoleW debug logging. Bug16 fix already present. |
-| `progress.md` | Updated to session 8 — all 4 problems fixed. |
+| `packages/core/src/process/guest-process.ts` | stdin queue + `postInput` + `consoleRead`; `WriteFile`/`WriteConsoleW`/`WriteConsoleA` console capture (WriteFile = raw bytes); `ReadFile(STD_INPUT)`; `cwd` option; `probes` option + onStep wiring; `GetFullPathNameW` root-relative fix; `GetModuleFileNameW/A` normalize `/`→`\`; PATH += `C:\Windows\SysWOW64`; FormatMessageW `errorCode: 0x13d as E` (kills the old TS error); removed orphaned WriteFile block |
+| `packages/core/src/api/handlers.ts` | `GetDriveTypeW/A`; `GetLogicalDrives`; `volumeSerial()` + `'Specter FS'` label in `GetVolumeInformationW/A`; `splitFindPattern` trailing-separator fix |
+| `packages/ui/src/desktop-controller.tsx` | `launchGuestConsole` (commandLine `''`, cwd, probes, GS patch); `openCommandPrompt(initialCommand?, cwd?)`; `cmdFormatProbes()`; `command-prompt` branch via `openCommandPrompt` |
+| `packages/ui/src/apps/FileExplorerApp.tsx` | toolbar: 🖥 open CMD here; 📁🖥 open CMD in selected folder; ▶ run selected .exe via cmd (`start "" "C:\..."`) |
+| `packages/ui/src/apps/CmdGuestTerminal.tsx` | terminal view (stdout `<pre>`, local echo, exit banner + Close) |
+| `packages/ui/src/console-channel.ts` | `CmdConsoleChannel` (buffer + attach/detach + `markExited`/`onExit`) |
+| `packages/ui/src/builtin-win.ts` | cmd.exe + en-US/zh-CN MUI + 4 fonts (`arial.ttf/arialbd.ttf/tahoma.ttf/consola.ttf` → `Windows/Fonts/`) |
+| `packages/ui/src/apps.tsx` | `command-prompt` → `render: () => null`; removed `CommandPromptApp` import |
+| `packages/contracts/src/ui.ts` | `DesktopController.openCommandPrompt(initialCommand?, cwd?)` |
+| `apps/web/public/win/Fonts/` | 4 real fonts copied from host `C:\Windows\Fonts` (~3.3 MB total) |
+| `scripts/cmd-cwd-check.ts` | NEW — validates the desktop stack end-to-end (real `MemoryFileStore` + `FileSystemBridgeImpl`, seeds cmd.exe + MUI, optional cwd, GS patch + probes, feeds `cd`/`dir`/`exit`, checks output) |
+| `scripts/diag-trap.ts` | diagnostic harness (feeds updated to echo/cd/dir/exit; core probes unchanged) |
 
-## Logs & helper scripts (node_modules/.cache/)
+## Key addresses (cmd.exe) — keep from session 8 + new
 
-| File | Purpose |
-|---|---|
-| `cmd-fix109-out.bin` / `cmd-fix109.log` | **LATEST — ALL FIXED** — exit 0, Bug17+Bug18+Bug19 fixed, correct row spacing |
-| `cmd-fix108-out.bin` | Bug19 partial fix: time→size gap fixed (4 spaces), size→name gap still missing |
-| `cmd-final-out.bin` / `cmd-final.log` | Session 7 final — exit 0, Bug17+Bug18 fixed, Problem 3 remaining |
-| `cmd-fix87-out.bin` | First run with Bug18 workaround active (size=263,168 confirmed) |
-| `cmd-fix79.log` | Bug18 investigation: DIV_LOOP probes, separator content confirmed |
-| `cmd-fix69-out.bin` | Bug17 fixed (header=C:\Windows), Bug18 not yet fixed (size=263,) |
-| `diag-trap.cjs` | esbuild bundle of scripts/diag-trap.ts (rebuild after editing TS) |
-| `bkargs.txt` | `cmd /c dir C:\Windows` (inject via BK_ARGS) |
+- `0x41dea0` — `__security_check_cookie`; patched to `ret` (`0xc3`) at runtime for interactive runs.
+- `0x42e327` — space-padding formatter entry (Bug19 probe, now also in the desktop runner).
+- `0x4317b4` — 64-bit number formatter loop condition (Bug18 probe, now also in the desktop runner).
+- Session 8's dir-chain addresses (0x431749, 0x424be0, 0x430e4d, 0x405b52, 0x41d755, 0x408b1c, ...) are preserved below in the Session 8 appendix.
+
+## notepad cannot save — root cause (PENDING FIX, decision needed)
+
+Two independent layers:
+
+1. **Save As / Open dialog — completely unimplemented.** notepad's Save As goes
+   through `comdlg32!GetSaveFileNameW`; File > Open uses `GetOpenFileNameW`. **There
+   are ZERO handlers for either** (grep of `packages/core/src` and `packages/ui/src`
+   is empty; comdlg32 is only in the module allowlist). The dialog never appears, so
+   Save As fails silently. Same for File > Open.
+2. **Save (Ctrl+S, existing file) — broken by the desktop launch path, not by I/O.**
+   `WriteFile` → `host.fs.writeFile` → `MemoryFileStore.write` is fully implemented and
+   works. But `launchGuestWindow` never passes a file path as `commandLine`, so notepad
+   opened from File Explorer starts "Untitled" — Ctrl+S then falls into the Save As
+   dialog (layer 1).
+
+Fix options (user to pick):
+- **Quick (recommended)**: make `launchGuestWindow` accept a `commandLine`/file-path
+  arg; when File Explorer opens a `.txt`, pass the store path so notepad's Ctrl+S
+  writes back to the original file via `WriteFile`.
+- **Full**: implement minimal `GetOpenFileNameW`/`GetSaveFileNameW` stubs (host-driven
+  path provider) so notepad's dialogs work. Medium effort.
+
+## explorer.exe — assessed, NOT recommended (decision pending)
+
+Running the real `explorer.exe` (the user's "一劳永逸" idea) is not feasible:
+- It needs the whole shell stack: shell32 (0 handlers), COM runtime (`CoCreateInstance`
+  is a stub returning E_NOTIMPL, no IShellFolder/IShellView/IContextMenu), comdlg32 (0),
+  a real registry (ours is zero-value stubs), DWM/uxtheme/comctl32 v6, and Win11's
+  XAML-based shell. Even its import table doesn't parse with a standard PE reader.
+- cmd.exe (the simplest console app) needed 5+ workarounds; explorer is orders of
+  magnitude more complex. Expected outcome: a window that draws nothing or crashes at
+  the first COM call, after days-to-weeks of work.
+
+**Recommended alternative (option A):**
+1. Standardize the virtual disk to real Windows layout: `C:\Users\Guest\Desktop`,
+   `Documents`, `Downloads`, `Pictures`, `Music`, `Videos`, plus `C:\Windows\System32`
+   etc. — all reads/writes stay on standard Win32 APIs.
+2. Upgrade OUR FileExplorerApp to Windows-style: tree sidebar (This PC / Desktop /
+   Documents...), standard folder shortcuts, right-click context menu, multi-select,
+   drag-drop, and OUR OWN open/save dialog (replaces comdlg32 for user-facing flows).
+3. Cheap "real Windows" feel: extract real `.ico` icons from `imageres.dll` /
+   `shell32.dll` (a few KB each) for the explorer UI. Fonts already copied.
+
+Option C (smallest step): standard user dirs + notepad Ctrl+S quick fix.
 
 ## Quick Commands
 
 ```bash
-# Rebuild diagnostic bundle (esbuild pulls TS source; no core build needed)
-node node_modules/.pnpm/esbuild@0.28.2/node_modules/esbuild/bin/esbuild \
-  --bundle scripts/diag-trap.ts --outfile=node_modules/.cache/diag-trap.cjs \
+# --- Desktop-stack validation (real MemoryFileStore + bridge + cmd.exe) ---
+BS=$(ls -d node_modules/.pnpm/esbuild@*/node_modules/esbuild/bin/esbuild | head -1)
+"$BS" --bundle scripts/cmd-cwd-check.ts --outfile=node_modules/.cache/cmd-cwd-check.cjs \
   --platform=node --format=cjs --target=es2020 --external:typescript
+# usage: cmd-cwd-check.cjs <cmd.exe path> <initial cwd>   (env BK_ARGS for commandLine)
+"C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe" \
+  node_modules/.cache/cmd-cwd-check.cjs "C:/Windows/SysWOW64/cmd.exe" "C:\Windows"
 
-# Run. Sandbox blocks literal `cmd /c` — args come via BK_ARGS.
-BK_ARGS="$(cat node_modules/.cache/bkargs.txt)" node node_modules/.cache/diag-trap.cjs \
-  "C:/Windows/SysWOW64/cmd.exe" > node_modules/.cache/cmd-fixNN-out.bin 2> node_modules/.cache/cmd-fixNN.log
+# --- diag-trap harness (fake FS + probes, session 8 style) ---
+"$BS" --bundle scripts/diag-trap.ts --outfile=node_modules/.cache/diag-trap.cjs \
+  --platform=node --format=cjs --target=es2020 --external:typescript
+BK_ARGS="" "C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe" \
+  node_modules/.cache/diag-trap.cjs "C:/Windows/SysWOW64/cmd.exe" \
+  > node_modules/.cache/out.bin 2> node_modules/.cache/out.log
 
-# Disassemble a window (VA, not RVA)
+# --- typecheck (changed files only) ---
+"C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe" \
+  node_modules/typescript/bin/tsc --noEmit -p tsconfig.json 2>&1 | grep -E "guest-process|handlers|desktop-controller|builtin-win|FileExplorerApp|CmdGuestTerminal|console-channel|apps.tsx"
+
+# --- esbuild syntax check on a file ---
+"$BS" packages/core/src/process/guest-process.ts --format=esm --outfile=/dev/null
+
+# --- disassemble a window (VA, not RVA) ---
 PYEXE=$(ls /c/Users/HUAWEI/.workbuddy/binaries/python/envs/*/Scripts/python.exe 2>/dev/null | head -1)
 "$PYEXE" scripts/disasm-win.py "C:/Windows/SysWOW64/cmd.exe" <va-hex> <len-hex>
-
-# Verify actual bytes at a VA
-PYEXE=$(ls /c/Users/HUAWEI/.workbuddy/binaries/python/envs/*/Scripts/python.exe 2>/dev/null | head -1)
-"$PYEXE" -c "import sys; img=open('C:/Windows/SysWOW64/cmd.exe','rb').read(); va=int(sys.argv[1],16); off=0x400+(va-0x401000); print(img[off:off+16].hex(' '))" <va-hex>
 ```
 
-## Active diag-trap.ts probes
+Note: Git Bash mangles env-var backslashes (`'C:\Windows'` → `C:/Windows`); when
+testing cwd paths use the argv argument (also mangled to `/` — the check tolerates
+both separators by comparing the last path component).
 
-- `0x4317b4` — **Bug18 workaround**: forces `[ebp-0xd8]=1` (separator length). Also dumps loop state.
-- `0x42e327` — **Bug19 workaround**: padding function entry. Detects calls with ret=`0x430e52` (time→size gap, writes 4 spaces) or ret=`0x405b52` (size→name gap, writes 2 spaces). Computes actual wcslen, directly writes spaces + NUL, updates savedLen. Also dumps PAD call params (ret/targetLen/savedLen/buf).
-- `0x43177f`, `0x431793`, `0x431767` — wcslen investigation probes (may not fire in JIT region).
-- `0x43179d`, `0x4317e0`, `0x4317f2` — number formatter digit-write probes.
-- `0x41d755`, `0x41d7a6`, `0x41d730` — grouped-number formatter entry probes.
-- `0x42e3b1`, `0x41d7cd`, `0x430e60` — investigation probes (do NOT fire in JIT region; retained for reference).
-- Earlier session probes (0x40652b, 0x430b52, 0x4098e0 chain, etc.) — retained for reference.
+## Known artifacts / caveats (do NOT chase these again without new evidence)
 
-## Success criteria (status)
+- **`Not enough storage is available to process this command.`** — printed once on
+  stderr right after the banner (cmd formats system message id 8; source is cmd's own
+  internal error path, likely the custom build's `GetEnvironmentVariable`/registry
+  probe failing). Cosmetic; present in the very first browser screenshots too.
+- **Banner ends with `%0`** (`Microsoft Windows [Version ...]%0`) — cmd format-string
+  quirk of this build. Cosmetic.
+- **GS cookie patch still required** for interactive cmd: `0x41dea0 → ret`. Root cause
+  (JIT stack-cookie slot overflow in the interactive reader) still unfixed — the same
+  family as session 8's Bug18/Bug19.
+- `tsc --noEmit`: 6 pre-existing errors in `handlers.ts` (lines ~82/109/128/220/238/239,
+  `ch`/`conv` possibly-undefined) — untouched by this session; all session-9 files are clean.
+- The old JS `CommandPromptApp.tsx` (JS shell) is unused; kept on disk for reference.
+- `dir` column widths rely on the two probes; if a future cmd build shifts those VAs,
+  the probes silently no-op (output stays readable but columns may collapse).
 
-1. ✅ FindFirstFileExW path == `"C:\Windows"` — functionally correct.
-2. ✅ Log shows WriteConsoleW rows: volume header ✓, " Directory of C:\Windows" ✓, file rows ✓ (size fixed, layout fixed), summary ✓.
-3. ✅ `dir` output on stdout ✓; **cmd exit 0 ✓**; stdout free of NUL padding ✓.
-4. ✅ ALL 4 known problems fixed: header path (Bug17), file size (Bug18), row spacing (Bug19), WriteConsoleW (Bug16).
-4. ✅ dir handler target stays `"C:\Windows"` ✓ (no regression).
-5. ⏳ Problem 3 (row field spacing) — remaining.
+## Session 8 historical appendix (cmd /c dir, headless) — preserved
+
+Goal was: run `cmd /c dir C:\Windows`, emit listing to stdout, exit 0. **All 4 known
+problems fixed (workarounds), exit 0.** Key content preserved for JIT work:
+
+- **Bug17** header `C:\`→`C:\Windows`: `GetFileAttributesW/A` now registered in
+  handlers.ts (dir enum path).
+- **Bug18** size `263,`→`263,168`: probe at `0x4317b4` forces separator length=1.
+- **Bug19** row spacing: probe at `0x42e327` writes gap spaces for ret `0x430e52`
+  (4 sp) / `0x405b52` (2 sp) and updates `[obj+8]` savedLen.
+- **Bug16** WriteConsoleW nChars=capacity: NUL-truncate on decode.
+- dir-chain addresses: `0x431749` 64-bit number formatter; `0x424be0` div-by-10;
+  `0x446ad0` separator `","`; `0x42e3c3` `rep stosd` fill loop (suspect, unproven);
+  `0x430e4d`/`0x405b52` padding call sites; `0x41d755` vswprintf wrapper; `0x408b1c`
+  dir exec; `0x40a320` dir outer handler; `0x4098e0` dispatcher; `0x430b52` summary.
+- IAT slots: `0x4500dc` GetDiskFreeSpaceExW, `0x450460` wcschr, `0x450494` memset,
+  `0x45042c` _o___stdio_common_vswprintf, `0x45045c` wcsrchr, `0x450100` GetVolumeInformationW.
+- Logs: `node_modules/.cache/cmd-fix109-out.bin` = session 8 "ALL FIXED" output.
