@@ -11,3 +11,4 @@ export * from './shell/installer';
 export * from './shell/text';
 export * from './shell/pe';
 export * from './shell/pe-icons';
+export * from './shell/fs-ops';

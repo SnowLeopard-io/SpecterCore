@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { DragEvent as ReactDragEvent, ReactNode } from 'react';
-import type { DesktopController, WindowHandle } from '@specter-core/contracts';
+import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
+import type { DesktopController, DirEntry, WindowHandle } from '@specter-core/contracts';
+import { copyRecursive, deleteRecursive, moveRecursive, uniqueName } from '@specter-core/shared';
 import { useUi } from '../context';
 import { WindowFrame } from './WindowFrame';
 import { Taskbar } from './Taskbar';
 import { StartMenu } from './StartMenu';
 import { ContextMenu } from './ContextMenu';
+import { FileContextMenu } from './FileContextMenu';
 import { collectDropFiles, importFiles } from '../import-files';
+import { downloadBytes } from '../download';
 import type { UiController } from '../types';
 
 interface DesktopProps {
@@ -45,9 +48,12 @@ export function Desktop({ controller }: DesktopProps) {
   const [apps, setApps] = useState(controller.listApps());
   const [startOpen, setStartOpen] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const [desktopItems, setDesktopItems] = useState<{ name: string; kind: 'file' | 'directory' }[]>([]);
+  const [desktopItems, setDesktopItems] = useState<DirEntry[]>([]);
   const [selectedApp, setSelectedApp] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
+  const [itemMenu, setItemMenu] = useState<{ x: number; y: number; name: string } | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const dragDepth = useRef(0);
 
   const fs = controller.getFileSystem();
@@ -72,12 +78,10 @@ export function Desktop({ controller }: DesktopProps) {
       .then(() => fs.listDirectory(DESKTOP_DIR))
       .then((entries) =>
         setDesktopItems(
-          entries
-            .map((e) => ({ name: e.name, kind: e.kind === 'directory' ? ('directory' as const) : ('file' as const) }))
-            .sort((a, b) => {
-              if (a.kind !== b.kind) return a.kind === 'directory' ? -1 : 1;
-              return a.name.localeCompare(b.name);
-            }),
+          [...entries].sort((a, b) => {
+            if (a.kind !== b.kind) return a.kind === 'directory' ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          }),
         ),
       )
       .catch(() => setDesktopItems([]));
@@ -90,16 +94,84 @@ export function Desktop({ controller }: DesktopProps) {
 
   const createFolder = (): void => {
     if (!fs) return;
-    let name = 'New Folder';
-    let n = 1;
-    while (desktopItems.some((item) => item.name === name)) {
-      n += 1;
-      name = `New Folder (${n})`;
-    }
+    const base = 'New Folder';
+    const name = uniqueName(base, desktopItems);
     void fs
       .createDirectory(`${DESKTOP_DIR}/${name}`)
       .then(() => refreshDesktop())
       .catch(() => {});
+  };
+
+  // Desktop icon right-click actions. Paths live under DESKTOP_DIR; all store
+  // operations go through the recursive helpers in @specter-core/shared.
+  const openItem = (item: DirEntry): void => {
+    const full = `${DESKTOP_DIR}/${item.name}`;
+    if (item.kind === 'directory') void controller.launch('file-explorer', { path: full });
+    else void controller.openFile(full);
+  };
+  const downloadItem = async (item: DirEntry): Promise<void> => {
+    if (!fs || item.kind !== 'file') return;
+    const full = `${DESKTOP_DIR}/${item.name}`;
+    try {
+      const f = await fs.openFile(full, 'read');
+      const size = await f.size();
+      const data = await f.read(0, size);
+      await f.close();
+      downloadBytes(item.name, data);
+    } catch {
+      /* ignore */
+    }
+  };
+  const runItem = (item: DirEntry): void => {
+    if (item.kind !== 'file' || !item.name.toLowerCase().endsWith('.exe')) return;
+    const full = `${DESKTOP_DIR}/${item.name}`;
+    void controller.openCommandPrompt(`start "" "C:\\${full.replace(/\//g, '\\')}"`, `C:\\${DESKTOP_DIR.replace(/\//g, '\\')}`);
+  };
+  const copyItem = (item: DirEntry): void => {
+    // Selection is implicit; openFile won't copy. The clipboard is local to
+    // the desktop — File Explorer has its own. Cross-app copy/paste can be
+    // added later via a shared store.
+    void item;
+  };
+  const deleteItem = async (item: DirEntry): Promise<void> => {
+    if (!fs) return;
+    const full = `${DESKTOP_DIR}/${item.name}`;
+    try {
+      await deleteRecursive(fs, full);
+      refreshDesktop();
+    } catch {
+      /* ignore */
+    }
+  };
+  const beginRename = (name: string): void => {
+    setItemMenu(null);
+    setRenaming(name);
+    setTimeout(() => renameInputRef.current?.select(), 0);
+  };
+  const commitRename = async (oldName: string, newName: string): Promise<void> => {
+    setRenaming(null);
+    if (!fs || !newName) return;
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) return;
+    const from = `${DESKTOP_DIR}/${oldName}`;
+    const to = `${DESKTOP_DIR}/${trimmed}`;
+    if (desktopItems.some((it) => it.name === trimmed)) return;
+    try {
+      await moveRecursive(fs, from, to);
+      refreshDesktop();
+    } catch {
+      /* ignore */
+    }
+  };
+  const openItemMenu = (e: ReactMouseEvent, name: string): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    let mx = e.clientX;
+    let my = e.clientY;
+    // Keep the menu inside the viewport (sc-desktop covers the full viewport).
+    if (mx + 210 > window.innerWidth) mx = Math.max(0, window.innerWidth - 210);
+    if (my + 260 > window.innerHeight) my = Math.max(0, window.innerHeight - 260);
+    setItemMenu({ x: mx, y: my, name });
   };
 
   const uiController = useMemo<UiController>(
@@ -218,13 +290,50 @@ export function Desktop({ controller }: DesktopProps) {
                 if (isDir) void controller.launch('file-explorer', { path: full });
                 else void controller.openFile(full);
               }}
+              onContextMenu={(e) => openItemMenu(e, item.name)}
             >
               <span className="sc-desktop-icon-img">{isDir ? '📁' : desktopFileIcon(item.name)}</span>
-              <span className="sc-desktop-icon-label">{item.name}</span>
+              {renaming === item.name ? (
+                <input
+                  ref={renameInputRef}
+                  className="sc-explorer-rename"
+                  defaultValue={item.name}
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void commitRename(item.name, (e.target as HTMLInputElement).value);
+                    else if (e.key === 'Escape') setRenaming(null);
+                  }}
+                  onBlur={(e) => void commitRename(item.name, e.target.value)}
+                />
+              ) : (
+                <span className="sc-desktop-icon-label">{item.name}</span>
+              )}
             </button>
           );
         })}
       </div>
+
+      {itemMenu && (() => {
+        const item = desktopItems.find((it) => it.name === itemMenu.name);
+        if (!item) return null;
+        return (
+          <FileContextMenu
+            x={itemMenu.x}
+            y={itemMenu.y}
+            entry={item}
+            onClose={() => setItemMenu(null)}
+            actions={{
+              onOpen: () => openItem(item),
+              onDownload: () => void downloadItem(item),
+              onRun: () => runItem(item),
+              onCopy: () => copyItem(item),
+              onRename: () => beginRename(item.name),
+              onDelete: () => void deleteItem(item),
+            }}
+          />
+        );
+      })()}
 
       {windows.map((win) => (
         <WindowFrame
@@ -243,7 +352,6 @@ export function Desktop({ controller }: DesktopProps) {
           onRefresh={refreshDesktop}
           onNewFolder={createFolder}
           onOpenExplorer={() => void controller.launch('file-explorer')}
-          onWipe={() => void controller.wipeStorage()}
           onClose={() => setMenu(null)}
         />
       )}
