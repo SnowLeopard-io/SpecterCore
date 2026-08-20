@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { WindowHandle } from '@specter-core/contracts';
 import { useUi } from '../context';
+import { AppIcon } from '../AppIcon';
 
 interface TaskbarProps {
   windows: WindowHandle[];
@@ -95,7 +96,7 @@ export function Taskbar({ windows, openStart, onToggleStart }: TaskbarProps) {
             title={win.title}
             onClick={() => focusOrRestore(win)}
           >
-            <span>{win.options.icon ?? '▣'}</span>
+            <AppIcon icon={win.options.icon ?? '▣'} />
           </button>
         ))}
       </div>
