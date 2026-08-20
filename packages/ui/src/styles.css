@@ -3586,6 +3586,7 @@
   background: var(--sc-win-bg);
   min-height: 38px;
   overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .sc-browser-tab {
@@ -3837,6 +3838,7 @@
 /* ---------- Browser app (visual refresh) ---------- */
 .sc-browser {
   position: relative;
+  overflow: hidden;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 120px),
     var(--sc-win-bg);
