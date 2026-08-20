@@ -32,6 +32,8 @@ export interface CreateProcessOptions {
   env?: Record<string, string>;
   /** 独立虚拟硬盘（默认与系统盘隔离） */
   diskName?: string;
+  /** 初始内存占用（字节），用于 guest 进程等无法实时追踪的场景 */
+  initialMemoryBytes?: number;
 }
 
 // ---------------------------------------------------------------------------

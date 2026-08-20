@@ -195,7 +195,7 @@ function triggerDownload(blob: Blob, filename: string): void {
 
 /** System information app styled after Windows 11 Settings. */
 export function SystemInfoApp() {
-  const { controller } = useUi();
+  const { controller, kernel } = useUi();
   const fs = controller.getFileSystem() as FileStore | null;
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [section, setSection] = useState<Section>('home');
@@ -236,13 +236,21 @@ export function SystemInfoApp() {
 
   useEffect(() => {
     let active = true;
-    void controller.getSystemInfo().then((value) => {
-      if (active) setInfo(value);
-    });
+    const refresh = () => {
+      void controller.getSystemInfo().then((value) => {
+        if (active) setInfo(value);
+      });
+    };
+    refresh();
+    // 进程创建/退出时实时刷新，避免打开页面后再启动 exe 列表不更新
+    const offCreated = kernel.events.on('core:process:created', refresh);
+    const offExited = kernel.events.on('core:process:exited', refresh);
     return () => {
       active = false;
+      offCreated();
+      offExited();
     };
-  }, [controller]);
+  }, [controller, kernel]);
 
   if (!info) {
     return <div className="sc-app-body sc-sysinfo">Loading…</div>;

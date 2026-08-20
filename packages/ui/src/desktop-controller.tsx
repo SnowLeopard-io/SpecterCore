@@ -491,6 +491,16 @@ export class DesktopControllerImpl implements DesktopController {
     const interceptor = this.kernel.container.resolve(tokens.coreApi);
     const runner = new GuestProcessRunner(runtime, jit, loader, interceptor);
     const guestWinIds = new Map<number, string>();
+
+    // Register guest process in ProcessManager so it appears in System Info
+    if (this.kernel.container.has(tokens.coreProcess)) {
+      const pm = this.kernel.container.resolve(tokens.coreProcess);
+      await pm.createProcess(source.modulePath, {
+        args: source.commandLine ? [source.commandLine] : [],
+        initialMemoryBytes: image.byteLength,
+      });
+    }
+
     try {
       await runner.run(image, {
         createEngine: (mode) => new JitEngineImpl(runtime, mode),
@@ -646,6 +656,15 @@ export class DesktopControllerImpl implements DesktopController {
     const interceptor = this.kernel.container.resolve(tokens.coreApi);
     const runner = new GuestProcessRunner(runtime, jit, loader, interceptor);
     const channel = new CmdConsoleChannel();
+
+    // Register guest process in ProcessManager so it appears in System Info
+    if (this.kernel.container.has(tokens.coreProcess)) {
+      const pm = this.kernel.container.resolve(tokens.coreProcess);
+      await pm.createProcess(source.modulePath, {
+        args: source.initialCommand ? [source.initialCommand] : [],
+        initialMemoryBytes: image.byteLength,
+      });
+    }
 
     // Queue an initial command (e.g. `cd <dir>` or running an exe) before the
     // guest starts reading its stdin, so it executes right after the banner.

@@ -50,8 +50,8 @@ export class ProcessManagerImpl implements ProcessManager {
       state: options.suspended ? 'suspended' : 'running',
       imagePath,
       args: options.args ?? [],
-      memoryBytes: 0,
-      threadCount: 0,
+      memoryBytes: options.initialMemoryBytes ?? 0,
+      threadCount: 1,
       startTime: Date.now(),
     };
     this.processes.set(pid, { info, threads: new Set() });
