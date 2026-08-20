@@ -4049,7 +4049,7 @@
   padding: 0 16px;
   border: none;
   border-radius: 10px;
-  background: #2f3b4d;
+  background: linear-gradient(180deg, #3a4a63, #2b394f);
   color: #fff;
   font-size: 13px;
   font-weight: 500;
@@ -4059,99 +4059,6 @@
 }
 .sc-browser-empty-dl button:hover { filter: brightness(1.16); }
 .sc-browser-empty-dl button:active { transform: scale(0.97); }
-.sc-browser-empty-dl button.sc-browser-empty-dl-external {
-  background: linear-gradient(180deg, #3a4a63, #2b394f);
-}
-
-.sc-browser-empty-hint {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: #6b7c92;
-  margin-top: 14px;
-  padding: 8px 14px;
-  border-radius: 999px;
-  background: rgba(31, 111, 214, 0.07);
-}
-.sc-browser-empty-hint code { color: #1f6fd6; font-size: 12px; }
-
-.sc-browser-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  font-size: 12.5px;
-  color: var(--sc-text-dim);
-  background: rgba(255, 255, 255, 0.03);
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-}
-.sc-browser-status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #c9a33c;
-  flex: none;
-}
-.sc-browser-status-dot.ok { background: #61c47a; }
-
-.sc-browser-downloads {
-  background: rgba(0, 0, 0, 0.22);
-  backdrop-filter: blur(20px) saturate(130%);
-  -webkit-backdrop-filter: blur(20px) saturate(130%);
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  max-height: 42%;
-}
-
-.sc-browser-downloads-head {
-  position: sticky;
-  top: 0;
-  gap: 6px;
-  padding: 10px 14px;
-  background: rgba(30, 36, 46, 0.9);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
-}
-.sc-browser-downloads-head span { display: inline-flex; align-items: center; gap: 8px; }
-.sc-browser-downloads-head code { color: var(--sc-accent); }
-.sc-browser-downloads-close {
-  border: none;
-  background: transparent;
-  color: var(--sc-text-dim);
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-}
-.sc-browser-downloads-close:hover { background: rgba(255, 255, 255, 0.1); color: var(--sc-text); }
-
-.sc-browser-downloads-empty {
-  padding: 22px 14px;
-  text-align: center;
-  font-size: 12.5px;
-  color: var(--sc-text-dim);
-}
-
-.sc-browser-download {
-  gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
-  transition: background-color 0.12s ease;
-}
-.sc-browser-download:hover { background: rgba(255, 255, 255, 0.04); }
-.sc-browser-download svg { flex: none; }
-.sc-browser-download.ok .sc-browser-download-name { color: #8fd19f; }
-.sc-browser-download.fail .sc-browser-download-name { color: #f28b82; }
-.sc-browser-download-name { font-weight: 500; }
-.sc-browser-download-meta {
-  flex: none;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-}
 
 /* ---------- Disk cleanup (system info) ---------- */
 .sc-cleanup-warn + .sc-settings-section,
