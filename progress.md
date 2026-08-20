@@ -2,6 +2,99 @@
 
 > Short handover notes for recent work. Full details live in `docs/PROGRESS.md`.
 
+## 2026-08-21 — Session 19 round 2 (32-bit VSCode installer, agent handover)
+
+> **Handover**: THIS file was written for an agent switch at 2026-08-21 05:50 GMT+8.
+> The 32-bit task owner hands off mid-task. Read the sections below in order, then
+> continue with "Next steps".
+
+### Mission (read first)
+- Make `D:\Downloads\VSCodeSetup-ia32-1.83.1.exe` (91,074,856 bytes, Inno Setup /
+  Delphi-32) actually run inside SpecterCore (browser x86 PE -> WASM JIT layer).
+- **Boundary**: another agent owns the 64-bit adaptation (their changes are STAGED,
+  incl. `cmd-x64.exe` / `notepad-x64.exe` in `apps/web/public/win/`). Stay on the
+  32-bit path, keep edits additive, avoid the other agent's active lines.
+- The guest runner is headless via `scripts/flow-vscode.ts` (public `RunOptions`:
+  `onStep(eip,runtime)`, `probes`, `createEngine`, `readFile`, `onOutput`).
+
+### Progress this round (since the 02:44 handover)
+- **Fixed `process` global crash** (`packages/core/src/jit/executor.ts:84`): the
+  `process.env.SPECTER_TRACE_EXEC` check threw `ReferenceError: process is not
+  defined` in the browser, breaking cmd.exe/notepad.exe launch. Now guarded with
+  `typeof process !== 'undefined'`.
+- **Fixed SEH unwind transfer ESP** (`guest-process.ts` RtlUnwind handler): the
+  transfer ESP was a fixed `targetFrame - 0x34`; now computed dynamically as
+  `inner - 0x28` from the inner SEH record (so `[esp+0x28]` reads the accepting
+  record, matching the unwind target's `Frame+4`/`Frame+8` reads). This fixed the
+  misaligned jump to 0x407461 (middle of `xor eax,eax`).
+- **Implemented RCL/RCR** (`codegen.ts` `emitRotateCarry`/`emitRotateCarry64`,
+  wired at the `rcl`/`rcr` decode cases): replaced the `unreachable()` stubs that
+  faulted at 0x407461. Handles CF-in/out, masked counts, and OF for both rcl/rcr.
+- **Metrics**: basic blocks 11775 -> **20912**, API calls -> **330**. The old
+  .itext 0x10100 return-address blocker is GONE (that path now runs cleanly).
+  The old "vtable corruption" label was WRONG — see the corrected diagnosis below.
+
+### Current blocker (corrected: NOT vtable corruption — finally-frame data issue)
+- Fault: `call [ecx-4]` at 0x405cf0 jumps to 0xc35df8eb.
+- **Corrected diagnosis**: `[0x4b10f0]` (the "vtable") = 0x4b50e0 is CORRECT and
+  matches the file. The fault target 0xc35df8eb is the DWORD at
+  `[0x4b50e0-4] = [0x4b50dc]`, which holds code bytes `eb f8 5d c3`
+  (`jmp -8; pop ebp; ret`) interpreted as an address. So the dispatch reads 4
+  bytes BEFORE a code address — i.e. 0x4b10f0 is NOT an object.
+- **0x4b10f0 is a 63-entry dispatch table** (header at 0x4b10d8: `[0x4b10d8]=0x3f`
+  count, `[0x4b10dc]=0x4b10f0` entries ptr; first entry 0x4b50e0 in .itext).
+- **Path** (shutdown/finalization): FreeLibrary/LocalFree cleanup -> F2
+  (0x407418, forward finalization-list loop) -> F1 (0x4073b0, reverse loop) ->
+  0x40718c (finalize cleanup) -> 0x405ce8 (`mov ecx,[eax]; call [ecx-4]`) -> fault.
+- **0x40718c** pops a finally-frame at edx=0x7fffec0 (via 0x40cc60, which reads
+  the TLS slot: `[0x2c]` TIB TlsStorage + `[0x4b7c14]` TLS index=0). Frame fields:
+  `[0]=0x7fffeec [4]=0x405d7a [8]=0x4b10f0 (object) [0xc]=0x41fda2 (record)`.
+- **Magic check fails**: `cmp [0x41fda2], 0x0eedfade` — `[0x41fda2]` is x87 code
+  bytes (`dd 5d f8 9b`), not the magic. So the cleanup calls the "finalizer" on
+  0x4b10f0, dispatching to `[0x4b50dc]` = 0xc35df8eb -> fault.
+- TLS slot 0 (finally-frame head) = 0x7fffeec; chain is a 2-node CYCLE
+  (0x7fffeec <-> 0x7fffec0), which smells like SEH/finally frame corruption.
+
+### Root cause hypothesis / next lead
+- The finally-frame at 0x7fffec0 holds WRONG data: `[8]=0x4b10f0` (dispatch table)
+  and `[0xc]=0x41fda2` (code) instead of a real object + a finalization record
+  whose first dword is 0x0eedfade. If the magic matched, the finalize would be
+  skipped and no fault would occur.
+- Next: find WHO pushes the frame at 0x7fffec0 with object=0x4b10f0 /
+  record=0x41fda2 (search for the finally-frame push sites; check the
+  finalization-list setup at 0x407484 which writes `[0x4bdba0]`). Also verify the
+  TLS slot 0 / `[0x2c]` handling — the circular chain suggests a frame was pushed
+  but never popped, or the SEH/finally frame layout is misaligned.
+
+### Build / run commands (pnpm is broken, use local esbuild + node22)
+```
+NODE="C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe"
+$NODE node_modules/esbuild/bin/esbuild scripts/flow-vscode.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/flow-vscode.mjs
+$NODE node_modules/.cache/flow-vscode.mjs "D:/Downloads/VSCodeSetup-ia32-1.83.1.exe" 0 "0x4071b9;0x40cc6f;0x405cec" 2>&1 | Select-String -Pattern "\[probe\]|\[flow\]|fault"
+```
+- Type check: `$NODE node_modules/typescript/bin/tsc -p tsconfig.json --noEmit`
+  (pre-existing errors in unrelated areas only: XmmOperand `.size`, BrowserApp.tsx).
+- Regression: 32-bit `apps/web/public/win/cmd.exe`, `notepad.exe` still behave
+  correctly after all fixes. Do NOT touch the x64 samples.
+
+### File ownership / conflict zones
+- **32-bit task safe zone** (edits here): `packages/core/src/process/guest-process.ts`,
+  `packages/core/src/pe/mapper.ts`, `packages/core/src/api/*`, scripts under `scripts/`.
+- **Shared JIT files** (other agent has staged edits; my scas/cmps/x87/RCL-RCR
+  changes are additive and non-overlapping): `ir.ts`, `x86-decoder.ts`,
+  `codegen.ts`, `engine.ts`, `wasm-encoder.ts`.
+- Probe/diag scripts worth keeping: `scripts/probe-va.ts`, `scripts/probe-scasw.ts`,
+  `scripts/flow-vscode.ts` (tracer + API tags + probes), `scripts/check-argcounts.ts`,
+  `scripts/disasm-range.ts`, `scripts/imports-scan.py`.
+
+### Next steps (in order)
+1. Find where the finally-frame at 0x7fffec0 is pushed (object=0x4b10f0 /
+   record=0x41fda2); verify the frame layout and the TLS slot-0 chain.
+2. Check the finalization-list setup at 0x407484 (`[0x4bdba0]` list head) and how
+   F2/F1 read entries (`entries[index*8]` / `entries[index*8+4]`).
+3. Keep the handover notes in this file updated; commit nothing that overlaps the
+   other agent's staged JIT work.
+
 ## 2026-08-21 — Session 19 round (32-bit VSCode installer, agent handover)
 
 > **Handover**: THIS file was written for an agent switch at 2026-08-21 02:44 GMT+8.

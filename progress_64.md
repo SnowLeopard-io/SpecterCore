@@ -56,22 +56,9 @@
 - x64 notepad 现在能走完 CRT 启动、注册窗口类、加载菜单/字符串（221 个 API trap）
 - **新障碍**：SHGetKnownFolderPath 失败（旧 failHr）导致 64 位 notepad 直接放弃窗口创建 → 已改为返回 S_OK + Documents 路径（见下）
 
-## 当前调查中（未解决）
+## 当前调查中（未解决）→ 已定位：见下方「2026-08-21 晚些时候」会话记录
 
-**现象**：x64 notepad 在 SHGetKnownFolderPath 成功返回后，后续 `ret`（0x10220a6 附近）弹出返回地址 = 0x2000cd0（正是我的 Documents 路径缓冲区），跳到数据区 → fault "unsupported opcode 0x63 (ARPL)"。
-
-**轨迹尾部**（trace-x64）：
-`0x1022056 0x102205a 0x100a0c0 0x100a0e4 0x100a11a 0x1022068 0x1022081 0x102208b 0x2006a8 0x2006af 0x1022092 0x2000cd0`
-
-**关键观察**：
-- SHGetKnownFolderPath 调用点 ret=0x102200e，out=0x7ffedf8（栈上），rsp=0x7ffeda8，`[out]=0 [out+4]=0`（调用前正常）
-- 我的 handler 把 Documents 缓冲地址（0x2000cd0）写入 `[out]`，但 **writeInt32 只写 4 字节**；0x2000cd0 低 32 位 = 0x2000cd0，高 32 位未写（若 out 处原有脏数据会残留高位，但 32 位 < 4GB 时高位应为 0）
-- **疑似问题**：64 位指针应该用 64 位写入。若 guest 按 8 字节读 `*out`，低 4 字节=0x2000cd0、高 4 字节=残留垃圾 → 返回/后续逻辑用错地址。但 ret 弹出的地址恰是 0x2000cd0（低 32 位）而非垃圾高位拼出来的值，所以更可能是**某个 call 把 out 里的 4 字节值当返回地址**？
-- 0x102208b 是 `call [rip+0x7c46]`（经 IAT 的间接 call），目标 stub=0x2006a8 → trap → 返回 0x1022092 → epilogue（nop;mov rbx,[rsp+0x50];mov rax,rdi;add rsp,0x20;pop rdi;pop rsi;pop rbp;ret）→ **ret 弹出 0x2000cd0**
-
-**待验证假设**（下一步）：
-1. **64 位指针写 4 字节截断**：SHGetKnownFolderPath 的 out 指针写入应改为 64 位（writeInt32 只写 4 字节）。查 runtime 是否有 writeInt64/写 8 字节的方法，改成 8 字节写入。其它写指针的 handler（pmp_qi、WindowsCreateString 等）x64 下可能同样只写了 4 字节——需系统性检查所有写 out 指针的地方。
-2. 若 1 不是根因：在 0x1022092 前 dump [rsp] 附近 64 字节，确认 ret 弹出值来源；检查 0x100a0c0/0x100a0e4/0x100a11a 这段（SHGetKnownFolderPath 后的 notepad 代码）如何消费路径指针、有没有把 buffer 地址当返回地址压栈。
+> 旧条目（SHGetKnownFolderPath 后 `ret` 弹出 0x2000cd0 数据指针）**根因已修复**：是 x64 动态陷阱桩生成了 `ret N`（stdcall）导致栈漂移（见「2026-08-21 会话更新」）。当前真正未解的问题是 delay-load/fothk 槽 0x102a450 未填充（见「2026-08-21 晚些时候」）。
 
 ## 代码位置速查
 
@@ -86,10 +73,10 @@
 
 ## 下一步
 
-1. **检查 runtime 是否有 64 位写指针方法**，SHGetKnownFolderPath 及所有写 out 指针的 handler 在 x64 下改为 8 字节写入
-2. 重新 trace，看 ret 是否还跳到 0x2000cd0
-3. 若仍跳：0x1022092 处 dump [rsp] 栈内容 + 0x100a0c0 段代码的路径消费逻辑
-4. 跑通 notepad-x64 → cmd-x64（此前 @0x1024a10 unsupported opcode 0x7）→ 桌面集成（builtin-win.ts 切 64 位 System32）→ typecheck + vitest + 文档
+1. **确认 RoGetActivationFactory（idx 230）激活的 WinRT 类与当前返回**（guest-process.ts ~1907 行 handler dump HSTRING/IID），判断 fothk 槽 0x2a450 的填充者（H1：guest 的 XAML 宿主初始化 / H2：runtime 库绝对寻址填充）
+2. trace RoGetActivationFactory 后的 guest 路径，找到"本应把函数地址写入 0x2a450"的那次调用；重点 delay-load helper 链（0x10272d0→0x10272fb→0x1002d37）
+3. 修 WinRT 初始化让 guest 自填槽；若走不通则给槽填通用 dispatcher 并在首次 fothk 调用 trap
+4. 跑通 notepad-x64 → cmd-x64（同有 fothk）→ 桌面集成 → typecheck + vitest + 文档
 
 ---
 
@@ -149,3 +136,66 @@
 - `scripts/run-exe-debug.ts`（新）：headless 复现卡死，maxSteps 400M。
 - `scripts/dump-x64.ts`（新）：按 PE 静态映射后 dump 指定地址字节/IAT 槽。
 - 注意：headless 后台跑需要 Start-Process + RedirectStandardError，进程不退出时 stderr 可能全缓冲在文件（PowerShell 管道会等进程退出）。
+
+---
+
+## 2026-08-21 晚些时候：fothk 机制定位（notepad-x64 真机结构确认）
+
+### 结论先行
+notepad-x64.exe / cmd-x64.exe 是**真实微软 Win11 二进制**（非本工程变换产物）：两者都有 `.fothk` 节（32 位 notepad.exe 没有）。`.fothk` = "foreign thunk"，是 WinUI/THF 托管型 notepad 的 **WinRT/XAML 外部跳转表**：`fothk` 节里只有一条 `jmp 0x10274e0`，**~500 个调用点全部 `call 0x1028010`**，0x10274e0 = `jmp [0x102a450]`。即这个 notepad 的 API 调用**几乎全部汇聚到唯一槽 0x102a450**，该槽由 notepad 的 WinRT/XAML 宿主**运行时填充**（不是 PE 加载器、不是标准 delay-load）。我们模拟器里宿主初始化没走通 → 槽保持文件占位值 `jmp rax` → 首个 fothk 调用崩溃。
+
+### 二进制结构（实测，notepad-x64.exe）
+```
+.text   VA=0x1000  vsize=0x267e2  raw=0x1000
+fothk   VA=0x28000 vsize=0x1000  raw=0x28000   ← 仅 0x28010 有代码，其余全 cc
+.rdata  VA=0x29000 vsize=0xa6c8  raw=0x29000
+.data   VA=0x34000 vsize=0x2740  raw=0x34000
+.pdata  VA=0x37000 vsize=0x1218  raw=0x35000
+.didat  VA=0x39000 vsize=0xf8    raw=0x37000
+.rsrc   VA=0x3a000 vsize=0x1e1d0 raw=0x38000
+.reloc  VA=0x59000 vsize=0x35c   raw=0x57000
+```
+- **导入目录**：size=0x3fc = 51 条（50 描述符 + 全零终止符）。50 条全部解析成功；最高 IAT 槽 = 0x2a430（D35 shcore scaling，1 个函数）。**无任何描述符覆盖 0x2a438+**。
+- **delay 目录**：rva=0x303e0，size=0xe0 = 7 条（6 个真实 DLL：ADVAPI32/COMDLG32/PROPSYS/SHELL32/WINSPOOL/urlmon + 终止符）。所有 delay IAT 都在 `.didat`（0x39000+），**不是** 0x2a450。
+- 两者都不是 0x2a450 的"主人"。
+
+### fothk 跳转链（实测字节）
+- `fothk` 节（0x28000-0x29000）**唯一非 cc 字节**：0x28010 = `e9 cb f4 ff ff` = `jmp 0x10274e0`（实测 5 个非 cc 字节）。
+- **~500 个 `call 0x1028010`**（扫 .text 的 e8/e9 指向 0x28010/0x274e0，如 rva 0x12c9 `e8 42 6d 02 00`、0x3082 `e8 89 4f 02 00` 均 → 0x1028010；另有 0xaab0/0xb3d0 是 `jmp 0x1028010`）。
+- 0x10274e0 = `ff 25 6a 2f 00 00` = `jmp [0x102a450]`；0x1027520 = `ff 25 2a 2f 00 00` = `jmp [0x102a450]`（两条 thunk 用同一个槽 0x2a450）。
+- 0x274f6 处是 10 字节 NOP `66 66 0f 1f 84 00 00 00 00 00` 对齐，之后 `ff e0` = `jmp rax` 恰在 **0x27500**。
+
+### 槽区 0x2a438-0x2a478（文件值，均有 reloc type 10 DIR64）
+```
+0x2a438 = 0
+0x2a440 = 0x1400020a0  → rva 0x20a0 = `c2 00 00` = ret 0
+0x2a448 = 0x1400020a0  → 同上
+0x2a450 = 0x140027500  → rva 0x27500 = `ff e0` = jmp rax   ← 崩溃槽
+0x2a458 = 0x140027520  → rva 0x27520 = jmp [0x102a450]
+0x2a460 = 0x140027520  → 同上
+0x2a468 = 0
+0x2a470 = 0
+```
+- 映射后：0x2a450 = 0x1027500（`jmp rax`），0x2a458/0x2a460 = 0x1027520。reloc 在 0x2a440/0x2a448/0x2a450/0x2a458/0x2a460（+0x2a478）。
+
+### 崩溃机制（本轮确认）
+- 崩溃点（headless 与 trace-x64 一致）：`call 0x1028010` → `jmp 0x10274e0` → `jmp [0x102a450]` → 槽值 0x1027500（`jmp rax`）→ rax=0x6e0065 垃圾 → 跳数据区卡死。
+- mapper（mapper.ts:823-865）**只改写 pe.imports 的 IAT 槽**；孤儿槽 0x2a440-0x2a460 只被 applyRelocations 重定位（rebase），未被填成 trap stub。
+- parseImports（loader.ts:189-222）只 push `functions.length>0` 的描述符；没有任何描述符的 FirstThunk 落在 0x2a438-0x2a470（全表扫描确认）。
+- `ResolveDelayLoadedAPI` 钩子从未触发（无 `[rd]` 日志），但这不是 delay 目录的槽。
+- **guest 自身也不写这些槽**：扫 .text 无任何 RIP-relative 指令（lea/mov `?? 05 <disp32>`）指向 0x2a3f0-0x2a488。→ 填充者不是 guest 的直接代码。
+
+### 假设
+- **H1（主）**：槽 0x2a450 由 notepad 的 WinRT/XAML 宿主初始化（RoGetActivationFactory 链）运行时填充为真实函数地址；我们的 RoGetActivationFactory 处理返回的东西让 guest 初始化失败/提前，槽保持占位 `jmp rax`。首个 fothk 调用即炸。与崩溃序列（`[trap] RoGetActivationFactory idx=230` → 紧跟 0x10274e0）吻合。
+- **H2**：槽由某个 runtime 库（kernel32/XAML host）经绝对寻址填充（`mov [reg],rax`，reg=槽指针），需在模拟层复现该填充动作。
+
+### 下一步（按优先级）
+1. **确认 RoGetActivationFactory 激活的是哪个 WinRT 类**：在 guest-process.ts 的 RoGetActivationFactory handler（~1907 行）dump rcx（HSTRING class 名）与返回的 IID/工厂，看 230 号激活是 XAML/THF 哪个类、我们返回了什么（S_OK+PMP vs E_NOINTERFACE）。
+2. **找填充槽 0x2a450 的调用**：trace RoGetActivationFactory 之后 guest 执行的路径，识别"本应把某函数地址写入 0x2a450"的那次调用（绝对寻址写、或经指针的 mov [reg],rax）。重点看 delay-load helper 链（0x10272d0 → call 0x10272fb → 0x1002d37 `lea rax; jmp rax`）是否与 XAML 宿主 DLL 的加载有关。
+3. 若 H1 成立：修 RoGetActivationFactory/WinRT 初始化路径，让 guest 能自己填槽。
+4. 若 guest 实在走不完 XAML 初始化：在首个 fothk 调用（槽未填充时）trap 并记录调用点+寄存器，识别该 API 后做针对性处理（或给槽填一个通用 dispatcher）。
+5. 跑通 notepad-x64 → cmd-x64（cmd-x64 也有 fothk，0x3a000 处，同样机制）→ 桌面 → typecheck+vitest+文档。
+
+### 本轮调试工具变更
+- `scripts/imp-x64.ts`（callers of 0x274e0/0x28010 扫描 + delay 名字表）、`scripts/verify-x64.ts`（节表/调用点/thunk 扫描）、`scripts/fothk.ts`、`scripts/slots-x64.ts`（槽区精确字节）、`scripts/writes-x64.ts`（RIP-relative 写槽扫描）、`scripts/secs-x64.ts`（三 exe 节表对比）——一次性探针脚本，可留作复现。
+- 确认 `scripts/build-x64-exe.ts` 只生成 sample/hello-x64.exe，与 notepad/cmd 无关。

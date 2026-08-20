@@ -66,6 +66,25 @@ async function main(): Promise<void> {
     if (String(ctx.proc).toLowerCase() === 'resolvedelayloadedapi') {
       console.error(`[rd] ResolveDelayLoadedAPI args=${(ctx.rawArgs ?? []).map((a) => '0x' + (a >>> 0).toString(16)).join(',')}`);
     }
+    if (String(ctx.proc).toLowerCase() === 'rogetactivationfactory') {
+      const readHstr = (h: number): string => {
+        if (!h) return '(null)';
+        const len = runtime.readInt32(h - 8);
+        if (len < 0 || len > 0x400) return `(len=${len})`;
+        const b = runtime.readBytes(h, len * 2);
+        let s = '';
+        for (let i = 0; i + 1 < b.byteLength; i += 2) {
+          const c = b[i]! | (b[i + 1]! << 8);
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      };
+      const classId = (ctx.rawArgs?.[0] ?? 0) >>> 0;
+      const iid = (ctx.rawArgs?.[1] ?? 0) >>> 0;
+      const iidBytes = iid ? [...runtime.readBytes(iid, 16)].map((x) => x.toString(16).padStart(2, '0')).join('') : 'null';
+      console.error(`[raf] class="${readHstr(classId)}" iid=${iidBytes} out=0x${((ctx.rawArgs?.[2] ?? 0) >>> 0).toString(16)}`);
+    }
     if (String(ctx.proc).toLowerCase() === 'shgetknownfolderpath') {
       const rsp = runtime.getReg('rsp');
       const ret = runtime.readInt32(rsp);
@@ -83,13 +102,14 @@ async function main(): Promise<void> {
     interceptor,
   );
 
-  const result = await runner.run(image, {
+const result = await runner.run(image, {
     createEngine: (mode) => new JitEngineImpl(runtime, mode),
     modulePath,
     readFile: async () => null,
     onOutput: () => {},
     probes: [],
-onStep: (eip, rt) => {
+    maxSteps: 1_500_000,
+    onStep: (eip, rt) => {
       tail.push(eip);
       if (tail.length > 120) tail.shift();
       if (eip === 0x1022025) {

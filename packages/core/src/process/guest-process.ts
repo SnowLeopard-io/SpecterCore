@@ -1984,7 +1984,14 @@ export class GuestProcessRunner {
     // (IsProtectionEnabled-ish) writes "not protected" (bool 0) and returns
     // S_OK. Other classes keep the E_NOTIMPL behavior.
     const pmpFactoryAddr = ((): number => {
-      const vt = bumpAlloc(0x40); // 16 vtable slots
+      // x64 vtable slots are 8-byte pointers at 8-byte stride (notepad reads
+      // vtable[12] at offset 0x60); the 32-bit build uses 4-byte slots.
+      const writePtr = (address: number, value: number): void => {
+        this.runtime.writeInt32(address, value | 0);
+        if (pe.is64) this.runtime.writeInt32(address + 4, 0);
+      };
+      const slotCount = pe.is64 ? 32 : 16;
+      const vt = bumpAlloc(pe.is64 ? slotCount * 8 : slotCount * 4);
       const factory = bumpAlloc(0x10);
       // IUnknown: [0]=QueryInterface(3 args), [1]=AddRef(0), [2]=Release(0).
       // notepad's EDP helper then calls [12] (CheckAccess-ish, 3 args) and
@@ -2000,11 +2007,11 @@ export class GuestProcessRunner {
               : i === 14
                 ? 'pmp_isprotected'
                 : 'pmp_vtbl_stub';
-      for (let i = 0; i < 16; i++) {
+      for (let i = 0; i < slotCount; i++) {
         const stub = allocDynamicStub(slotName(i));
-        this.runtime.writeInt32(vt + i * 4, stub);
+        writePtr(vt + i * (pe.is64 ? 8 : 4), stub);
       }
-      this.runtime.writeInt32(factory, vt);
+      writePtr(factory, vt);
       return factory;
     })();
     this.interceptor.hook('kernel32.dll', 'RoGetActivationFactory', (ctx) => {
@@ -2024,7 +2031,10 @@ export class GuestProcessRunner {
         }
       }
       if (name === 'Windows.Security.EnterpriseData.ProtectionPolicyManager') {
-        if (out) this.runtime.writeInt32(out, pmpFactoryAddr);
+        if (out) {
+          this.runtime.writeInt32(out, pmpFactoryAddr | 0);
+          if (pe.is64) this.runtime.writeInt32(out + 4, 0);
+        }
         return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
       }
       return { returnValue: 0x80004001, errorCode: E.NO_ERROR }; // E_NOTIMPL
@@ -2037,7 +2047,10 @@ export class GuestProcessRunner {
       // (this, riid, void** out) — return a copy of the interface pointer.
       const out = ctx.rawArgs[2] ?? 0;
       const self = ctx.rawArgs[0] ?? 0;
-      if (out) this.runtime.writeInt32(out, self);
+      if (out) {
+        this.runtime.writeInt32(out, self | 0);
+        if (pe.is64) this.runtime.writeInt32(out + 4, 0);
+      }
       return { returnValue: 0, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('kernel32.dll', 'pmp_checkaccess', pmpOk);

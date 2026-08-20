@@ -214,6 +214,22 @@ function dumpAt(label: string, rt: WasmRuntimeImpl, extraOffsets: number[]): voi
     const b = rt.readBytes(0x407440, 48);
     console.error(`[probe]   mem@0x407440 = ${[...b].map((x) => x.toString(16).padStart(2, '0')).join(' ')}`);
   } catch { /* ignore */ }
+  // TEMP: dump the magic-check target 0x41fda2 + the frame fields at edx
+  try {
+    const b = rt.readBytes(0x41fda2, 16);
+    console.error(`[probe]   mem@0x41fda2 = ${[...b].map((x) => x.toString(16).padStart(2, '0')).join(' ')}`);
+  } catch { /* ignore */ }
+  try {
+    const edx = rt.getReg('edx') >>> 0;
+    if (edx) {
+      const vals: string[] = [];
+      for (let i = 0; i < 4; i++) {
+        const v = rt.readInt32(edx + i * 4) >>> 0;
+        vals.push(`[edx+0x${(i * 4).toString(16)}]=0x${v.toString(16)}${sectionOf(v) ? `(${sectionOf(v)})` : ''}`);
+      }
+      console.error(`[probe]   edx=0x${edx.toString(16)} ${vals.join(' ')}`);
+    }
+  } catch { /* ignore */ }
   for (const off of extraOffsets) {
     const addr = esp + off;
     console.error(
