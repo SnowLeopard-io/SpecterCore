@@ -248,7 +248,8 @@ export function SystemInfoApp() {
     return <div className="sc-app-body sc-sysinfo">Loading…</div>;
   }
 
-  const diskPct = info.diskCapacity > 0 ? Math.round((info.diskUsed / info.diskCapacity) * 100) : 0;
+  const diskPctRaw = info.diskCapacity > 0 ? (info.diskUsed / info.diskCapacity) * 100 : 0;
+  const diskPct = diskPctRaw >= 1 ? Math.round(diskPctRaw) : Math.round(diskPctRaw * 10) / 10;
 
   return (
     <div className="sc-settings">
