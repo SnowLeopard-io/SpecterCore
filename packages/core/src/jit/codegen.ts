@@ -11,7 +11,7 @@
  */
 
 import type { Instruction, MemOperand, Operand, RegName, Size, XmmOperand } from './ir';
-import { CTX_BASE, EFLAGS_OFFSET, EIP_OFFSET, FLAG_DF, INT_VECTOR_OFFSET, REG_OFFSET, STATUS_CONTINUE, STATUS_FAULT, STATUS_TRAP, TSC_OFFSET, fpuAddr, xmmAddr } from './cpu';
+import { CTX_BASE, EFLAGS_OFFSET, EIP_OFFSET, FLAG_DF, FLAG_ZF, INT_VECTOR_OFFSET, REG_OFFSET, STATUS_CONTINUE, STATUS_FAULT, STATUS_TRAP, TSC_OFFSET, fpuAddr, xmmAddr } from './cpu';
 import type { Cond } from './cpu';
 import { WasmFunction } from './wasm-encoder';
 
@@ -22,7 +22,9 @@ const L_S = 2;
 const L_TMP = 3;
 const L_TMP2 = 4;
 const L_ORIG = 5;
-const L_I64 = 6; // i64 scratch for mul/div
+const L_I64 = 6; // i64 scratch for mul/div + 64-bit results
+const L_I64A = 7; // i64 operand A (64-bit arithmetic)
+const L_I64B = 8; // i64 operand B (64-bit arithmetic)
 
 /** Active decode mode; set at the start of each block compile. */
 let MODE: 'x86' | 'x64' = 'x86';
@@ -38,6 +40,8 @@ export function buildBlockFunction(instructions: readonly { inst: Instruction; n
   const fn = new WasmFunction();
   for (let i = 0; i <= 5; i++) fn.declareLocal('i32');
   fn.declareLocal('i64'); // L_I64
+  fn.declareLocal('i64'); // L_I64A
+  fn.declareLocal('i64'); // L_I64B
   for (const di of instructions) emitInstruction(fn, di.inst, di.nextAddress);
   if (!opts.terminated) {
     // straight-line block: advance EIP past the block so the dispatcher continues
@@ -61,12 +65,14 @@ function regAddr(reg: RegName): number {
 function storeWidth(fn: WasmFunction, size: Size): void {
   if (size === 8) fn.i32Store8();
   else if (size === 16) fn.i32Store16();
+  else if (size === 64) fn.i64Store();
   else fn.i32Store();
 }
 
 function loadWidth(fn: WasmFunction, size: Size): void {
   if (size === 8) fn.i32Load8U();
   else if (size === 16) fn.i32Load16U();
+  else if (size === 64) fn.i64Load();
   else fn.i32Load();
 }
 
@@ -87,10 +93,11 @@ function emitEa(fn: WasmFunction, mem: MemOperand): void {
   }
 }
 
-/** Pushes an operand's value onto the stack. */
+/** Pushes an operand's value onto the stack (i64 for 64-bit operands). */
 function pushOperand(fn: WasmFunction, op: Operand): void {
   if (op.kind === 'imm') {
-    fn.i32Const(op.value);
+    if (op.size === 64) fn.i64Const(op.value);
+    else fn.i32Const(op.value);
   } else if (op.kind === 'reg') {
     fn.i32Const(regAddr(op.reg));
     loadWidth(fn, op.size);
@@ -103,23 +110,31 @@ function pushOperand(fn: WasmFunction, op: Operand): void {
   }
 }
 
-/** Stores the value on top of the stack into an operand. */
+/** Stores the value on top of the stack into an operand (i64 for 64-bit). */
 function storeOperand(fn: WasmFunction, op: Operand): void {
   if (op.kind === 'reg') {
-    fn.localSet(L_TMP);
-    fn.i32Const(regAddr(op.reg));
-    fn.localGet(L_TMP);
-    storeWidth(fn, op.size);
-    if (MODE === 'x64' && op.size === 32) {
-      // writing a 32-bit register zero-extends the upper 32 bits
-      fn.i32Const(regAddr(op.reg) + 4);
-      fn.i32Const(0);
-      fn.i32Store();
+    if (op.size === 64) {
+      fn.localSet(L_I64);
+      fn.i32Const(regAddr(op.reg));
+      fn.localGet(L_I64);
+      fn.i64Store();
+    } else {
+      fn.localSet(L_TMP);
+      fn.i32Const(regAddr(op.reg));
+      fn.localGet(L_TMP);
+      storeWidth(fn, op.size);
+      if (MODE === 'x64' && op.size === 32) {
+        // writing a 32-bit register zero-extends the upper 32 bits
+        fn.i32Const(regAddr(op.reg) + 4);
+        fn.i32Const(0);
+        fn.i32Store();
+      }
     }
   } else if (op.kind === 'mem') {
-    fn.localSet(L_TMP);
+    const slot = op.size === 64 ? L_I64 : L_TMP;
+    fn.localSet(slot);
     emitEa(fn, op);
-    fn.localGet(L_TMP);
+    fn.localGet(slot);
     storeWidth(fn, op.size);
   } else {
     fn.drop();
@@ -217,6 +232,77 @@ function emitAfSub(fn: WasmFunction): void {
   orFlag(fn, 4);
 }
 
+// ---- 64-bit flag helpers (result in L_I64, operands in L_I64A/L_I64B) ----
+
+/** Emits ZF/SF/PF from the 64-bit result in local L_I64. */
+function emitZspFlags64(fn: WasmFunction): void {
+  // ZF
+  fn.localGet(L_I64);
+  fn.i64Eqz();
+  orFlag(fn, 6);
+  // SF = sign bit 63
+  fn.localGet(L_I64);
+  fn.i64Const(63);
+  fn.i64ShrU();
+  fn.i32WrapI64();
+  orFlag(fn, 7);
+  // PF (parity of the low byte)
+  fn.localGet(L_I64);
+  fn.i32WrapI64();
+  fn.i32Const(0xff);
+  fn.i32And();
+  fn.i32Popcnt();
+  fn.i32Const(1);
+  fn.i32And();
+  fn.i32Eqz();
+  orFlag(fn, 2);
+}
+
+/** Emits OF = ((a^b) & (a^s)) bit 63. */
+function emitOfBinary64(fn: WasmFunction): void {
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64B);
+  fn.i64Xor();
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64);
+  fn.i64Xor();
+  fn.i64And();
+  fn.i64Const(63);
+  fn.i64ShrU();
+  fn.i32WrapI64();
+  orFlag(fn, 11);
+}
+
+/** Emits AF for a 64-bit add (carry out of bit 3). */
+function emitAfAdd64(fn: WasmFunction): void {
+  fn.localGet(L_I64A);
+  fn.i32WrapI64();
+  fn.i32Const(0xf);
+  fn.i32And();
+  fn.localGet(L_I64B);
+  fn.i32WrapI64();
+  fn.i32Const(0xf);
+  fn.i32And();
+  fn.i32Add();
+  fn.i32Const(0xf);
+  fn.i32GtU();
+  orFlag(fn, 4);
+}
+
+/** Emits AF for a 64-bit sub (borrow into bit 3). */
+function emitAfSub64(fn: WasmFunction): void {
+  fn.localGet(L_I64A);
+  fn.i32WrapI64();
+  fn.i32Const(0xf);
+  fn.i32And();
+  fn.localGet(L_I64B);
+  fn.i32WrapI64();
+  fn.i32Const(0xf);
+  fn.i32And();
+  fn.i32LtU();
+  orFlag(fn, 4);
+}
+
 /** Finalizes the flags word, preserving the DF bit, and stores it. */
 function storeFlags(fn: WasmFunction): void {
   // preserve DF across arithmetic (string ops rely on it)
@@ -264,6 +350,13 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
       emitNeg(fn, size, inst.dst!);
       return;
     case 'not':
+      if (size === 64) {
+        pushOperand(fn, inst.dst!);
+        fn.i64Const(-1);
+        fn.i64Xor();
+        storeOperand(fn, inst.dst!);
+        return;
+      }
       pushOperand(fn, inst.dst!);
       fn.i32Const(0xffffffff);
       fn.i32Xor();
@@ -272,6 +365,7 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
     case 'lea':
       if (inst.src && inst.src.kind === 'mem') {
         emitEa(fn, inst.src);
+        if (inst.dst?.size === 64) fn.i64ExtendI32U();
         storeOperand(fn, inst.dst!);
       }
       return;
@@ -326,10 +420,10 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
       emitRdtsc(fn);
       return;
     case 'xmm-load':
-      emitXmmMove(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, true);
+      emitXmmMove(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, true, inst.lanes ?? 4);
       return;
     case 'xmm-store':
-      emitXmmMove(fn, inst.src as XmmOperand, inst.dst as MemOperand | XmmOperand, false);
+      emitXmmMove(fn, inst.src as XmmOperand, inst.dst as MemOperand | XmmOperand, false, inst.lanes ?? 4);
       return;
     case 'xmm-movd':
       emitXmmMovd(fn, inst.dst!, inst.src!);
@@ -351,6 +445,13 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
     case 'finit':
     case 'fldcw':
       // FPU emulated as idle: FNINIT and FLDCW are no-ops.
+      return;
+    case 'ffree':
+    case 'fincstp':
+    case 'fdecstp':
+    case 'fnop':
+      // Stack housekeeping only. ST(0) lives in a fixed slot and FSTP already
+      // does not pop, so rotating/freeing the (unmodelled) stack is a no-op.
       return;
     case 'fstcw': {
       // write the standard default control word (0x037F) as a 16-bit value
@@ -461,6 +562,12 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
     case 'movs':
       emitMovs(fn, inst, size);
       return;
+    case 'scas':
+      emitScas(fn, inst, size);
+      return;
+    case 'cmps':
+      emitCmps(fn, inst, size);
+      return;
     case 'clc':
       fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
       fn.i32Load();
@@ -534,17 +641,20 @@ function emitMov(fn: WasmFunction, inst: Instruction, size: Size): void {
     storeOperand(fn, inst.dst!);
     return;
   }
-  // movzx / movsx: extend into a 32-bit register
+  // movzx / movsx: extend into the destination register
   const src = inst.src!;
   if (src.kind === 'mem') {
     emitEa(fn, src);
     if (inst.op === 'movzx') {
       if (src.size === 8) fn.i32Load8U();
-      else fn.i32Load16U();
+      else if (src.size === 16) fn.i32Load16U();
+      else fn.i32Load();
     } else if (src.size === 8) {
       fn.i32Load8S();
-    } else {
+    } else if (src.size === 16) {
       fn.i32Load16S();
+    } else {
+      fn.i32Load();
     }
   } else if (src.kind === 'reg') {
     const addr = regAddr(src.reg);
@@ -552,21 +662,32 @@ function emitMov(fn: WasmFunction, inst: Instruction, size: Size): void {
       if (src.size === 8) {
         fn.i32Const(addr);
         fn.i32Load8U();
-      } else {
+      } else if (src.size === 16) {
         fn.i32Const(addr);
         fn.i32Load16U();
+      } else {
+        fn.i32Const(addr);
+        fn.i32Load();
       }
     } else if (src.size === 8) {
       fn.i32Const(addr);
       fn.i32Load8S();
-    } else {
+    } else if (src.size === 16) {
       fn.i32Const(addr);
       fn.i32Load16S();
+    } else {
+      fn.i32Const(addr);
+      fn.i32Load();
     }
   } else if (src.kind === 'imm') {
-    fn.i32Const(src.value);
+    if (src.size === 64) fn.i64Const(src.value);
+    else fn.i32Const(src.value);
   } else {
     fn.i32Const(0);
+  }
+  // sign-extend a 32-bit source into a 64-bit destination (MOVSXD)
+  if (inst.op === 'movsx' && src.size === 32 && inst.dst?.size === 64) {
+    fn.i64ExtendI32S();
   }
   storeOperand(fn, inst.dst!);
   void size;
@@ -577,6 +698,10 @@ function emitMov(fn: WasmFunction, inst: Instruction, size: Size): void {
 // ---------------------------------------------------------------------------
 
 function emitArith(fn: WasmFunction, op: Instruction['op'], size: Size, dst: Operand, src: Operand): void {
+  if (size === 64) {
+    emitArith64(fn, op, dst, src);
+    return;
+  }
   pushOperand(fn, dst);
   fn.localSet(L_A);
   pushOperand(fn, src);
@@ -714,6 +839,10 @@ function emitArith(fn: WasmFunction, op: Instruction['op'], size: Size, dst: Ope
 }
 
 function emitTest(fn: WasmFunction, size: Size, dst: Operand, src: Operand): void {
+  if (size === 64) {
+    emitTest64(fn, dst, src);
+    return;
+  }
   pushOperand(fn, dst);
   fn.localSet(L_A);
   pushOperand(fn, src);
@@ -727,7 +856,98 @@ function emitTest(fn: WasmFunction, size: Size, dst: Operand, src: Operand): voi
   storeFlags(fn);
 }
 
+function emitTest64(fn: WasmFunction, dst: Operand, src: Operand): void {
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A);
+  pushOperand(fn, src);
+  fn.localSet(L_I64B);
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64B);
+  fn.i64And();
+  fn.localSet(L_I64);
+  beginFlags(fn);
+  emitZspFlags64(fn);
+  storeFlags(fn);
+}
+
+/** 64-bit arithmetic/logic/comparison. Uses L_I64A/L_I64B operands, L_I64 result. */
+function emitArith64(fn: WasmFunction, op: Instruction['op'], dst: Operand, src: Operand): void {
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A);
+  pushOperand(fn, src);
+  fn.localSet(L_I64B);
+  switch (op) {
+    case 'add':
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Add();
+      fn.localTee(L_I64);
+      break;
+    case 'sub':
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Sub();
+      fn.localTee(L_I64);
+      break;
+    case 'cmp':
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Sub();
+      fn.localSet(L_I64);
+      break;
+    case 'and':
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64And();
+      fn.localTee(L_I64);
+      break;
+    case 'or':
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Or();
+      fn.localTee(L_I64);
+      break;
+    case 'xor':
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Xor();
+      fn.localTee(L_I64);
+      break;
+    default:
+      // 64-bit adc/sbb not implemented yet
+      fn.unreachable();
+  }
+  if (op !== 'cmp') {
+    // result is on the stack (localTee above) and storeOperand consumes it
+    storeOperand(fn, dst);
+  }
+  // flags
+  beginFlags(fn);
+  emitZspFlags64(fn);
+  emitOfBinary64(fn);
+  if (op === 'add') {
+    // CF: s <u a
+    fn.localGet(L_I64);
+    fn.localGet(L_I64A);
+    fn.i64LtU();
+    orFlag(fn, 0);
+    emitAfAdd64(fn);
+  } else if (op === 'sub' || op === 'cmp') {
+    // CF: a <u b
+    fn.localGet(L_I64A);
+    fn.localGet(L_I64B);
+    fn.i64LtU();
+    orFlag(fn, 0);
+    emitAfSub64(fn);
+  }
+  storeFlags(fn);
+}
+
 function emitIncDec(fn: WasmFunction, op: 'inc' | 'dec', size: Size, dst: Operand): void {
+  if (size === 64) {
+    emitIncDec64(fn, op, dst);
+    return;
+  }
   pushOperand(fn, dst);
   fn.localSet(L_A);
   // s = a ± 1
@@ -751,7 +971,34 @@ function emitIncDec(fn: WasmFunction, op: 'inc' | 'dec', size: Size, dst: Operan
   storeFlags(fn);
 }
 
+function emitIncDec64(fn: WasmFunction, op: 'inc' | 'dec', dst: Operand): void {
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A);
+  fn.localGet(L_I64A);
+  fn.i64Const(1);
+  if (op === 'inc') fn.i64Add();
+  else fn.i64Sub();
+  fn.localSet(L_I64);
+  fn.localGet(L_I64);
+  storeOperand(fn, dst);
+  // flags (CF preserved)
+  beginFlags(fn);
+  emitZspFlags64(fn);
+  // OF: a == signbit
+  fn.localGet(L_I64A);
+  fn.i64Const(63);
+  fn.i64ShrU();
+  fn.i32WrapI64();
+  orFlag(fn, 11);
+  emitAfAdd64(fn);
+  storeFlags(fn);
+}
+
 function emitNeg(fn: WasmFunction, size: Size, dst: Operand): void {
+  if (size === 64) {
+    emitNeg64(fn, dst);
+    return;
+  }
   pushOperand(fn, dst);
   fn.localSet(L_A);
   fn.i32Const(0);
@@ -783,6 +1030,40 @@ function emitNeg(fn: WasmFunction, size: Size, dst: Operand): void {
   storeFlags(fn);
 }
 
+function emitNeg64(fn: WasmFunction, dst: Operand): void {
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A);
+  fn.i64Const(0);
+  fn.localGet(L_I64A);
+  fn.i64Sub();
+  fn.localSet(L_I64);
+  fn.localGet(L_I64);
+  storeOperand(fn, dst);
+  beginFlags(fn);
+  emitZspFlags64(fn);
+  // CF = a != 0
+  fn.localGet(L_I64A);
+  fn.i64Eqz();
+  fn.i32Const(1);
+  fn.i32Xor();
+  orFlag(fn, 0);
+  // OF = a == signbit
+  fn.localGet(L_I64A);
+  fn.i64Const(63);
+  fn.i64ShrU();
+  fn.i32WrapI64();
+  orFlag(fn, 11);
+  // AF = (a & 0xf) != 0
+  fn.localGet(L_I64A);
+  fn.i32WrapI64();
+  fn.i32Const(0xf);
+  fn.i32And();
+  fn.i32Const(0);
+  fn.i32Ne();
+  orFlag(fn, 4);
+  storeFlags(fn);
+}
+
 // ---------------------------------------------------------------------------
 // stack
 // ---------------------------------------------------------------------------
@@ -794,7 +1075,10 @@ function espAddr(): number {
 function emitPush(fn: WasmFunction, op: Operand, size: Size): void {
   const width = size === 8 ? 1 : size === 16 ? 2 : stackWidth();
   if (op.kind === 'imm') {
-    emitPushRaw(fn, width, () => fn.i32Const(op.value));
+    emitPushRaw(fn, width, () => {
+      if (op.size === 64) fn.i64Const(op.value);
+      else fn.i32Const(op.value);
+    });
   } else {
     emitPushRaw(fn, width, () => pushOperand(fn, op));
   }
@@ -803,7 +1087,12 @@ function emitPush(fn: WasmFunction, op: Operand, size: Size): void {
 /** Pushes the value produced by `value` (top of stack after callback). */
 function emitPushRaw(fn: WasmFunction, width: number, value?: () => void): void {
   if (value) value();
-  fn.localSet(L_TMP); // value
+  if (width === 8) {
+    // 64-bit push: keep the i64 value in L_I64 (the callback leaves an i64)
+    fn.localSet(L_I64);
+  } else {
+    fn.localSet(L_TMP); // value
+  }
   // esp -= width
   fn.i32Const(espAddr());
   fn.i32Load();
@@ -813,17 +1102,19 @@ function emitPushRaw(fn: WasmFunction, width: number, value?: () => void): void 
   fn.i32Const(espAddr());
   fn.localGet(L_TMP2);
   fn.i32Store();
-  // [esp] = value (high 32 bits of an 8-byte push are zero in our flat model)
+  // [esp] = value
   fn.localGet(L_TMP2);
-  fn.localGet(L_TMP);
-  if (width === 1) fn.i32Store8();
-  else if (width === 2) fn.i32Store16();
-  else fn.i32Store();
-  if (width === 8) {
-    fn.localGet(L_TMP2);
-    fn.i32Const(4);
-    fn.i32Add();
-    fn.i32Const(0);
+  if (width === 1) {
+    fn.localGet(L_TMP);
+    fn.i32Store8();
+  } else if (width === 2) {
+    fn.localGet(L_TMP);
+    fn.i32Store16();
+  } else if (width === 8) {
+    fn.localGet(L_I64);
+    fn.i64Store();
+  } else {
+    fn.localGet(L_TMP);
     fn.i32Store();
   }
 }
@@ -835,8 +1126,21 @@ function emitPop(fn: WasmFunction, op: Operand, size: Size): void {
   fn.i32Load();
   fn.localSet(L_TMP2); // esp
   fn.localGet(L_TMP2);
-  loadWidth(fn, size);
-  storeOperand(fn, op);
+  if (size === 64) {
+    fn.i64Load();
+    fn.localSet(L_I64);
+  } else {
+    loadWidth(fn, size);
+    fn.localSet(L_TMP);
+  }
+  // store value into the operand
+  if (size === 64) {
+    fn.localGet(L_I64);
+    storeOperand(fn, op);
+  } else {
+    fn.localGet(L_TMP);
+    storeOperand(fn, op);
+  }
   // esp += width
   fn.localGet(L_TMP2);
   fn.i32Const(width);
@@ -853,7 +1157,8 @@ function emitPopRaw(fn: WasmFunction, width: number): void {
   fn.i32Load();
   fn.localSet(L_TMP2); // esp
   fn.localGet(L_TMP2);
-  loadWidth(fn, width === 1 ? 8 : width === 2 ? 16 : width === 8 ? 64 : 32);
+  if (width === 8) fn.i64Load();
+  else loadWidth(fn, width === 1 ? 8 : width === 2 ? 16 : 32);
   // esp += width
   fn.localGet(L_TMP2);
   fn.i32Const(width);
@@ -927,6 +1232,7 @@ function emitJmp(fn: WasmFunction, target: Operand, nextAddress: number): void {
     storeEip(fn);
   } else {
     pushOperand(fn, target);
+    if (target.size === 64) fn.i32WrapI64();
     storeEip(fn);
   }
 }
@@ -946,19 +1252,27 @@ function emitJcc(fn: WasmFunction, cond: Cond, target: Operand, nextAddress: num
 
 function emitCall(fn: WasmFunction, target: Operand, nextAddress: number): void {
   // push return address
-  emitPushRaw(fn, stackWidth(), () => fn.i32Const(nextAddress));
+  emitPushRaw(fn, stackWidth(), () => {
+    if (MODE === 'x64') fn.i64Const(nextAddress);
+    else fn.i32Const(nextAddress);
+  });
   // eip = target
   if (target.kind === 'rel') {
     fn.i32Const(resolveTarget(target, nextAddress));
     storeEip(fn);
   } else {
     pushOperand(fn, target);
+    if (target.size === 64) fn.i32WrapI64();
     storeEip(fn);
   }
 }
 
 function emitRet(fn: WasmFunction, popBytes: number, size: Size): void {
   emitPopRaw(fn, stackWidth()); // value (return address) on stack
+  if (MODE === 'x64') {
+    // the popped return address is an i64; EIP is a 32-bit guest address
+    fn.i32WrapI64();
+  }
   fn.localSet(L_TMP);
   fn.i32Const(EIP_OFFSET + CTX_BASE);
   fn.localGet(L_TMP);
@@ -988,14 +1302,15 @@ function emitInt(fn: WasmFunction, vector: number, nextAddress: number): void {
 }
 
 function emitLeave(fn: WasmFunction): void {
-  // esp = ebp; pop ebp
+  // esp = ebp/rbp; pop ebp/rbp
   fn.i32Const(regAddr('ebp'));
   fn.i32Load();
   fn.localSet(L_TMP);
   fn.i32Const(espAddr());
   fn.localGet(L_TMP);
   fn.i32Store();
-  emitPopRaw(fn, 4);
+  emitPopRaw(fn, stackWidth());
+  if (MODE === 'x64') fn.i32WrapI64();
   fn.localSet(L_TMP);
   fn.i32Const(regAddr('ebp'));
   fn.localGet(L_TMP);
@@ -1014,17 +1329,17 @@ function emitXchg(fn: WasmFunction, a: Operand, b: Operand, size: Size): void {
   // `xchg esp, eax` never moved esp, so the following `push ebx` wrote
   // over the caller's GS cookie copy at [ebp-4] -> __security_check_cookie
   // FAIL (0x40b4c8). This is the root cause of the last cmd.exe fail-fast.
+  const [parkA, parkB] = size === 64 ? [L_I64A, L_I64B] : [L_TMP2, L_TMP];
   pushOperand(fn, a);
-  fn.localSet(L_TMP2); // keep a's old value here (safe from storeOperand)
+  fn.localSet(parkA); // keep a's old value here (safe from storeOperand)
   pushOperand(fn, b);
-  fn.localSet(L_TMP);
+  fn.localSet(parkB);
   // store b -> a
-  fn.localGet(L_TMP);
+  fn.localGet(parkB);
   storeOperand(fn, a);
   // store a -> b
-  fn.localGet(L_TMP2);
+  fn.localGet(parkA);
   storeOperand(fn, b);
-  void size;
 }
 
 /**
@@ -1169,17 +1484,32 @@ function pushXmmLane(fn: WasmFunction, src: MemOperand | XmmOperand, lane: numbe
 }
 
 /**
- * 128-bit XMM move (MOVUPS/MOVUPD/MOVAPS/MOVAPD/MOVDQA). `xmm` is the
+ * 128-bit XMM move (MOVUPS/MOVUPD/MOVAPS/MOVAPD/MOVDQA/MOVDQU) plus the
+ * scalar forms MOVSS/MOVSD selected by `lanes` (1/2/4 dwords). `xmm` is the
  * register side; when `load` the value flows other -> xmm, else xmm -> other.
+ * Scalar semantics: a memory load zero-extends the upper lanes, a register
+ * load leaves them untouched, and a scalar store only writes `lanes` dwords.
  */
-function emitXmmMove(fn: WasmFunction, xmm: XmmOperand, other: MemOperand | XmmOperand, load: boolean): void {
+function emitXmmMove(fn: WasmFunction, xmm: XmmOperand, other: MemOperand | XmmOperand, load: boolean, lanes: 1 | 2 | 4 = 4): void {
   for (let i = 0; i < 4; i++) {
     if (load) {
+      if (i >= lanes) {
+        // MOVSS/MOVSD memory loads clear the upper lanes.
+        if (other.kind === 'mem') {
+          fn.i32Const(xmmAddr(xmm.reg) + i * 4);
+          fn.i32Const(0);
+          fn.i32Store();
+        }
+        continue;
+      }
       pushXmmLane(fn, other, i);
       fn.localSet(L_TMP);
       fn.i32Const(xmmAddr(xmm.reg) + i * 4);
       fn.localGet(L_TMP);
       fn.i32Store();
+    } else if (i >= lanes) {
+      // scalar store: only the low lanes are written
+      continue;
     } else if (other.kind === 'xmm') {
       // xmm -> xmm move
       fn.i32Const(xmmAddr(xmm.reg) + i * 4);
@@ -1477,6 +1807,10 @@ function emitFpuMove(fn: WasmFunction, op: 'fld' | 'fst' | 'fstp', dst: MemOpera
 }
 
 function emitShift(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror', size: Size, dst: Operand, count: Operand): void {
+  if (size === 64) {
+    emitShift64(fn, op, dst, count);
+    return;
+  }
   pushOperand(fn, dst);
   fn.localSet(L_A);
   // count (CL or imm), masked to 5 bits
@@ -1601,7 +1935,140 @@ function emitShift(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror', 
   fn.i32Store();
 }
 
+/** 64-bit shift/rotate. Count masked to 6 bits; flags chosen old when count==0. */
+function emitShift64(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror', dst: Operand, count: Operand): void {
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A);
+  // count (CL or imm), masked to 6 bits
+  pushOperand(fn, count);
+  fn.i32Const(0x3f);
+  fn.i32And();
+  fn.localSet(L_B);
+
+  // shifted = a op count (i64); count extended from i32
+  fn.localGet(L_I64A);
+  fn.localGet(L_B);
+  fn.i64ExtendI32U();
+  switch (op) {
+    case 'shl':
+      fn.i64Shl();
+      break;
+    case 'shr':
+      fn.i64ShrU();
+      break;
+    case 'sar':
+      fn.i64ShrS();
+      break;
+    case 'rol':
+      fn.i64Rotl();
+      break;
+    case 'ror':
+      fn.i64Rotr();
+      break;
+    default:
+      fn.unreachable();
+  }
+  fn.localSet(L_I64); // shifted
+  // s = (count != 0) ? shifted : a
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64);
+  fn.localGet(L_B);
+  fn.i32Eqz();
+  fn.select();
+  fn.localSet(L_I64);
+
+  // store result
+  fn.localGet(L_I64);
+  storeOperand(fn, dst);
+
+  // flags: compute new flags, then choose old when count == 0
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.localSet(L_TMP); // old flags
+  beginFlags(fn);
+  emitZspFlags64(fn);
+
+  // CF
+  if (op === 'shl') {
+    // CF = bit(64 - count) of a  =>  (a >>> (64 - count)) & 1
+    fn.localGet(L_I64A);
+    fn.i32Const(64);
+    fn.localGet(L_B);
+    fn.i32Sub();
+    fn.i64ExtendI32U();
+    fn.i64ShrU();
+    fn.i32WrapI64();
+    fn.i32Const(1);
+    fn.i32And();
+  } else if (op === 'shr' || op === 'sar') {
+    // CF = bit(count - 1) of a  =>  (a >>> (count - 1)) & 1
+    fn.localGet(L_I64A);
+    fn.localGet(L_B);
+    fn.i32Const(1);
+    fn.i32Sub();
+    fn.i64ExtendI32U();
+    fn.i64ShrU();
+    fn.i32WrapI64();
+    fn.i32Const(1);
+    fn.i32And();
+  } else if (op === 'rol') {
+    // CF = bit0 of s
+    fn.localGet(L_I64);
+    fn.i32WrapI64();
+    fn.i32Const(1);
+    fn.i32And();
+  } else {
+    // ror: CF = bit63 of s
+    fn.localGet(L_I64);
+    fn.i64Const(63);
+    fn.i64ShrU();
+    fn.i32WrapI64();
+  }
+  orFlag(fn, 0);
+
+  // OF (approximation beyond count == 1)
+  if (op === 'shl' || op === 'rol') {
+    fn.localGet(L_I64);
+    fn.i64Const(63);
+    fn.i64ShrU();
+    fn.i32WrapI64();
+    fn.localGet(L_I64A);
+    fn.i64Const(63);
+    fn.i64ShrU();
+    fn.i32WrapI64();
+    fn.i32Xor();
+  } else {
+    fn.localGet(L_I64A);
+    fn.i64Const(63);
+    fn.i64ShrU();
+    fn.i32WrapI64();
+  }
+  orFlag(fn, 11);
+
+  // preserve DF in the new flags
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.i32Const(FLAG_DF);
+  fn.i32And();
+  fn.i32Or();
+  fn.localSet(L_TMP2); // new flags
+  // final = count == 0 ? old : new
+  fn.localGet(L_TMP);
+  fn.localGet(L_TMP2);
+  fn.localGet(L_B);
+  fn.i32Eqz();
+  fn.select();
+  fn.localSet(L_TMP2);
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.localGet(L_TMP2);
+  fn.i32Store();
+}
+
 function emitMul(fn: WasmFunction, inst: Instruction, size: Size): void {
+  if (size === 64) {
+    emitMul64(fn, inst);
+    return;
+  }
   const signed = inst.op === 'imul';
   const isImulImm = inst.target !== undefined;
   if (isImulImm && inst.target!.kind === 'imm') {
@@ -1697,6 +2164,48 @@ function emitMul(fn: WasmFunction, inst: Instruction, size: Size): void {
   beginFlags(fn);
   emitZspFlags(fn, size);
   emitOverflowSigned(fn, size);
+  storeFlags(fn);
+}
+
+/** 64-bit multiply forms. */
+function emitMul64(fn: WasmFunction, inst: Instruction): void {
+  const signed = inst.op === 'imul';
+  const isImulImm = inst.target !== undefined && inst.target!.kind === 'imm';
+  if (isImulImm) {
+    // imul r64, r/m64, imm
+    pushOperand(fn, inst.src!);
+    fn.localSet(L_I64A);
+    fn.i64Const(inst.target!.value);
+    fn.localSet(L_I64B);
+    fn.localGet(L_I64A);
+    fn.localGet(L_I64B);
+    fn.i64Mul();
+    fn.localSet(L_I64);
+    fn.localGet(L_I64);
+    storeOperand(fn, inst.dst!);
+    beginFlags(fn);
+    emitZspFlags64(fn);
+    storeFlags(fn);
+    return;
+  }
+  if (!signed) {
+    // MUL r/m64 — RDX:RAX = RAX * r/m64 needs a 128-bit product; not yet
+    fn.unreachable();
+    return;
+  }
+  // IMUL r64, r/m64
+  pushOperand(fn, inst.dst!);
+  fn.localSet(L_I64A);
+  pushOperand(fn, inst.src!);
+  fn.localSet(L_I64B);
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64B);
+  fn.i64Mul();
+  fn.localSet(L_I64);
+  fn.localGet(L_I64);
+  storeOperand(fn, inst.dst!);
+  beginFlags(fn);
+  emitZspFlags64(fn);
   storeFlags(fn);
 }
 
@@ -1813,6 +2322,7 @@ function emitDiv(fn: WasmFunction, op: 'div' | 'idiv', size: Size, dst: Operand)
 
 function emitSetcc(fn: WasmFunction, cond: Cond, dst: Operand): void {
   emitCond(fn, cond);
+  if (dst.kind !== 'rel' && dst.size === 64) fn.i64ExtendI32U();
   storeOperand(fn, dst);
 }
 
@@ -1831,6 +2341,10 @@ function emitCmov(fn: WasmFunction, cond: Cond, dst: Operand, src: Operand): voi
  * accumulator = r/m, ZF=0. Only ZF matters for the classic lock loops.
  */
 function emitCmpXchg(fn: WasmFunction, size: Size, dst: Operand, src: Operand): void {
+  if (size === 64) {
+    emitCmpXchg64(fn, dst, src);
+    return;
+  }
   const accReg: RegName = size === 8 ? 'al' : size === 16 ? 'ax' : MODE === 'x64' ? 'rax' : 'eax';
   pushOperand(fn, dst);
   fn.localSet(L_A); // m
@@ -1875,12 +2389,58 @@ function emitCmpXchg(fn: WasmFunction, size: Size, dst: Operand, src: Operand): 
   storeFlags(fn);
 }
 
+/** 64-bit CMPXCHG r/m, r64 (accumulator = rax). */
+function emitCmpXchg64(fn: WasmFunction, dst: Operand, src: Operand): void {
+  const accReg: RegName = 'rax';
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A); // m
+  pushOperand(fn, src);
+  fn.localSet(L_I64B); // b
+  fn.i32Const(regAddr(accReg));
+  fn.i64Load();
+  fn.localSet(L_I64); // a
+  // eq = (m == a)
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64);
+  fn.i64Eq();
+  fn.localSet(L_TMP2);
+  // r/m = eq ? b : a
+  fn.localGet(L_I64B);
+  fn.localGet(L_I64);
+  fn.localGet(L_TMP2);
+  fn.select();
+  storeOperand(fn, dst);
+  // accumulator = a
+  fn.localGet(L_I64);
+  storeOperand(fn, { kind: 'reg', reg: accReg, size: 64 });
+  // flags: ZF = eq, SF = sign(m - a), CF = (m < a)
+  beginFlags(fn);
+  fn.localGet(L_TMP2);
+  orFlag(fn, 6);
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64);
+  fn.i64Sub();
+  fn.i64Const(63);
+  fn.i64ShrU();
+  fn.i32WrapI64();
+  orFlag(fn, 7);
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64);
+  fn.i64LtU();
+  orFlag(fn, 0);
+  storeFlags(fn);
+}
+
 /**
  * XADD r/m, reg (0F C0/C1): tmp = dst + src; dst = src; src = tmp.
  * Flags are set exactly as for ADD (OF/SF/ZF/AF/PF/CF). Used by atomic
  * Interlocked style / refcount primitives (notepad's `lock xadd` counters).
  */
 function emitXadd(fn: WasmFunction, size: Size, dst: Operand, src: Operand): void {
+  if (size === 64) {
+    emitXadd64(fn, dst, src);
+    return;
+  }
   pushOperand(fn, dst);
   fn.localSet(L_A);
   pushOperand(fn, src);
@@ -1905,6 +2465,34 @@ function emitXadd(fn: WasmFunction, size: Size, dst: Operand, src: Operand): voi
   fn.i32LtU();
   orFlag(fn, 0);
   emitAfAdd(fn);
+  storeFlags(fn);
+}
+
+/** 64-bit XADD r/m, r64. */
+function emitXadd64(fn: WasmFunction, dst: Operand, src: Operand): void {
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A);
+  pushOperand(fn, src);
+  fn.localSet(L_I64B);
+  fn.localGet(L_I64A);
+  fn.localGet(L_I64B);
+  fn.i64Add();
+  fn.localSet(L_I64);
+  // dst = src (the old register value)
+  fn.localGet(L_I64B);
+  storeOperand(fn, dst);
+  // src = result (old dst + src)
+  fn.localGet(L_I64);
+  storeOperand(fn, src);
+  // flags: same as ADD
+  beginFlags(fn);
+  emitZspFlags64(fn);
+  emitOfBinary64(fn);
+  fn.localGet(L_I64);
+  fn.localGet(L_I64A);
+  fn.i64LtU();
+  orFlag(fn, 0);
+  emitAfAdd64(fn);
   storeFlags(fn);
 }
 
@@ -2197,4 +2785,87 @@ function emitMaybeRep(fn: WasmFunction, rep: boolean, body: () => void): void {
   fn.br(inner);
   fn.end(); // inner loop
   fn.end(); // outer block
+}
+
+/** Advances a pointer register (`esi`/`edi`) by the DF-adjusted element step. */
+function emitAdvance(fn: WasmFunction, reg: RegName, size: Size): void {
+  emitStep(fn, size);
+  fn.localSet(L_TMP);
+  fn.i32Const(regAddr(reg));
+  fn.i32Load();
+  fn.localGet(L_TMP);
+  fn.i32Add();
+  fn.localSet(L_TMP2);
+  fn.i32Const(regAddr(reg));
+  fn.localGet(L_TMP2);
+  fn.i32Store();
+}
+
+/**
+ * Wraps a comparing string-op body (`scas`/`cmps`) in a conditional REP loop.
+ * F3 = REPE (repeat while ZF=1), F2 = REPNE (repeat while ZF=0). The body must
+ * set ZF (via a `cmp`) before this checks the termination condition.
+ */
+function emitRepCond(fn: WasmFunction, rep: boolean, repne: boolean, body: () => void): void {
+  if (!rep) {
+    body();
+    return;
+  }
+  const outer = fn.block(); // break target
+  const inner = fn.loop(); // continue target
+  // ecx == 0 -> break
+  fn.i32Const(regAddr('ecx'));
+  fn.i32Load();
+  fn.i32Eqz();
+  fn.brIf(outer);
+  body(); // performs the compare and sets ZF
+  // ecx--
+  fn.i32Const(regAddr('ecx'));
+  fn.i32Load();
+  fn.i32Const(1);
+  fn.i32Sub();
+  fn.localSet(L_TMP);
+  fn.i32Const(regAddr('ecx'));
+  fn.localGet(L_TMP);
+  fn.i32Store();
+  // ZF-based early exit: REPNE breaks on ZF=1, REPE breaks on ZF=0
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.i32Const(FLAG_ZF);
+  fn.i32And();
+  if (repne) {
+    // (eflags & ZF) != 0 -> break
+    fn.brIf(outer);
+  } else {
+    // (eflags & ZF) == 0 -> break
+    fn.i32Eqz();
+    fn.brIf(outer);
+  }
+  fn.br(inner);
+  fn.end(); // inner loop
+  fn.end(); // outer block
+}
+
+/** SCAS: compares AL/AX/EAX with [EDI] (sets flags like CMP), then advances EDI. */
+function emitScas(fn: WasmFunction, inst: Instruction, size: Size): void {
+  const acc: Operand = { kind: 'reg', reg: 'eax', size };
+  const mem: Operand = { kind: 'mem', base: 'edi', scale: 1, disp: 0, size };
+  const body = (): void => {
+    emitArith(fn, 'cmp', size, acc, mem);
+    emitAdvance(fn, 'edi', size);
+  };
+  emitRepCond(fn, inst.rep ?? false, inst.repne ?? false, body);
+}
+
+/** CMPS: compares [ESI] with [EDI] (sets flags like CMP), then advances both. */
+function emitCmps(fn: WasmFunction, inst: Instruction, size: Size): void {
+  const srcEsi: Operand = { kind: 'mem', base: 'esi', scale: 1, disp: 0, size };
+  const srcEdi: Operand = { kind: 'mem', base: 'edi', scale: 1, disp: 0, size };
+  const body = (): void => {
+    // CMPS computes [ESI] - [EDI]; only flags matter (no write-back for cmp).
+    emitArith(fn, 'cmp', size, srcEsi, srcEdi);
+    emitAdvance(fn, 'esi', size);
+    emitAdvance(fn, 'edi', size);
+  };
+  emitRepCond(fn, inst.rep ?? false, inst.repne ?? false, body);
 }

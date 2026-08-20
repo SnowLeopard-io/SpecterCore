@@ -432,10 +432,26 @@ class DecoderState {
       case 0x3c:
       case 0x3d: {
         // group1 with accumulator: add/or/adc/sbb/and/sub/xor/cmp <acc>, imm
+        // (imm is imm32 sign-extended to 64 under REX.W — not imm64)
         const s = (opcode & 1) === 0 ? 8 : this.rex.w ? 64 : size;
         const acc = s === 8 ? 'al' : this.rex.w ? (REG64[this.rex.r ? 8 : 0] ?? 'rax') : 'eax';
         const op = GROUP1[(opcode >> 3) & 7] ?? 'add';
-        return { inst: { op, dst: this.regOperand(acc, s), src: this.immOperand(this.readImm(s), s) }, terminator: false };
+        const imm = s === 64 ? this.readS32() : this.readImm(s);
+        return { inst: { op, dst: this.regOperand(acc, s), src: this.immOperand(imm, s) }, terminator: false };
+      }
+
+      case 0x62: {
+        // BOUND — not implemented (x86 only, unused in practice).
+        throw new UnsupportedError(this.abs(), 'unsupported opcode 0x62');
+      }
+      case 0x63: {
+        // MOVSXD r64, r/m32 — sign-extend a dword source to a qword dest
+        // (REX.W + 63). Without REX.W this is ARPL (x86 only).
+        if (this.mode !== 'x64' || !this.rex.w) throw new UnsupportedError(this.abs(), 'unsupported opcode 0x63 (ARPL)');
+        const raw = this.decodeRm(32);
+        const src = this.rmOperand(raw, 32);
+        const dst = this.regOperand(this.registerFor(raw.modrmReg, 64), 64);
+        return { inst: { op: 'movsx', dst, src }, terminator: false };
       }
 
       case 0x68: {
@@ -483,7 +499,8 @@ class DecoderState {
         const raw = this.decodeRm(s);
         const dst = this.rmOperand(raw, s);
         const op = GROUP1[raw.modrmReg] ?? 'add';
-        const imm = opcode === 0x83 ? this.readS8() : this.readImm(s);
+        // 81/83 carry an imm32 (sign-extended to 64 under REX.W), NOT imm64
+        const imm = opcode === 0x83 ? this.readS8() : s === 64 ? this.readS32() : this.readImm(s);
         return { inst: { op, dst, src: this.immOperand(imm, s) }, terminator: false };
       }
 
@@ -602,23 +619,28 @@ class DecoderState {
         return { inst: { op: 'test', dst: this.regOperand('eax', size), src: this.immOperand(this.readImm(size), size) }, terminator: false };
 
       case 0xa4:
-        return { inst: { op: 'movs', rep: f3, size: 8 }, terminator: false };
+        return { inst: { op: 'movs', rep: f3 || f2, size: 8 }, terminator: false };
       case 0xa5:
-        return { inst: { op: 'movs', rep: f3, size }, terminator: false };
+        return { inst: { op: 'movs', rep: f3 || f2, size }, terminator: false };
+      // CMPS/SCAS carry a conditional repeat: F3 = REPE (repeat while equal),
+      // F2 = REPNE (repeat while not equal). Both mean "repeat", so `rep` is
+      // set for either prefix and `repne` selects the termination condition.
       case 0xa6:
+        return { inst: { op: 'cmps', rep: f3 || f2, repne: f2, size: 8 }, terminator: false };
       case 0xa7:
+        return { inst: { op: 'cmps', rep: f3 || f2, repne: f2, size }, terminator: false };
       case 0xae:
+        return { inst: { op: 'scas', rep: f3 || f2, repne: f2, size: 8 }, terminator: false };
       case 0xaf:
-        throw new UnsupportedError(this.abs(), `string op 0x${opcode.toString(16)} not implemented`);
+        return { inst: { op: 'scas', rep: f3 || f2, repne: f2, size }, terminator: false };
       case 0xaa:
-        return { inst: { op: 'stos', rep: f3, size: 8 }, terminator: false };
+        return { inst: { op: 'stos', rep: f3 || f2, size: 8 }, terminator: false };
       case 0xab:
-        return { inst: { op: 'stos', rep: f3, size }, terminator: false };
+        return { inst: { op: 'stos', rep: f3 || f2, size }, terminator: false };
       case 0xac:
-        return { inst: { op: 'lods', rep: f3, size: 8 }, terminator: false };
+        return { inst: { op: 'lods', rep: f3 || f2, size: 8 }, terminator: false };
       case 0xad:
-        return { inst: { op: 'lods', rep: f3, size }, terminator: false };
-      void f2;
+        return { inst: { op: 'lods', rep: f3 || f2, size }, terminator: false };
 
       case 0xb0:
       case 0xb1:
@@ -669,10 +691,9 @@ class DecoderState {
         // ApiSetQueryApiSetPresence wrapper wrote [ebp-1] and zeroed [ebp]'s
         // low 3 bytes -> EBP restored as 0x07000000 -> cookie FAIL @0x42d47a).
         const opSize = opcode === 0xc6 ? 8 : size;
-        const immSize = opcode === 0xc6 ? 8 : size === 64 ? 32 : size;
         const raw = this.decodeRm(opSize);
         const dst = this.rmOperand(raw, opSize);
-        const imm = this.readImm(immSize);
+        const imm = size === 64 ? this.readS32() : this.readImm(opSize);
         return { inst: { op: 'mov', dst, src: this.immOperand(imm, opSize) }, terminator: false };
       }
 
@@ -784,10 +805,22 @@ class DecoderState {
         switch (opcode) {
           case 0xd9:
             if (!raw.mem) {
-              // register-direct forms (mod=11): D9 E8=FLD1, D9 EE=FLDZ, others ST(i) ops
-              if (raw.rmReg === 0) return { inst: { op: 'fld1' }, terminator: false };
-              if (raw.rmReg === 6) return { inst: { op: 'fldz' }, terminator: false };
-              throw new UnsupportedError(this.abs(), `unsupported x87 d9 reg-direct rm=${raw.rmReg}`);
+              // Register-direct forms (mod=11) are dispatched on BOTH modrm
+              // fields: the reg field selects the group, rm the member.
+              //   reg=0: D9 C0+i FLD ST(i)      reg=2: D9 D0 FNOP
+              //   reg=5: D9 E8 FLD1, D9 EE FLDZ
+              //   reg=6: D9 F6 FDECSTP, D9 F7 FINCSTP
+              // (Dispatching on rm alone mis-decodes D9 C0 as FLD1 and
+              // D9 F6 as FLDZ, which silently corrupts ST(0).)
+              if (raw.reg === 5 && raw.rmReg === 0) return { inst: { op: 'fld1' }, terminator: false };
+              if (raw.reg === 5 && raw.rmReg === 6) return { inst: { op: 'fldz' }, terminator: false };
+              if (raw.reg === 2 && raw.rmReg === 0) return { inst: { op: 'fnop' }, terminator: false };
+              if (raw.reg === 6 && raw.rmReg === 6) return { inst: { op: 'fdecstp' }, terminator: false };
+              if (raw.reg === 6 && raw.rmReg === 7) return { inst: { op: 'fincstp' }, terminator: false };
+              // FLD ST(0) duplicates ST(0), which is a no-op while only slot 0
+              // is modelled. Other ST(i) sources need a real stack.
+              if (raw.reg === 0 && raw.rmReg === 0) return { inst: { op: 'fnop' }, terminator: false };
+              throw new UnsupportedError(this.abs(), `unsupported x87 d9 reg-direct reg=${raw.reg} rm=${raw.rmReg}`);
             }
             switch (raw.reg) {
               case 5:
@@ -804,6 +837,15 @@ class DecoderState {
                 throw new UnsupportedError(this.abs(), `unsupported x87 d9 modrm reg=${raw.reg}`);
             }
           case 0xdd:
+            if (!raw.mem) {
+              // Register-direct: DD C0+i FFREE ST(i), DD D0+i FST ST(i),
+              // DD D8+i FSTP ST(i), DD E0+i FUCOM, DD E8+i FUCOMP.
+              // FFREE only clears a tag word, so it is a genuine no-op here —
+              // and `FFREE ST(0); FINCSTP` is the pop idiom Delphi emits to
+              // discard ST(0) without risking an exception.
+              if (raw.reg === 0) return { inst: { op: 'ffree' }, terminator: false };
+              throw new UnsupportedError(this.abs(), `unsupported x87 dd reg-direct reg=${raw.reg} rm=${raw.rmReg}`);
+            }
             switch (raw.reg) {
               case 0:
                 return { inst: { op: 'fld', src: mem, size: 64 }, terminator: false }; // FLD m64
@@ -889,15 +931,16 @@ class DecoderState {
       // ---- SSE2 128-bit moves / shuffles (minimal XMM set) ----
       case 0x10:
       case 0x11: {
-        // MOVUPS/MOVUPD xmm, xmm/m128 (load/store). f3/f2 forms are scalar
-        // MOVSS/MOVSD — not implemented; fault loudly instead of mis-decoding.
-        if (f3 || f2) throw new UnsupportedError(this.abs(), `unsupported scalar sse opcode 0f ${opcode.toString(16)}`);
+        // MOVUPS (no prefix) / MOVUPD (66) are full 128-bit moves; F3 is the
+        // scalar MOVSS (32-bit), F2 the scalar MOVSD (64-bit). All four share
+        // the XMM move machinery, differentiated by `lanes`.
+        const lanes: 1 | 2 | 4 = f3 ? 1 : f2 ? 2 : 4;
         const raw = this.decodeXmmRm();
         const x = this.xmmOperand(raw.reg);
         const rm = this.xmmRmOperand(raw);
         return opcode === 0x10
-          ? { inst: { op: 'xmm-load', dst: x, src: rm }, terminator: false }
-          : { inst: { op: 'xmm-store', dst: rm, src: x }, terminator: false };
+          ? { inst: { op: 'xmm-load', dst: x, src: rm, lanes }, terminator: false }
+          : { inst: { op: 'xmm-store', dst: rm, src: x, lanes }, terminator: false };
       }
       case 0x12:
       case 0x13:
@@ -936,14 +979,15 @@ class DecoderState {
       }
       case 0x6f:
       case 0x7f: {
-        // MOVDQA xmm, xmm/m128 (66); without 66 these are MMX MOVQ — unsupported.
-        if (!o66 || f3 || f2) throw new UnsupportedError(this.abs(), `unsupported mmx opcode 0f ${opcode.toString(16)}`);
+        // MOVDQA xmm, xmm/m128 (66) / MOVDQU (F3 or F2) — all full 128-bit
+        // moves. Without a 66/F3/F2 prefix these are MMX MOVQ — unsupported.
+        if (!o66 && !f3 && !f2) throw new UnsupportedError(this.abs(), `unsupported mmx opcode 0f ${opcode.toString(16)}`);
         const raw = this.decodeXmmRm();
         const x = this.xmmOperand(raw.reg);
         const rm = this.xmmRmOperand(raw);
         return opcode === 0x6f
-          ? { inst: { op: 'xmm-load', dst: x, src: rm }, terminator: false }
-          : { inst: { op: 'xmm-store', dst: rm, src: x }, terminator: false };
+          ? { inst: { op: 'xmm-load', dst: x, src: rm, lanes: 4 }, terminator: false }
+          : { inst: { op: 'xmm-store', dst: rm, src: x, lanes: 4 }, terminator: false };
       }
       case 0x6e:
       case 0x7e: {
@@ -1107,6 +1151,18 @@ class DecoderState {
         const src = this.rmOperand(raw, s);
         const dst = this.regOperand(this.registerFor(raw.modrmReg, size), size);
         const op = opcode === 0xb6 || opcode === 0xb7 ? 'movzx' : 'movsx';
+        return { inst: { op, dst, src }, terminator: false };
+      }
+
+      case 0xba: {
+        // BT/BTS/BTR/BTC r/m, imm8 — bit test with an immediate bit index
+        // (ModRM.reg selects the op: 0=BT, 1=BTS, 2=BTR, 3=BTC). Used by the
+        // x64 CRT init path (e.g. cmd.exe's `bt edi, 0x14`), which previously
+        // faulted as "unsupported two-byte opcode 0f ba".
+        const raw = this.decodeRm(size);
+        const dst = this.rmOperand(raw, size);
+        const src = this.immOperand(this.readU8(), 8);
+        const op = raw.modrmReg === 0 ? 'bt' : raw.modrmReg === 1 ? 'bts' : raw.modrmReg === 2 ? 'btr' : 'btc';
         return { inst: { op, dst, src }, terminator: false };
       }
 

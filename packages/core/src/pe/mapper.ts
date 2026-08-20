@@ -711,6 +711,14 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   // stdcall (ntdll). Missing argCount -> stub ret 0 -> 8 bytes leaked per call,
   // drifting the caller's stack in cmd's string-init path (0x42d3e7).
   'rtlcreateunicodestringfromasciiz': 2,
+  // netapi32 + version.dll for 32-bit installers (VSCode Setup ia32). All are
+  // WINAPI (stdcall): a missing argCount makes the stub `ret 0` and drift the
+  // guest stack — NetWkstaGetInfo's 3 args leaked 12 bytes (fault at 0x7fffe00).
+  'netwkstagetinfo': 3,
+  'netapibufferfree': 1,
+  'getfileversioninfosizew': 2,
+  'getfileversioninfow': 4,
+  'verqueryvaluew': 4,
 };
 export interface ApiStub {
   index: number;

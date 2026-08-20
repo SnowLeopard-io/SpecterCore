@@ -239,11 +239,29 @@ export class WasmFunction {
   i64Eqz(): void {
     this.buf.push(0x50);
   }
+  i64Eq(): void {
+    this.buf.push(0x51);
+  }
   i64Ne(): void {
     this.buf.push(0x52);
   }
+  i64LtS(): void {
+    this.buf.push(0x53);
+  }
+  i64LtU(): void {
+    this.buf.push(0x54);
+  }
+  i64GtS(): void {
+    this.buf.push(0x55);
+  }
   i64GtU(): void {
     this.buf.push(0x56);
+  }
+  i64LeU(): void {
+    this.buf.push(0x58);
+  }
+  i64GeU(): void {
+    this.buf.push(0x5a);
   }
 
   // ---- i32 numeric ----
@@ -303,6 +321,21 @@ export class WasmFunction {
   }
 
   // ---- i64 numeric ----
+  i64Clz(): void {
+    this.buf.push(0x79);
+  }
+  i64Ctz(): void {
+    this.buf.push(0x7a);
+  }
+  i64Popcnt(): void {
+    this.buf.push(0x7b);
+  }
+  i64Add(): void {
+    this.buf.push(0x7c);
+  }
+  i64Sub(): void {
+    this.buf.push(0x7d);
+  }
   i64ExtendI32S(): void {
     this.buf.push(0xac);
   }
@@ -330,6 +363,9 @@ export class WasmFunction {
   i64Or(): void {
     this.buf.push(0x84);
   }
+  i64Xor(): void {
+    this.buf.push(0x85);
+  }
   i64Shl(): void {
     this.buf.push(0x86);
   }
@@ -338,6 +374,12 @@ export class WasmFunction {
   }
   i64ShrU(): void {
     this.buf.push(0x88);
+  }
+  i64Rotl(): void {
+    this.buf.push(0x89);
+  }
+  i64Rotr(): void {
+    this.buf.push(0x8a);
   }
   i32WrapI64(): void {
     this.buf.push(0xa7);

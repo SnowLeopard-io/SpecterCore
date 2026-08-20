@@ -201,9 +201,18 @@ export type Op =
   | 'fstp'
   | 'fld1'
   | 'fldz'
+  // x87 stack-housekeeping ops. With the flat ST(0)-only FPU model these carry
+  // no observable state change, but they are decoded explicitly so traces stay
+  // readable and so real stack tracking can be added later without a re-decode.
+  | 'ffree'
+  | 'fincstp'
+  | 'fdecstp'
+  | 'fnop'
   | 'stos'
   | 'movs'
   | 'lods'
+  | 'scas'
+  | 'cmps'
   | 'clc'
   | 'stc'
   | 'cld'
@@ -227,8 +236,22 @@ export interface Instruction {
   nesting?: number;
   /** REP (F3) prefix on string ops. */
   rep?: boolean;
+  /**
+   * REPNE (F2) prefix on string ops. Only meaningful for the comparing string
+   * ops (`scas`/`cmps`), where F3 means REPE (repeat while ZF=1) and F2 means
+   * REPNE (repeat while ZF=0). For the non-comparing ops (`movs`/`stos`/`lods`)
+   * both prefixes are plain REP, so only `rep` is set.
+   */
+  repne?: boolean;
   /** Operand width for string ops (8/16/32). */
   size?: Size;
+  /**
+   * For `xmm-load`/`xmm-store`: number of 32-bit lanes moved. 4 = full 128-bit
+   * (MOVUPS/MOVUPD/MOVDQA/MOVDQU), 2 = MOVSD (64-bit scalar), 1 = MOVSS
+   * (32-bit scalar). Upper lanes are zeroed on a scalar memory load and left
+   * untouched on a scalar register load.
+   */
+  lanes?: 1 | 2 | 4;
 }
 
 /** A single instruction as decoded, with its byte length. */

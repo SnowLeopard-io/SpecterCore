@@ -2047,41 +2047,85 @@ export class GuestProcessRunner {
     this.interceptor.hook('kernel32.dll', 'RoGetMatchingRestrictedErrorInfo', failHr);
     this.interceptor.hook('kernel32.dll', 'SetRestrictedErrorInfo', failHr);
     // notepad delay-loads SHGetKnownFolderPath (resolved as kernel32 by
-    // allocDynamicStub) and skips the title/banner path when it fails.
-    this.interceptor.hook('kernel32.dll', 'SHGetKnownFolderPath', failHr);
-    this.interceptor.hook('shell32.dll', 'SHGetKnownFolderPath', failHr);
+    // allocDynamicStub). The 32-bit notepad skips the title/banner path when it
+    // fails, but the 64-bit build aborts window creation entirely on a FAILED
+    // HRESULT, so return a real Documents path (S_OK) here. Signature:
+    //   SHGetKnownFolderPath(rfid, dwFlags, hToken, PWSTR *ppszPath)
+    // The string is allocated via CoTaskMemAlloc and freed by CoTaskMemFree
+    // (a no-op in this environment), so a bump-allocated buffer is safe.
+    {
+      const documentsPath = `${this.cwd.replace(/\\$/,'')}\\Documents`;
+      const buffer = bumpAlloc((documentsPath.length + 1) * 2);
+      for (let i = 0; i < documentsPath.length; i++) {
+        const code = documentsPath.charCodeAt(i);
+        this.runtime.writeBytes(buffer + i * 2, new Uint8Array([code & 0xff, (code >> 8) & 0xff]));
+      }
+      this.runtime.writeBytes(buffer + documentsPath.length * 2, new Uint8Array(2));
+      this.interceptor.hook('kernel32.dll', 'SHGetKnownFolderPath', (ctx) => {
+        const out = ctx.rawArgs[3] ?? 0;
+        if (out) this.runtime.writeInt32(out, buffer);
+        return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
+      });
+      this.interceptor.hook('shell32.dll', 'SHGetKnownFolderPath', (ctx) => {
+        const out = ctx.rawArgs[3] ?? 0;
+        if (out) this.runtime.writeInt32(out, buffer);
+        return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
+      });
+    }
 
     // OS version reporting (NSIS / CRT gate on it).
     this.interceptor.hook('kernel32.dll', 'GetVersion', () => ({
       returnValue: 0x8000000a, // NT, major 10, minor 0 (0x80000000 = NT)
       errorCode: E.NO_ERROR,
     }));
-    this.interceptor.hook('kernel32.dll', 'GetVersionExW', (ctx) => {
-      const out = ctx.rawArgs[0] ?? 0;
+    // GetVersionEx writes into a caller-allocated struct whose size the caller
+    // declares in dwOSVersionInfoSize. The struct comes in two flavours and the
+    // ANSI/Unicode split doubles the char array:
+    //   OSVERSIONINFOW   = 5*4 + 128*2       = 276
+    //   OSVERSIONINFOEXW = 276 + 2+2+2+1+1   = 284
+    //   OSVERSIONINFOA   = 5*4 + 128         = 148
+    //   OSVERSIONINFOEXA = 148 + 2+2+2+1+1   = 156
+    // Writing a fixed 284 bytes into a 276-byte OSVERSIONINFOW overruns it by 8
+    // bytes. Delphi / Inno Setup installers allocate that struct ON THE STACK
+    // (`add esp,-0x114; mov [esp],0x114; push esp; call GetVersionExW`), so the
+    // overrun lands exactly on the caller's saved return address and zeroes it —
+    // the following `ret` jumps to 0 and the whole process looks like a silent
+    // "clean exit" 17 API calls into startup, with no fault to point at.
+    // Honour the declared size instead, and never write past it.
+    const fillVersionInfo = (out: number, unicode: boolean): { returnValue: number; errorCode: E } => {
       if (!out) return { returnValue: 0, errorCode: E.NO_ERROR };
-      const w = new Uint8Array(284); // OSVERSIONINFOW
+      const base = unicode ? 276 : 148; // OSVERSIONINFO(W|A)
+      const ex = unicode ? 284 : 156; // OSVERSIONINFOEX(W|A)
+      const declared = this.runtime.readInt32(out) >>> 0;
+      // Clamp to something sane: at least the 5 fixed DWORDs, never past the EX
+      // layout. A garbage size (0, huge) is a real caller bug -> fail like Windows.
+      if (declared < 20 || declared > ex) {
+        return { returnValue: 0, errorCode: E.ERROR_INVALID_PARAMETER };
+      }
+      const w = new Uint8Array(declared);
       const view = new DataView(w.buffer);
-      view.setUint32(0, 284, true); // dwOSVersionInfoSize
+      view.setUint32(0, declared, true); // dwOSVersionInfoSize (echo back)
       view.setUint32(4, 10, true); // dwMajorVersion
       view.setUint32(8, 0, true); // dwMinorVersion
       view.setUint32(12, 19045, true); // dwBuildNumber
       view.setUint32(16, 2, true); // dwPlatformId = VER_PLATFORM_WIN32_NT
+      // szCSDVersion stays zeroed = no service pack.
+      if (declared >= ex) {
+        view.setUint16(base, 0, true); // wServicePackMajor
+        view.setUint16(base + 2, 0, true); // wServicePackMinor
+        view.setUint16(base + 4, 0x100, true); // wSuiteMask = VER_SUITE_SINGLEUSERTS
+        w[base + 6] = 1; // wProductType = VER_NT_WORKSTATION
+        w[base + 7] = 0; // wReserved
+      }
       this.runtime.writeBytes(out, w);
       return { returnValue: 1, errorCode: E.NO_ERROR };
-    });
-    this.interceptor.hook('kernel32.dll', 'GetVersionExA', (ctx) => {
-      const out = ctx.rawArgs[0] ?? 0;
-      if (!out) return { returnValue: 0, errorCode: E.NO_ERROR };
-      const w = new Uint8Array(148); // OSVERSIONINFOA
-      const view = new DataView(w.buffer);
-      view.setUint32(0, 148, true);
-      view.setUint32(4, 10, true);
-      view.setUint32(8, 0, true);
-      view.setUint32(12, 19045, true);
-      view.setUint32(16, 2, true);
-      this.runtime.writeBytes(out, w);
-      return { returnValue: 1, errorCode: E.NO_ERROR };
-    });
+    };
+    this.interceptor.hook('kernel32.dll', 'GetVersionExW', (ctx) =>
+      fillVersionInfo(ctx.rawArgs[0] ?? 0, true),
+    );
+    this.interceptor.hook('kernel32.dll', 'GetVersionExA', (ctx) =>
+      fillVersionInfo(ctx.rawArgs[0] ?? 0, false),
+    );
 
     // ------------------------------------------------------------------
     // OS version gating (installers refuse to run on "old" Windows).
@@ -2113,13 +2157,17 @@ export class GuestProcessRunner {
       // the outcome installers actually rely on: lexicographic comparison of
       // the emulated OS (10.0.19045, NT) against the requested version, over
       // the fields present in the type mask.
+      // wServicePackMajor/Minor are WORDs packed at +276/+278, so a 32-bit read
+      // at either offset drags the neighbouring field in. Read the pair once and
+      // split it.
+      const spPair = this.runtime.readInt32(lpvi + 276) >>> 0;
       const req = {
         major: this.runtime.readInt32(lpvi + 4),
         minor: this.runtime.readInt32(lpvi + 8),
         build: this.runtime.readInt32(lpvi + 12),
         platform: this.runtime.readInt32(lpvi + 16),
-        spMajor: this.runtime.readInt32(lpvi + 276),
-        spMinor: this.runtime.readInt32(lpvi + 278),
+        spMajor: spPair & 0xffff,
+        spMinor: (spPair >>> 16) & 0xffff,
       };
       const ours = { major: 10, minor: 0, build: 19045, platform: 2, spMajor: 0, spMinor: 0 } as const;
       const order: Array<[keyof typeof req, number]> = [
