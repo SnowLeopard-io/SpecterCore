@@ -3,6 +3,7 @@ import { SystemInfoApp } from './apps/SystemInfoApp';
 import { FileExplorerApp } from './apps/FileExplorerApp';
 import { ImageViewerApp } from './apps/ImageViewerApp';
 import { VideoViewerApp } from './apps/VideoViewerApp';
+import { AudioPlayerApp } from './apps/AudioPlayerApp';
 import type { AppDefinition } from './types';
 
 /**
@@ -53,6 +54,14 @@ export const DEFAULT_APPS: AppDefinition[] = [
     description: 'Play videos from the virtual disk',
     group: 'Accessories',
     render: (args) => <VideoViewerApp initialFile={args?.path} />,
+  },
+  {
+    appId: 'audio-player',
+    name: 'Audio Player',
+    icon: '/icons/audio-player.svg',
+    description: 'Play audio from the virtual disk',
+    group: 'Accessories',
+    render: (args) => <AudioPlayerApp initialFile={args?.path} />,
   },
   {
     appId: 'windows-notepad',

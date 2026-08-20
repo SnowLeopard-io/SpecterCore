@@ -68,8 +68,9 @@ class LoggingInterceptor extends ApiInterceptorImpl {
     // Track the JIT context ebx slot (guest addr 0x1018) — handlers must not
     // write into the register context.
     const ebxNow = readDword(this.rt, 0x1018);
-    if (ebxNow !== this.ebxState) {
-      sync(`[ebx] after api#${this.calls} ${ctx.proc}: ctx.ebx=0x${ebxNow.toString(16)} (was 0x${this.ebxState.toString(16)})`);
+    if (ebxNow !== this.ebxState || /CharUpperW/.test(ctx.proc)) {
+      const espNow = this.rt.getReg('esp') >>> 0;
+      sync(`[ebx] after api#${this.calls} ${ctx.proc}: ctx.ebx=0x${ebxNow.toString(16)} (was 0x${this.ebxState.toString(16)}) esp=0x${espNow.toString(16)}`);
       this.ebxState = ebxNow;
     }
     if (this.calls <= 400 || /CreateFile|ReadFile|GetFileAttributes|CharUpper|GetStartupInfo|GetSystemMenu|SetWindowLong|LoadAccelerator|SetWindowText|vswprintf|SendMessage|EnumFonts|GetTextExtent|GetTextMetrics/i.test(ctx.proc)) {
@@ -173,6 +174,30 @@ async function main(): Promise<void> {
   const runner = new GuestProcessRunner(runtime, new JitEngineImpl(runtime), new PeLoaderImpl(), interceptor);
 
   const probers: Array<{ eip: number; fn: (rt: WasmRuntimeImpl) => void }> = [
+    {
+      // 0x412807 entry (mov edi,edi) — dump the compare inputs.
+      eip: 0x412807,
+      fn: (rt) => {
+        sync(`[cmp] 0x412807 entry ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)} edx=0x${(rt.getReg('edx') >>> 0).toString(16)} ecx=0x${(rt.getReg('ecx') >>> 0).toString(16)} arg=${JSON.stringify(readW(rt, rt.getReg('edx')))}`);
+      },
+    },
+    { eip: 0x4137c5, fn: (rt) => sync(`[cmp] after /A compare: ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)}`) },
+    { eip: 0x4137d1, fn: (rt) => sync(`[cmp] before /W compare: ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)}`) },
+    { eip: 0x4137f0, fn: (rt) => sync(`[cmp] after /W compare: ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)} eax=0x${(rt.getReg('eax') >>> 0).toString(16)}`) },
+    { eip: 0x4137f4, fn: (rt) => sync(`[cmp] 0x4137f4 (skip token): ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)}`) },
+    {
+      // 0x412807 epilogue (pop edi; pop esi; pop ebx; ret) — block start.
+      eip: 0x412844,
+      fn: (rt) => {
+        const esp = rt.getReg('esp') >>> 0;
+        const ebx = rt.getReg('ebx') >>> 0;
+        const s0 = readDword(rt, esp);
+        const s1 = readDword(rt, (esp + 4) >>> 0);
+        const s2 = readDword(rt, (esp + 8) >>> 0);
+        const s3 = readDword(rt, (esp + 0xc) >>> 0);
+        sync(`[cmp-ep] 0x412844 esp=0x${esp.toString(16)} ebx=0x${ebx.toString(16)} [esp]=0x${s0.toString(16)} [+4]=0x${s1.toString(16)} [+8]=0x${s2.toString(16)} [+c]=0x${s3.toString(16)}`);
+      },
+    },
     // Bisect ebx preservation across the internal calls between api#160-164.
     { eip: 0x41335f, fn: (rt) => sync(`[bisect] after 0x41f8cf: ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)}`) },
     { eip: 0x413391, fn: (rt) => sync(`[bisect] after 0x40cdaf: ebx=0x${(rt.getReg('ebx') >>> 0).toString(16)}`) },
@@ -222,13 +247,8 @@ async function main(): Promise<void> {
       fn: (rt) => {
         const ebx = rt.getReg('ebx') >>> 0;
         const ebp = rt.getReg('ebp') >>> 0;
-        const frame = `[ebp+8]=0x${readDword(rt, (ebp + 8) >>> 0).toString(16)} [ebp+c]=0x${readDword(rt, (ebp + 0xc) >>> 0).toString(16)} [ebp+10]=0x${readDword(rt, (ebp + 0x10) >>> 0).toString(16)}`;
-        // Dump the stack words around the frame to locate where 0x60 lives.
+        // Dump the stack words around the frame (locate where the arg was lost).
         let dump = '';
-        for (let off = 0x38; off <= 0x24; off -= 4) {
-          const a = (ebp + off) >>> 0;
-          dump += ` [ebp+0x${off.toString(16)}]=0x${readDword(rt, a).toString(16)}`;
-        }
         for (let off = 0x10; off <= 0x70; off += 4) {
           const a = (ebp + off) >>> 0;
           dump += ` [ebp+0x${off.toString(16)}]=0x${readDword(rt, a).toString(16)}`;
@@ -305,7 +325,7 @@ async function main(): Promise<void> {
         return null;
       }
     },
-    fileDialog: async (kind, opts) => {
+    fileDialog: async (kind, _opts) => {
       sync(`[diag] unexpected fileDialog kind=${kind}`);
       return null;
     },

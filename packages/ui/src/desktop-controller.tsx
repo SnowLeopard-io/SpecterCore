@@ -224,7 +224,9 @@ export class DesktopControllerImpl implements DesktopController {
             ? 720
             : app.appId === 'video-viewer'
               ? 800
-              : 680,
+              : app.appId === 'audio-player'
+                ? 640
+                : 680,
       height:
         app.appId === 'file-explorer'
           ? 500
@@ -232,7 +234,9 @@ export class DesktopControllerImpl implements DesktopController {
             ? 500
             : app.appId === 'video-viewer'
               ? 540
-              : 460,
+              : app.appId === 'audio-player'
+                ? 520
+                : 460,
       content: reactContent(app.render(args)),
       appId: app.appId,
     });

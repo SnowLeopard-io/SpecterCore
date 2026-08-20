@@ -36,7 +36,6 @@ async function main(): Promise<void> {
     }
     return null;
   };
-  const vaToOff = (va: number): number | null => rvaToOff(va - imgBase);
 
   // Resolve import name for an IAT address (0x42a270 -> DLL!Func).
   const impDirRva = dv.getUint32(peOff + 24 + 104, true);

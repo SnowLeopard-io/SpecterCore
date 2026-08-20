@@ -2348,6 +2348,375 @@
   color: #00b4d8;
 }
 
+/* ---- Audio Player ---- */
+.sc-ap {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  background: #1a1d29;
+  color: #e8e8e8;
+  position: relative;
+  overflow: hidden;
+}
+
+.sc-ap-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  padding: 24px;
+  min-width: 0;
+  position: relative;
+}
+
+.sc-ap-main.full {
+  flex: 1;
+}
+
+.sc-ap-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+}
+
+.sc-ap-art-disc {
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2a1a3e, #1a1d29);
+  border: 2px solid rgba(156, 39, 176, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 8px rgba(156, 39, 176, 0.08);
+  position: relative;
+}
+
+.sc-ap-disc-inner {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #9C27B0 30%, #6A1B9A 70%, #4A148C 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.sc-ap-disc-inner.spinning {
+  animation: sc-ap-spin 8s linear infinite;
+}
+
+@keyframes sc-ap-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.sc-ap-disc-label {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #1a1d29;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.sc-ap-disc-label svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sc-ap-art-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.25);
+  font-size: 13px;
+}
+
+.sc-ap-art-empty svg {
+  width: 64px;
+  height: 64px;
+}
+
+.sc-ap-error {
+  color: #f28b82;
+  font-size: 13px;
+  padding: 12px;
+  text-align: center;
+}
+
+.sc-ap-info {
+  text-align: center;
+  max-width: 100%;
+}
+
+.sc-ap-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+.sc-ap-subtitle {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 4px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.sc-ap-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 360px;
+}
+
+.sc-ap-time {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  min-width: 36px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.sc-ap-seek-wrap {
+  flex: 1;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.sc-ap-seek-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  position: relative;
+}
+
+.sc-ap-seek-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #9C27B0, #E040FB);
+}
+
+.sc-ap-seek-thumb {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #E040FB;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 8px rgba(224, 64, 251, 0.5);
+  pointer-events: none;
+}
+
+.sc-ap-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sc-ap-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background-color 0.1s ease, color 0.1s ease, transform 0.1s ease;
+  flex-shrink: 0;
+}
+
+.sc-ap-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+.sc-ap-btn.small {
+  width: 30px;
+  height: 30px;
+}
+
+.sc-ap-btn.small svg {
+  width: 15px;
+  height: 15px;
+}
+
+.sc-ap-btn.active {
+  color: #E040FB;
+}
+
+.sc-ap-btn.play {
+  width: 48px;
+  height: 48px;
+  background: #9C27B0;
+  color: #fff;
+}
+
+.sc-ap-btn.play:hover {
+  background: #AB47BC;
+  transform: scale(1.05);
+}
+
+.sc-ap-btn.play svg {
+  width: 22px;
+  height: 22px;
+}
+
+.sc-ap-volume {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sc-ap-volume-slider {
+  width: 80px;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.sc-ap-volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #E040FB;
+  cursor: pointer;
+}
+
+.sc-ap-volume-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #E040FB;
+  cursor: pointer;
+  border: none;
+}
+
+.sc-ap-playlist {
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.3);
+  flex-shrink: 0;
+}
+
+.sc-ap-playlist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.sc-ap-playlist-items {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.sc-ap-playlist-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.sc-ap-playlist-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.sc-ap-playlist-item.active {
+  background: rgba(156, 39, 176, 0.15);
+  color: #E040FB;
+}
+
+.sc-ap-pl-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  color: inherit;
+}
+
+.sc-ap-pl-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sc-ap-pl-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sc-ap-pl-index {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.3);
+  flex-shrink: 0;
+}
+
+.sc-ap-show-playlist {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 5;
+}
+
+.sc-ap-show-playlist:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
 /* ---- Run Executable (security-warning dialog + execution container) ---- */
 .sc-run {
   flex: 1;

@@ -1,8 +1,129 @@
-# specter-core Windows PE Emulator — Handover (2026-08-20, session 14/15)
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 15/16)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
-> Sessions 10-12 full handovers are preserved unchanged below.
+> Sessions 10-14 full handovers are preserved unchanged below.
+
+## Session 15 summary — notepad open-on-launch layer 2: THREE root causes found & fixed;
+> file-open now reaches CreateFileW but still fails (-1) then the guest faults (eip=0xc80).
+> The open is 90% of the way: the arg survives to 0x4137b2 and the /A //.SETUP switch
+> misparse is gone — what remains is the exact path handed to CreateFileW.
+
+**Status: LAYER 2 is PARTIALLY FIXED.** The "file arg never reaches the open logic" chain is
+fully root-caused and fixed (three independent emulator bugs, below). notepad now tokenizes
+correctly, keeps the arg alive through window init, and CALLS CreateFileW — but the open
+still returns -1 and the error path then faults at eip=0xc80 (RuntimeError: unreachable).
+That is the current frontier.
+
+## Session 15 work (verified: tsc exit 0; eslint 0 errors; notepad-dialog-check PASS)
+
+### Root cause 1 (FIXED) — LoadCursorW/LoadIconW/LoadImageW/LoadAcceleratorsW missing argCount → stack leak → arg destroyed
+- Evidence chain (runtime probes, notepad-open-probe.ts):
+  - `mov ebx, [ebp+8]` at 0x413277 loads the file arg (0x20003b0) — verified at 0x413261 entry
+    via `[esp+4]=0x20003b0 ("C:\Users\Guest\Desktop\hello.txt")`.
+  - Bisect probes showed ebx was 0x20003b0 entering 0x41f8cf (the RegisterClassExW wrapper,
+    called at 0x41335a) but garbage (0x1) after it returned.
+  - 0x41f8cf pushes ebx (0x41f8d7) and pops it (0x41f94a) — but the pop read a LEAKED ARG:
+    inside it calls LoadCursorW(2 args), LoadIconW(2), LoadImageW(6) — none of these were in
+    `X86_API_ARG_COUNT`, so their trap stubs did `ret 0` instead of `ret 8/24`, leaving the
+    args on the stack. The epilogue pops (edi/esi/ebx) then read leaked values → ebx destroyed.
+  - Same bug class as session 12's `locallock` (missing argCount → stack drift).
+- Fix (mapper.ts `X86_API_ARG_COUNT`): `loadcursorw/a: 2, loadiconw/a: 2, loadimagew/a: 6,
+  loadacceleratorsw/a: 2, setcursor: 1, getkeyboardlayout: 1`.
+- Verified: bisect probe shows ebx = 0x20003b0 after 0x41f8cf AND at 0x4137b2 (arg intact).
+
+### Root cause 2 (FIXED) — more missing argCounts in the 0x4133f9..0x4137a0 window
+- After RC1, ebx reached 0x4137b2 correctly but the flow still went wrong. More leaks:
+  - `gettextfacew` was 2 in the mapper but GetTextFaceW(hdc, cch, lpFaceName) is 3 → 4B/call.
+  - `lstrcmpiw` (2) and `getdpiformonitor` (4) were missing entirely (16B/call for the latter,
+    inside the DPI helpers 0x41313f/0x413179).
+- Fix (mapper.ts): `gettextfacew: 3, lstrcmpiw/a: 2, getdpiformonitor: 4`, plus a large batch
+  of other User32/GDI/Reg/kernel32 counts observed in notepad's imports and flows
+  (getsystemmenu:2, monitorfromwindow:2, getdpiforwindow:1, setthreaddpiawarenesscontext:1,
+  get/setwindowplacement:2, istextunicode:2, getmodulehandleexw:3, getfileinformationbyhandle:2,
+  createfilemappingw:6, mapviewoffile:4, unmapviewoffile:1, muldiv:3, setwindowpos:7,
+  movewindow:6, invalidaterect:3, redrawwindow:4, enablewindow:2, iswindow:1, setfocus:1,
+  isiconic:1, setactivewindow:1, getmenu:1, getsubmenu:2, checkmenuitem:3, enablemenuitem:3,
+  notifywinevent:6, trackmouseevent:1, getdlgitem:2, getdlgitemtextw:4, senddlgitemmessagew:4,
+  setdlgitemtextw:3, isdlgbuttonchecked:2, checkdlgbutton:2, checkradiobutton:4, enddialog:2,
+  messagebeep:1, isclipboardformatavailable:1, openclipboard:1, closeclipboard:0,
+  getwindowtextlengthw:1, getpropw:2, setpropw:3, removepropw:2, setscrollpos:5, destroyicon:1,
+  getmodulefilenameexw:4, globalalloc:2, globalfree:1, globallock:1, globalunlock:1,
+  regsetvalueexw:4, regcreatekeyw:3, regcreatekeyexw:7, regdeletekeyexw:6, regenumvaluew:6,
+  regqueryinfokeyw:5, regsetkeyvaluew:5, getfiletime:4, setfiletime:4).
+- NOTE on conventions: `_o__beginthreadex` (call site 0x40c0fc does `add esp, 0x18` after) and
+  the CRT vswprintf family are CDECL — the caller cleans, so their stubs MUST stay `ret 0`
+  (the default). Do NOT add argCounts for cdecl APIs; verify the call site first.
+
+### Root cause 3 (FIXED) — CharUpperW unimplemented → returned 0 → ALL case-insensitive compares matched
+- After RC1+RC2, ebx was correct at 0x4137b2 (=0x20003b0) but probes showed the "/A" compare
+  MATCHED (the skip-token probe 0x4137f4 fired, ebx += 4) → notepad thought the arg was the
+  "/A" switch → treated "C:\Users\..." as "/A/.SETUP..." → entered the /.SETUP branch →
+  CreateFileW called with a corrupted path → -1.
+- Why: notepad's switch compare 0x412807 calls CharUpperW per char; there was NO CharUpperW
+  handler, so the default returned 0 → CharUpperW('C') == CharUpperW('/') == 0 → "equal".
+  (The api log showed `CharUpperW ret=0x0` for every call.)
+- Fix (handlers.ts): implemented CharUpperW/CharUpperA/CharUpperBuffW/CharUpperBuffA — if
+  HIWORD(arg)==0 the arg is a single character (return uppercased LOWORD); otherwise uppercase
+  a NUL-terminated buffer in place and return the pointer. mapper.ts: `charuppera: 1,
+  charupperbuffa: 2` (charupperw/charupperbuffw already existed).
+
+### After RC1-3 (current state, NOT fixed)
+- notepad now reaches the REAL file-open flow: PathIsFileSpecW → GetFullPathNameW →
+  FindFirstFileW → CreateFileW (api#383) — but CreateFileW still returns 0xffffffff, and then
+  the error path faults: `[fault] eip=0xc80 status=fault error=RuntimeError: unreachable`
+  (the guest jumped to a low address — a garbage `ret`, i.e. one more stack leak or an
+  unimplemented API on the error path).
+- CreateFileW's path arg is still suspicious: at 0x413e61 the path comes from [ebp-0xc0c]
+  (filled by 0x412853); probe that slot. Also check GetFullPathNameW (5 args, present) and
+  FindFirstFileW (2, present) handler behavior — a wrong return value could make notepad pass
+  a bad path to CreateFileW. And check the error-dialog path (0x413e75 GetLastError → cmp 2 →
+  0x40fabb MessageBox flow; MessageBoxW handler returns 1 = IDOK, fine, but its argCount
+  (4) must be present).
+
+### New scripts (keep for the next session)
+- `scripts/scan-iat-calls.ts` — scan .text for `call dword ptr [0x42XXXX]` (indirect IAT
+  calls), grouped by DLL!Func or filtered by regex. Used to find every CreateFileW/MapViewOfFile
+  call site (e.g. open path = 0x413e61/0x413ed9, mapped-read path = 0x41126e/0x411286).
+- `scripts/check-argcounts.ts` — list every import of an exe NOT present in X86_API_ARG_COUNT
+  (systematic missing-argCount detector — run against notepad after any new crash).
+- `scripts/notepad-open-probe.ts` — focused probe harness for the open decision chain
+  (0x413261 stack args, 0x412807/0x412fdd/0x412c0c/0x412d8a/0x412f3e entries, bisect probes
+  at 0x41335f..0x4133f9, 0x4137b2/0x413809/0x413e2a/0x41382e/0x41392b/0x41403c, plus an
+  interceptor that logs ctx.ebx slot (0x1018) + esp changes after EVERY api dispatch —
+  `[ebx] after api#N <proc>: ... esp=0x...` — the fastest way to find who clobbers a register
+  or drifts the stack).
+- `scripts/jit-mov-ebp8-test.ts` — minimal JIT repro (`push ebp; mov ebp,esp; sub esp,0xd0c;
+  push ebx; mov ebx,[ebp+8]`) — proved the JIT is NOT miscompiling `mov ebx,[ebp+8]` (returns
+  0x20003b0 OK); steered the investigation away from the JIT toward trap-stub leaks.
+- `scripts/jit-decode-test.ts` — decode a byte sequence with the real X86Decoder and print the
+  IR (verify `8b 5d 08` decodes to mem{base:'ebp',disp:8}).
+- Build+run pattern identical to earlier scripts (esbuild bundle → node run).
+
+## Verification loop (current)
+- `tsc --noEmit` exit 0 (also fixed PRE-EXISTING errors: ImageViewerApp setMeta missing `size`
+  → added `size: fileSize`; AudioPlayerApp `playlist[idx]`/`playlist[next]` possibly-undefined
+  → guards. assoc.ts unused `lower`, AppIcon.tsx unused `isIconPath`, resolve-iat.ts unused
+  `impDirSize`/`targetRva` removed.)
+- `eslint .` exit 0 (4 pre-existing react-refresh warnings only)
+- `vitest run packages/shared packages/core` — running (expect 110 pass; timeout 124 = ok)
+- `scripts/notepad-dialog-check.ts` PASS (save-via-dialog NOT regressed by the argCount batch)
+- `scripts/notepad-open-check.ts` — layer-1 plumbing PASS; layer-2: CreateFileW now reached
+  but ret=-1, then guest fault eip=0xc80 → FAIL (see frontier)
+
+## Still open / next
+1. **CreateFileW returns -1 with a bad path** — probe 0x413e61's `[ebp-0xc0c]` (the path the
+   open helper actually passes); check 0x412853 (path copy) and GetFullPathNameW/FindFirstFileW
+   handler return values; find the garbage `ret` that lands eip at 0xc80 (likely one more
+   stack leak on the error path — run check-argcounts against notepad's MessageBoxW etc.).
+2. **MessageBoxW argCount** — confirm `messageboxw: 4` is in X86_API_ARG_COUNT (it is needed
+   for the "Cannot find the %s file" dialog path; if missing it leaks 16B and could be the
+   fault source).
+3. Taskbar large icon (from session 14) — still open.
+4. Settings window — still open.
+5. Cut/move clipboard, console-exe detection — still open (unchanged).
+
+---
 
 ## Session 14 summary — File Explorer Windows-ized + real icons + app pruning
 > and the notepad "double-click opens blank / Save As instead of Save" investigation.

@@ -42,7 +42,6 @@ async function main(): Promise<void> {
   const base = 0x400000;
   rt.writeBytes(base, code);
   const executor = new Executor(rt, engine);
-  const steps: number[] = [];
   const r = await executor.run(base);
   const ebx = rt.getReg('ebx') >>> 0;
   sync(`[jit-test] status=${r.status} eip=0x${r.eip.toString(16)} ebx=0x${ebx.toString(16)} ${ebx === 0x20003b0 ? 'OK' : 'MISMATCH (expect 0x20003b0)'}`);

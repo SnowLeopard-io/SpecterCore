@@ -13,7 +13,6 @@ async function main(): Promise<void> {
   const pe = dv.getUint32(0x3c, true);
   const num = dv.getUint16(pe + 6, true);
   const optsz = dv.getUint16(pe + 20, true);
-  const base = dv.getUint32(pe + 24 + 28, true);
   const secTab = pe + 24 + optsz;
   const secs: Array<{ va: number; vs: number; raw: number; rs: number }> = [];
   for (let i = 0; i < num; i++) {

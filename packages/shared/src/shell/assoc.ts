@@ -16,7 +16,9 @@ const TEXT_EXTENSIONS = new Set([
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico']);
 
-const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi', 'mp3', 'wav']);
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a']);
+
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi']);
 
 /** 是否为可用记事本打开的文本文件。 */
 export function isTextFile(name: string): boolean {
@@ -30,6 +32,13 @@ export function isImageFile(name: string): boolean {
   const dot = name.lastIndexOf('.');
   if (dot < 0) return false;
   return IMAGE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
+}
+
+/** 是否为音频文件（音频播放器可打开）。 */
+export function isAudioFile(name: string): boolean {
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) return false;
+  return AUDIO_EXTENSIONS.has(name.slice(dot + 1).toLowerCase());
 }
 
 /** 是否为视频文件（视频播放器可打开）。 */
@@ -48,6 +57,7 @@ export function isVideoFile(name: string): boolean {
 export function appForFile(name: string): string | null {
   if (isImageFile(name)) return 'image-viewer';
   if (isVideoFile(name)) return 'video-viewer';
+  if (isAudioFile(name)) return 'audio-player';
   // Text files open in the REAL bundled Windows notepad.exe (windows-notepad,
   // launched via DesktopController). The old TS-simulated NotepadApp is gone.
   if (isTextFile(name)) return 'windows-notepad';

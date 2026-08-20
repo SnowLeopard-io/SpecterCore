@@ -17,7 +17,7 @@ export function iconPathFor(entry: DirEntry): string {
     return '/icons/text-document.svg';
   if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.bmp'))
     return '/icons/image-file.svg';
-  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg')) return '/icons/audio-file.svg';
+  if (lower.endsWith('.mp3') || lower.endsWith('.wav') || lower.endsWith('.ogg') || lower.endsWith('.flac') || lower.endsWith('.aac') || lower.endsWith('.m4a')) return '/icons/audio-file.svg';
   if (lower.endsWith('.mp4') || lower.endsWith('.webm') || lower.endsWith('.mov') || lower.endsWith('.mkv') || lower.endsWith('.avi')) return '/icons/video-file.svg';
   if (lower.endsWith('.bkapp')) return '/icons/package.svg';
   return '/icons/document.svg';

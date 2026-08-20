@@ -324,6 +324,8 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getwindowtextw': 3,
   'getwindowtexta': 3,
   'charupperbuffw': 2,
+  'charupperbuffa': 2,
+  'charuppera': 1,
   'charnextw': 1,
   'msgwaitformultipleobjects': 5,
   'registerwindowmessagew': 1,
