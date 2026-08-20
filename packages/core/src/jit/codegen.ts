@@ -522,8 +522,7 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
       return;
     case 'rcl':
     case 'rcr':
-      // not implemented — fault to the dispatcher
-      fn.unreachable();
+      emitRotateCarry(fn, inst.op, size, inst.dst!, inst.src!);
       return;
     case 'mul':
     case 'imul':
@@ -2122,6 +2121,241 @@ function emitShift64(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror'
   fn.localSet(L_TMP2); // new flags
   // final = count == 0 ? old : new
   fn.localGet(L_TMP);
+  fn.localGet(L_TMP2);
+  fn.localGet(L_B);
+  fn.i32Eqz();
+  fn.select();
+  fn.localSet(L_TMP2);
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.localGet(L_TMP2);
+  fn.i32Store();
+}
+
+/**
+ * RCL/RCR: rotate through the carry flag. The operand + CF form an (N+1)-bit
+ * rotating value; the count is masked to 5 bits (6 in 64-bit mode) and the
+ * effective rotation is count mod (N+1). Flags are kept from before when the
+ * masked count is 0 (matching the other shifts).
+ */
+function emitRotateCarry(fn: WasmFunction, op: 'rcl' | 'rcr', size: Size, dst: Operand, count: Operand): void {
+  if (size === 64) {
+    emitRotateCarry64(fn, op, dst, count);
+    return;
+  }
+  const mask = flagMask(size);
+  pushOperand(fn, dst);
+  fn.localSet(L_A); // a = operand
+  pushOperand(fn, count);
+  fn.i32Const(0x1f);
+  fn.i32And();
+  fn.localSet(L_B); // b = count & 31
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.i32Const(1);
+  fn.i32And();
+  fn.localSet(L_TMP); // old CF
+
+  // V (i64) = (cf << N) | a
+  fn.localGet(L_TMP);
+  fn.i64ExtendI32U();
+  fn.i64Const(size);
+  fn.i64Shl();
+  fn.localGet(L_A);
+  fn.i64ExtendI32U();
+  fn.i64Or();
+  fn.localSet(L_I64A); // V
+
+  // c2 = b % (N+1)
+  fn.localGet(L_B);
+  fn.i32Const(size + 1);
+  fn.i32RemU();
+  fn.localSet(L_TMP2); // c2
+
+  // rot = rotate V by c2 within (N+1) bits
+  fn.localGet(L_I64A);
+  fn.localGet(L_TMP2);
+  fn.i64ExtendI32U();
+  if (op === 'rcl') fn.i64Shl();
+  else fn.i64ShrU();
+  fn.localGet(L_I64A);
+  fn.i64Const(size + 1);
+  fn.localGet(L_TMP2);
+  fn.i64ExtendI32U();
+  fn.i64Sub();
+  if (op === 'rcl') fn.i64ShrU();
+  else fn.i64Shl();
+  fn.i64Or();
+  fn.i64Const(2 ** (size + 1) - 1);
+  fn.i64And();
+  fn.localSet(L_I64B); // rot
+
+  // result = (i32)(rot & mask)
+  fn.localGet(L_I64B);
+  fn.i64Const(mask);
+  fn.i64And();
+  fn.i32WrapI64();
+  fn.localSet(L_S);
+  // new CF = (i32)((rot >> N) & 1)
+  fn.localGet(L_I64B);
+  fn.i64Const(size);
+  fn.i64ShrU();
+  fn.i32WrapI64();
+  fn.i32Const(1);
+  fn.i32And();
+  fn.localSet(L_TMP); // new CF
+
+  fn.localGet(L_S);
+  storeOperand(fn, dst);
+
+  // flags: compute new, then keep old when masked count == 0
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.localSet(L_ORIG); // old flags
+  beginFlags(fn);
+  emitZspFlags(fn, size);
+  fn.localGet(L_TMP);
+  orFlag(fn, 0); // CF
+  if (op === 'rcl') {
+    // OF = new_CF XOR MSB(result)
+    fn.localGet(L_TMP);
+    fn.localGet(L_S);
+    fn.i32Const(size - 1);
+    fn.i32ShrU();
+    fn.i32Xor();
+  } else {
+    // OF = MSB(result) XOR MSB(operand)
+    fn.localGet(L_S);
+    fn.i32Const(size - 1);
+    fn.i32ShrU();
+    fn.localGet(L_A);
+    fn.i32Const(size - 1);
+    fn.i32ShrU();
+    fn.i32Xor();
+  }
+  orFlag(fn, 11);
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.i32Const(FLAG_DF);
+  fn.i32And();
+  fn.i32Or();
+  fn.localSet(L_TMP2); // new flags
+  fn.localGet(L_ORIG);
+  fn.localGet(L_TMP2);
+  fn.localGet(L_B);
+  fn.i32Eqz();
+  fn.select();
+  fn.localSet(L_TMP2);
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.localGet(L_TMP2);
+  fn.i32Store();
+}
+
+/** 64-bit RCL/RCR. The 65-bit (CF, operand) value is rotated by b in [1, 63];
+ * the a<<64 / a>>>64 terms are avoided by folding the extra step into a second
+ * shift (a>>>64 == (a>>>63)>>>1 == 0). */
+function emitRotateCarry64(fn: WasmFunction, op: 'rcl' | 'rcr', dst: Operand, count: Operand): void {
+  pushOperand(fn, dst);
+  fn.localSet(L_I64A); // a
+  pushOperand(fn, count);
+  fn.i32Const(0x3f);
+  fn.i32And();
+  fn.localSet(L_B); // b = count & 63
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.i32Const(1);
+  fn.i32And();
+  fn.localSet(L_TMP); // old CF
+
+  // term1 = a << b (rcl) / a >>> b (rcr)
+  fn.localGet(L_I64A);
+  fn.localGet(L_B);
+  fn.i64ExtendI32U();
+  if (op === 'rcl') fn.i64Shl();
+  else fn.i64ShrU();
+  // term2 = (a >>> (64-b)) >>> 1 (rcl) / (a << (64-b)) << 1 (rcr)
+  fn.localGet(L_I64A);
+  fn.i64Const(64);
+  fn.localGet(L_B);
+  fn.i64ExtendI32U();
+  fn.i64Sub();
+  if (op === 'rcl') fn.i64ShrU();
+  else fn.i64Shl();
+  fn.i64Const(1);
+  if (op === 'rcl') fn.i64ShrU();
+  else fn.i64Shl();
+  fn.i64Or();
+  // term3 = cf << (b-1) (rcl) / cf << (64-b) (rcr)
+  fn.localGet(L_TMP);
+  fn.i64ExtendI32U();
+  fn.localGet(L_B);
+  fn.i64ExtendI32U();
+  if (op === 'rcl') {
+    fn.i64Const(1);
+    fn.i64Sub();
+  } else {
+    fn.i64Const(64);
+    fn.i64Sub();
+  }
+  fn.i64Shl();
+  fn.i64Or();
+  fn.localSet(L_I64); // result
+
+  fn.localGet(L_I64);
+  storeOperand(fn, dst);
+
+  // new CF = a[64-b] (rcl) / a[b-1] (rcr)
+  fn.localGet(L_I64A);
+  fn.localGet(L_B);
+  fn.i64ExtendI32U();
+  if (op === 'rcl') {
+    fn.i64Const(64);
+    fn.i64Sub();
+  } else {
+    fn.i64Const(1);
+    fn.i64Sub();
+  }
+  fn.i64ShrU();
+  fn.i32WrapI64();
+  fn.i32Const(1);
+  fn.i32And();
+  fn.localSet(L_TMP); // new CF
+
+  // flags: compute new, then keep old when masked count == 0
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.localSet(L_ORIG); // old flags
+  beginFlags(fn);
+  emitZspFlags64(fn);
+  fn.localGet(L_TMP);
+  orFlag(fn, 0); // CF
+  if (op === 'rcl') {
+    // OF = new_CF XOR MSB(result)
+    fn.localGet(L_TMP);
+    fn.localGet(L_I64);
+    fn.i64Const(63);
+    fn.i64ShrU();
+    fn.i32WrapI64();
+    fn.i32Xor();
+  } else {
+    // OF = MSB(result) XOR MSB(operand)
+    fn.localGet(L_I64);
+    fn.i64Const(63);
+    fn.i64ShrU();
+    fn.i32WrapI64();
+    fn.localGet(L_I64A);
+    fn.i64Const(63);
+    fn.i64ShrU();
+    fn.i32WrapI64();
+    fn.i32Xor();
+  }
+  orFlag(fn, 11);
+  fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+  fn.i32Load();
+  fn.i32Const(FLAG_DF);
+  fn.i32And();
+  fn.i32Or();
+  fn.localSet(L_TMP2); // new flags
+  fn.localGet(L_ORIG);
   fn.localGet(L_TMP2);
   fn.localGet(L_B);
   fn.i32Eqz();

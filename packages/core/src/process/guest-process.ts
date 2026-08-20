@@ -2655,7 +2655,9 @@ export class GuestProcessRunner {
       if (this.sehDepth > 12) return { returnValue: 0, errorCode: E.NO_ERROR };
 
       let u = peek(0);
+      let inner = 0;
       for (let guard = 0; guard < 64 && u !== 0 && u !== 0xffffffff && u !== targetFrame; guard++) {
+        inner = u;
         const uh = peek(u + 4);
         dbg(`  unwind record=0x${u.toString(16)} handler=0x${uh.toString(16)}`);
         if (uh) {
@@ -2677,17 +2679,14 @@ export class GuestProcessRunner {
       // Transfer: never returns; EAX = ReturnValue is set by the dispatcher
       // from the returned ApiResult.
       //
-      // ESP: the guest handler pushed 8 dwords (at frame = record-0x14) before
-      // calling RtlUnwind, and its continuation (TargetIp = the instruction
-      // after the call) reads the ESTABLISHER FRAME back from [esp+0x28].
-      // The only stack slot holding the record address itself is the inner
-      // record's Next field — which sits exactly 0x28 bytes above the
-      // post-push ESP (record-0x34). So the transfer ESP must be
-      // EstablisherFrame - 0x34; then [esp+0x28] = [inner.Next] = the
-      // accepting record, matching the second-phase handler at 0x4090fc that
-      // reads Frame+4 / Frame+8 as jump target / saved EBP.
+      // ESP: the unwind target (TargetIp) reads the ESTABLISHER FRAME back
+      // from [esp+0x28]. The accepting record's address is stored in the
+      // inner record's Next field at [inner] (the record just before
+      // targetFrame in the chain). So the transfer ESP must be inner - 0x28;
+      // then [esp+0x28] = [inner] = the accepting record, matching the unwind
+      // target that reads Frame+4 / Frame+8 as jump target / saved EBP.
       dbg(`  transfer to 0x${targetIp.toString(16)} esp=0x${targetFrame.toString(16)}`);
-      const transferEsp = (targetFrame - 0x34) >>> 0;
+      const transferEsp = (inner ? inner - 0x28 : targetFrame - 0x34) >>> 0;
       this.sehTransfer = { eip: targetIp, esp: transferEsp };
       runtime.setEip(targetIp);
       runtime.setReg('esp', transferEsp);

@@ -209,10 +209,10 @@ function dumpAt(label: string, rt: WasmRuntimeImpl, extraOffsets: number[]): voi
     words.push(`+${(i * 4).toString(16)}:0x${(rt.readInt32(esp + i * 4) >>> 0).toString(16)}`);
   }
   console.error(`[probe]   stack ${words.join(' ')}`);
-  // TEMP: dump runtime bytes at 0x407460 to check .text mapping shift
+  // TEMP: dump runtime bytes at 0x407440 to check .text mapping shift
   try {
-    const b = rt.readBytes(0x407460, 32);
-    console.error(`[probe]   mem@0x407460 = ${[...b].map((x) => x.toString(16).padStart(2, '0')).join(' ')}`);
+    const b = rt.readBytes(0x407440, 48);
+    console.error(`[probe]   mem@0x407440 = ${[...b].map((x) => x.toString(16).padStart(2, '0')).join(' ')}`);
   } catch { /* ignore */ }
   for (const off of extraOffsets) {
     const addr = esp + off;
@@ -220,6 +220,20 @@ function dumpAt(label: string, rt: WasmRuntimeImpl, extraOffsets: number[]): voi
       `[probe]   [esp+0x${off.toString(16)}] = [0x${(addr >>> 0).toString(16)}] = ` +
         `0x${(rt.readInt32(addr) >>> 0).toString(16)}  ${sectionOf(rt.readInt32(addr) >>> 0)}`,
     );
+  }
+  // edi-relative dump: SEH record layout [edi]=Next [edi+4]=Handler [edi+8]=SavedEBP
+  try {
+    const edi = rt.getReg('edi') >>> 0;
+    if (edi) {
+      const vals: string[] = [];
+      for (let i = 0; i < 8; i++) {
+        const v = rt.readInt32(edi + i * 4) >>> 0;
+        vals.push(`[edi+0x${(i * 4).toString(16)}]=0x${v.toString(16)}${sectionOf(v) ? `(${sectionOf(v)})` : ''}`);
+      }
+      console.error(`[probe]   edi=0x${edi.toString(16)} ${vals.join(' ')}`);
+    }
+  } catch {
+    /* ignore */
   }
 }
 
