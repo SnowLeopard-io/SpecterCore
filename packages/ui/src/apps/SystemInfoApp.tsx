@@ -96,7 +96,7 @@ export function SystemInfoApp() {
     <div className="sc-settings">
       <aside className="sc-settings-nav">
         <div className="sc-settings-nav-user">
-          <img className="sc-settings-avatar" src="/avatar.png" alt="Avatar" />
+          <img className="sc-settings-avatar" src="avatar.png" alt="Avatar" />
           <div className="sc-settings-nav-user-info">
             <span className="sc-settings-nav-user-name">SpecterCore</span>
             <span className="sc-settings-nav-user-sub">Virtual Desktop Environment</span>
@@ -120,7 +120,7 @@ export function SystemInfoApp() {
         {section === 'home' && (
           <>
             <div className="sc-settings-device-card">
-              <img className="sc-settings-device-thumb" src="/wallpaper.jpg" alt="" />
+              <img className="sc-settings-device-thumb" src="wallpaper.jpg" alt="" />
               <div className="sc-settings-device-info">
                 <span className="sc-settings-device-name">SpecterCore</span>
                 <span className="sc-settings-device-model">Virtual x86 Compatibility Layer</span>

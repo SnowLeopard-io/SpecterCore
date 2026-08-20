@@ -37,15 +37,15 @@ const DESKTOP_DIR = 'Desktop';
 /** Return the real Windows file-type icon (extracted from the OS) for a desktop item. */
 function desktopFileIcon(name: string): string {
   const lower = name.toLowerCase();
-  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return '/icons/application.svg';
+  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return 'icons/application.svg';
   if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.log') || lower.endsWith('.ini') || lower.endsWith('.json'))
-    return '/icons/text-document.svg';
+    return 'icons/text-document.svg';
   if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.bmp'))
-    return '/icons/image-file.svg';
-  if (lower.endsWith('.mp3') || lower.endsWith('.wav') || lower.endsWith('.ogg') || lower.endsWith('.flac') || lower.endsWith('.aac') || lower.endsWith('.m4a')) return '/icons/audio-file.svg';
-  if (lower.endsWith('.mp4') || lower.endsWith('.webm') || lower.endsWith('.mov') || lower.endsWith('.mkv') || lower.endsWith('.avi')) return '/icons/video-file.svg';
-  if (lower.endsWith('.bkapp')) return '/icons/package.svg';
-  return '/icons/document.svg';
+    return 'icons/image-file.svg';
+  if (lower.endsWith('.mp3') || lower.endsWith('.wav') || lower.endsWith('.ogg') || lower.endsWith('.flac') || lower.endsWith('.aac') || lower.endsWith('.m4a')) return 'icons/audio-file.svg';
+  if (lower.endsWith('.mp4') || lower.endsWith('.webm') || lower.endsWith('.mov') || lower.endsWith('.mkv') || lower.endsWith('.avi')) return 'icons/video-file.svg';
+  if (lower.endsWith('.bkapp')) return 'icons/package.svg';
+  return 'icons/document.svg';
 }
 
 /** Full Windows-style desktop: wallpaper, icons, windows, taskbar, start menu. */
@@ -183,6 +183,8 @@ export function Desktop({ controller }: DesktopProps) {
   const openItemMenu = (e: ReactMouseEvent, name: string): void => {
     e.preventDefault();
     e.stopPropagation();
+    // Mutually exclusive with the desktop background context menu.
+    setMenu(null);
     let mx = e.clientX;
     let my = e.clientY;
     // Keep the menu inside the viewport (sc-desktop covers the full viewport).
@@ -255,11 +257,14 @@ export function Desktop({ controller }: DesktopProps) {
       onContextMenu={(e) => {
         e.preventDefault();
         setStartOpen(false);
+        // Mutually exclusive with the file/desktop-item context menu.
+        setItemMenu(null);
         setMenu({ x: e.clientX, y: e.clientY });
       }}
       onPointerDown={(e) => {
         if (isBackground(e.target)) {
           setMenu(null);
+          setItemMenu(null);
           setStartOpen(false);
           setSelectedApp(null);
         }
@@ -310,7 +315,7 @@ export function Desktop({ controller }: DesktopProps) {
               onContextMenu={(e) => openItemMenu(e, item.name)}
             >
                             {isDir ? (
-                <img className="sc-desktop-icon-img" src="/icons/folder.svg" alt="" draggable={false} />
+                <img className="sc-desktop-icon-img" src="icons/folder.svg" alt="" draggable={false} />
               ) : (
                 <img className="sc-desktop-icon-img" src={desktopFileIcon(item.name)} alt="" draggable={false} />
               )}

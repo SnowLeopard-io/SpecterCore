@@ -44,7 +44,7 @@ export function StartMenu({ open, apps, onLaunch, onShutdown }: StartMenuProps) 
 
       <div className="sc-start-footer">
         <button className="sc-start-user">
-          <img className="sc-start-avatar" src="/avatar.png" alt="Avatar" draggable={false} />
+          <img className="sc-start-avatar" src="avatar.png" alt="Avatar" draggable={false} />
           <span>SpecterCore</span>
         </button>
         <button className="sc-start-power" aria-label="Shut down" onClick={onShutdown}>

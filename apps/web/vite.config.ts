@@ -7,18 +7,10 @@ export default defineConfig({
   base: './',
   server: {
     port: 5173,
-    headers: {
-      // Cross-origin isolation enables SharedArrayBuffer (design doc 1.6)
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-    },
+    // 移除 COOP/COEP：跨源隔离会强制拦截跨源 iframe，破坏内置浏览器内嵌网页。
+    // SharedArrayBuffer（跨 Worker 共享内存）为预留能力，当前跨 Worker 通信走 postMessage。
   },
-  preview: {
-    headers: {
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-    },
-  },
+  preview: {},
   worker: {
     format: 'es',
   },

@@ -46,7 +46,9 @@ export function createProbe(): EnvironmentProbe {
   if (!capabilities.secureContext) missing.push('HTTPS/localhost (secure context)');
   if (!capabilities.opfs) missing.push('OPFS (File System Access API)');
   if (!capabilities.webWorker) missing.push('Web Workers');
-  if (!capabilities.crossOriginIsolated) missing.push('cross-origin isolation (COOP/COEP headers)');
+  // SharedArrayBuffer 跨 Worker 共享内存是未来能力（worker-pool 目前走 postMessage）。
+  // 开启跨源隔离（COEP require-corp）会强制拦截所有跨源 iframe，破坏浏览器应用，
+  // 故跨源隔离不作为必需能力校验。
 
   return {
     capabilities,

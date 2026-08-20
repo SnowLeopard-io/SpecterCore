@@ -38,10 +38,10 @@ export function Taskbar({ windows, openStart, onToggleStart }: TaskbarProps) {
           aria-label="Start"
           onClick={onToggleStart}
         >
-          <img className="sc-taskbar-sys-icon large" src="/icons/taskbar-windows.svg" alt="" draggable={false} />
+          <img className="sc-taskbar-sys-icon large" src="icons/taskbar-windows.svg" alt="" draggable={false} />
         </button>
         <button className="sc-task-btn" aria-label="Search">
-          <img className="sc-taskbar-sys-icon" src="/icons/taskbar-search.svg" alt="" draggable={false} />
+          <img className="sc-taskbar-sys-icon" src="icons/taskbar-search.svg" alt="" draggable={false} />
         </button>
         <span className="sc-task-sep" />
         {windows.map((win) => (
@@ -58,9 +58,9 @@ export function Taskbar({ windows, openStart, onToggleStart }: TaskbarProps) {
       </div>
 
       <div className="sc-tray">
-        <span className="sc-tray-icon"><img src="/icons/taskbar-wifi.svg" alt="" draggable={false} /></span>
-        <span className="sc-tray-icon"><img src="/icons/taskbar-volume.svg" alt="" draggable={false} /></span>
-        <span className="sc-tray-icon"><img src="/icons/taskbar-battery.svg" alt="" draggable={false} /></span>
+        <span className="sc-tray-icon"><img src="icons/taskbar-wifi.svg" alt="" draggable={false} /></span>
+        <span className="sc-tray-icon"><img src="icons/taskbar-volume.svg" alt="" draggable={false} /></span>
+        <span className="sc-tray-icon"><img src="icons/taskbar-battery.svg" alt="" draggable={false} /></span>
         <span className="sc-tray-clock">
           {clock.split('\n').map((line, i) => (
             <span key={i} style={i === 0 ? { fontWeight: 600 } : { fontSize: 11 }}>

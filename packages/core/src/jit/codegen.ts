@@ -1536,20 +1536,20 @@ function emitShift(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror', 
 
   // CF
   if (op === 'shl') {
-    // CF = bit(32 - count) of a
+    // CF = bit(32 - count) of a  =>  (a >>> (32 - count)) & 1
+    fn.localGet(L_A);
     fn.i32Const(0x20);
     fn.localGet(L_B);
     fn.i32Sub();
-    fn.localGet(L_A);
     fn.i32ShrU();
     fn.i32Const(1);
     fn.i32And();
   } else if (op === 'shr' || op === 'sar') {
-    // CF = bit(count - 1) of a
+    // CF = bit(count - 1) of a  =>  (a >>> (count - 1)) & 1
+    fn.localGet(L_A);
     fn.localGet(L_B);
     fn.i32Const(1);
     fn.i32Sub();
-    fn.localGet(L_A);
     fn.i32ShrU();
     fn.i32Const(1);
     fn.i32And();
