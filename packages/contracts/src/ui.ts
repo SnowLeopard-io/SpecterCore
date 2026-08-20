@@ -72,6 +72,7 @@ export interface WindowManager {
   maximize(id: string): Promise<void>;
   restore(id: string): Promise<void>;
   focusWindow(id: string): Promise<void>;
+  setTitle(id: string, title: string): void;
   getWindow(id: string): WindowHandle | null;
   listWindows(): WindowHandle[];
   onWindowCreated(listener: (window: WindowHandle) => void): Dispose;

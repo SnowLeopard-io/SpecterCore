@@ -16,6 +16,15 @@ interface TabState {
   hIndex: number;
 }
 
+function prettyTitle(url: string): string {
+  try {
+    const h = new URL(url).hostname;
+    return h.replace(/^www\./, '');
+  } catch {
+    return url;
+  }
+}
+
 function normalizeUrl(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
@@ -125,6 +134,16 @@ export function BrowserApp() {
     setAddress(active.url);
   }, [active.url]);
 
+  useEffect(() => {
+    const wm = controller.windowManager;
+    const winId = wm.getAppWindowId?.('browser');
+    if (!winId) return;
+    const title = active.url ? `Browser — ${active.title}` : 'Browser';
+    if (typeof wm.setTitle === 'function') {
+      wm.setTitle(winId, title);
+    }
+  }, [active.title, active.url]);
+
   const goto = useCallback(
     (raw: string, opts: { push?: boolean } = {}): void => {
       const url = normalizeUrl(raw);
@@ -139,7 +158,7 @@ export function BrowserApp() {
               : [...t.history.slice(0, t.hIndex + 1), url]
             : t.history;
           const hIndex = push ? (isDup ? t.hIndex : t.history.length) : t.hIndex;
-          return { ...t, url, loading: true, history, hIndex, title: url };
+          return { ...t, url, loading: true, history, hIndex, title: prettyTitle(url) };
         }),
       );
       setAddress(url);
@@ -153,7 +172,7 @@ export function BrowserApp() {
     if (t.hIndex <= 0) return;
     const target = t.history[t.hIndex - 1] ?? '';
     setTabs((prev) =>
-      prev.map((x) => (x.id === t.id ? { ...x, url: target, title: target, hIndex: x.hIndex - 1, loading: true } : x)),
+      prev.map((x) => (x.id === t.id ? { ...x, url: target, title: prettyTitle(target), hIndex: x.hIndex - 1, loading: true } : x)),
     );
     setAddress(target);
     setIframeKey((k) => k + 1);
@@ -165,7 +184,7 @@ export function BrowserApp() {
     const target = t.history[t.hIndex + 1];
     if (!target) return;
     setTabs((prev) =>
-      prev.map((x) => (x.id === t.id ? { ...x, url: target, title: target, hIndex: x.hIndex + 1, loading: true } : x)),
+      prev.map((x) => (x.id === t.id ? { ...x, url: target, title: prettyTitle(target), hIndex: x.hIndex + 1, loading: true } : x)),
     );
     setAddress(target);
     setIframeKey((k) => k + 1);
@@ -300,10 +319,28 @@ export function BrowserApp() {
             className="sc-browser-frame"
             src={active.url}
             title={active.title}
-            onLoad={() => {
-              setTabs((prev) =>
-                prev.map((x) => (x.id === active.id ? { ...x, loading: false, title: x.url } : x)),
-              );
+            ref={(el) => {
+              if (!el) return;
+              const handler = () => {
+                try {
+                  const docTitle = el.contentDocument?.title;
+                  if (docTitle && docTitle.trim()) {
+                    setTabs((prev) =>
+                      prev.map((x) => (x.id === active.id ? { ...x, loading: false, title: docTitle.trim() } : x)),
+                    );
+                  } else {
+                    setTabs((prev) =>
+                      prev.map((x) => (x.id === active.id ? { ...x, loading: false, title: prettyTitle(x.url) } : x)),
+                    );
+                  }
+                } catch {
+                  setTabs((prev) =>
+                    prev.map((x) => (x.id === active.id ? { ...x, loading: false, title: prettyTitle(x.url) } : x)),
+                  );
+                }
+              };
+              el.addEventListener('load', handler);
+              return () => { el.removeEventListener('load', handler); };
             }}
           />
         ) : (

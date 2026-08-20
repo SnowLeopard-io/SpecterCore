@@ -107,6 +107,13 @@ export class WindowManagerImpl implements WindowManager {
     this.notifyChange();
   }
 
+  setTitle(id: string, title: string): void {
+    const handle = this.windows.get(id);
+    if (!handle) return;
+    handle.title = title;
+    this.notifyChange();
+  }
+
   getWindow(id: string): WindowHandle | null {
     return this.windows.get(id) ?? null;
   }
