@@ -82,6 +82,26 @@ export const BUILTIN_IMAGE_FILES: Array<{ url: string; storePath: string }> = [
 /** Store paths currently being provisioned (dedupes concurrent writes). */
 const provisionInFlight = new Set<string>();
 
+/**
+ * Make sure `path` exists as a directory. If a stale file entry is sitting
+ * there (can happen if a previous provisioning run was interrupted and the
+ * openFile write landed on the parent path by mistake), delete it first and
+ * create the directory fresh. This is the self-heal path the background
+ * music/image provision runs at every boot.
+ */
+async function ensureDirectory(fs: FileStore, path: string): Promise<void> {
+  const existing = await fs.stat(path).catch(() => null);
+  if (existing && existing.kind === 'file') {
+    console.warn(`[specter-core] replacing stale file with directory: ${path}`);
+    await fs.deleteFile(path);
+  }
+  try {
+    await fs.createDirectory(path);
+  } catch (err) {
+    console.warn(`[specter-core] ensureDirectory failed for ${path}: ${String(err)}`);
+  }
+}
+
 /** Idempotent: writes each bundled file when missing/empty (fetch + write). */
 async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePath: string }>): Promise<void> {
   for (const f of files) {
@@ -90,14 +110,13 @@ async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePa
     if (provisionInFlight.has(f.storePath)) continue;
     provisionInFlight.add(f.storePath);
     try {
-      // Ensure the parent directory tree exists before any fetch, so built-in
-      // folders (Pictures/Music/etc.) are present even when a bundled resource
-      // is missing or fails to download (e.g. an outdated deployment).
+      // Ensure the parent directory tree exists (self-healing: replaces a
+      // stale file entry with a directory so the write below can land).
       const dirs = f.storePath.split('/').slice(0, -1);
       let cur = '';
       for (const d of dirs) {
         cur = cur ? `${cur}/${d}` : d;
-        await fs.createDirectory(cur).catch(() => {});
+        await ensureDirectory(fs, cur);
       }
       // Skip only when a real (non-empty) copy already exists — a stale empty
       // file (e.g. created by an old openFile('read') bug) must be overwritten.
@@ -132,16 +151,18 @@ export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
 }
 
 export async function ensureBuiltinMusicFiles(fs: FileStore): Promise<void> {
-  // Create the folder up front so the File Explorer quick-access entry and any
-  // guest open dialog resolve even while the music is still being written.
-  await fs.createDirectory('Users/Public/Music').catch(() => {});
+  // Create the folder up front (self-healing if a stale file is sitting
+  // there) so the File Explorer quick-access entry and any guest open dialog
+  // resolve even while the music is still being written.
+  await ensureDirectory(fs, 'Users/Public/Music');
   await provisionFiles(fs, BUILTIN_MUSIC_FILES);
 }
 
 export async function ensureBuiltinImageFiles(fs: FileStore): Promise<void> {
-  // Always create the Pictures folder so the File Explorer quick-access entry
-  // resolves even when no default images are bundled yet.
-  await fs.createDirectory('Users/Public/Pictures').catch(() => {});
+  // Self-heal: if a previous run left a stale file at the Pictures path,
+  // delete it and recreate the directory. The quick-access entry and Photos
+  // app then resolve even when no default images have been bundled yet.
+  await ensureDirectory(fs, 'Users/Public/Pictures');
   await provisionFiles(fs, BUILTIN_IMAGE_FILES);
 }
 

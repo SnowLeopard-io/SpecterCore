@@ -123,7 +123,15 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
         })
         .catch((err: unknown) => {
           if (id !== reqRef.current) return;
-          setError(`Cannot open "${target}": ${String(err)}`);
+          // "Not a directory" means the virtual disk has a stale file entry at
+          // this path (can happen after an interrupted provisioning). The
+          // background boot provision self-heals on refresh, so hint the
+          // user accordingly; Wipe Virtual Disk from Settings also fixes it.
+          const raw = String(err);
+          const hint = /not a directory/i.test(raw)
+            ? ' — virtual disk is corrupted; refresh the page to auto-repair, or use Settings → Wipe Virtual Disk.'
+            : '';
+          setError(`Cannot open "${target}": ${raw}${hint}`);
           setLoading(false);
         });
     },
