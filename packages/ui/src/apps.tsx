@@ -1,10 +1,7 @@
 import type { DesktopAppInfo } from '@specter-core/contracts';
 import { SystemInfoApp } from './apps/SystemInfoApp';
-import { MinesweeperApp } from './apps/MinesweeperApp';
 import { FileExplorerApp } from './apps/FileExplorerApp';
-import { InstallerApp } from './apps/InstallerApp';
 import { ImageViewerApp } from './apps/ImageViewerApp';
-import { RunExecutableApp } from './apps/RunExecutableApp';
 import type { AppDefinition } from './types';
 
 /**
@@ -14,25 +11,9 @@ import type { AppDefinition } from './types';
  */
 export const DEFAULT_APPS: AppDefinition[] = [
   {
-    appId: 'notepad',
-    name: 'Notepad',
-    icon: '/icons/Notepad.ico',
-    description: 'Simple text editor',
-    group: 'Accessories',
-    render: (args) => <NotepadApp initialFile={args?.path} />,
-  },
-  {
-    appId: 'minesweeper',
-    name: 'Minesweeper',
-    icon: '💣',
-    description: 'Classic minesweeper',
-    group: 'Games',
-    render: () => <MinesweeperApp />,
-  },
-  {
     appId: 'system-info',
     name: 'System Information',
-    icon: '/icons/SystemInfomation.ico',
+    icon: '/icons/this-pc.png',
     description: 'Kernel, processes and disk status',
     group: 'System',
     render: () => <SystemInfoApp />,
@@ -40,7 +21,7 @@ export const DEFAULT_APPS: AppDefinition[] = [
   {
     appId: 'file-explorer',
     name: 'File Explorer',
-    icon: '/icons/File Explorer.ico',
+    icon: '/icons/explorer.png',
     description: 'Browse the virtual disk',
     group: 'System',
     render: (args) => <FileExplorerApp initialPath={args?.path} />,
@@ -48,7 +29,7 @@ export const DEFAULT_APPS: AppDefinition[] = [
   {
     appId: 'command-prompt',
     name: 'Command Prompt',
-    icon: '/icons/CommandPrompt.ico',
+    icon: '/icons/cmd.png',
     description: 'Run the bundled Windows cmd.exe (real x86 PE) over the virtual disk',
     group: 'System',
     // Launch is special-cased in DesktopController: it runs the bundled
@@ -57,33 +38,17 @@ export const DEFAULT_APPS: AppDefinition[] = [
     render: () => null,
   },
   {
-    appId: 'installer',
-    name: 'Installer',
-    icon: '📦',
-    description: 'Install applications (.bkapp) onto the virtual disk',
-    group: 'System',
-    render: (args) => <InstallerApp initialPackagePath={args?.path} />,
-  },
-  {
     appId: 'image-viewer',
     name: 'Photos',
-    icon: '/icons/Photos.ico',
+    icon: '/icons/image-file.png',
     description: 'View images from the virtual disk',
     group: 'Accessories',
     render: (args) => <ImageViewerApp initialFile={args?.path} />,
   },
   {
-    appId: 'exe-runner',
-    name: 'Run Executable',
-    icon: '⚙️',
-    description: 'Run a Windows executable from the virtual disk',
-    group: 'System',
-    render: (args) => <RunExecutableApp initialFile={args?.path} />,
-  },
-  {
     appId: 'windows-notepad',
     name: 'Notepad',
-    icon: '📝',
+    icon: '/icons/notepad.png',
     description: 'Run the bundled Windows notepad.exe with its MUI resources',
     group: 'System',
     // Launch is special-cased in DesktopController: it runs the bundled

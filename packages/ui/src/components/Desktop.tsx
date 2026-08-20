@@ -34,13 +34,17 @@ function useWindowList(controller: DesktopController): WindowHandle[] {
 /** 虚拟桌面目录：拖入的文件与右键新建的内容都落在这里，并显示为桌面图标。 */
 const DESKTOP_DIR = 'Desktop';
 
+/** Return the real Windows file-type icon (extracted from the OS) for a desktop item. */
 function desktopFileIcon(name: string): string {
   const lower = name.toLowerCase();
-  if (lower.endsWith('.exe')) return '⚙️';
-  if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.log') || lower.endsWith('.json')) return '📝';
-  if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.gif') || lower.endsWith('.bmp')) return '🖼️';
-  if (lower.endsWith('.bkapp')) return '📦';
-  return '📄';
+  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return '/icons/application.png';
+  if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.log') || lower.endsWith('.ini') || lower.endsWith('.json'))
+    return '/icons/text-document.png';
+  if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.bmp'))
+    return '/icons/image-file.png';
+  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg')) return '/icons/audio-file.png';
+  if (lower.endsWith('.bkapp')) return '/icons/package.png';
+  return '/icons/document.png';
 }
 
 /** Full Windows-style desktop: wallpaper, icons, windows, taskbar, start menu. */
@@ -236,10 +240,10 @@ export function Desktop({ controller }: DesktopProps) {
     if (files.length === 0) return;
     await importFiles(fs, files, DESKTOP_DIR);
     refreshDesktop();
-    // 6.6：拖入的 .exe 运行优先 —— 打开「运行确认」窗口。
+    // 拖入的 .exe 直接运行（launchGuestExecutable 分派，不再弹运行确认窗口）。
     for (const item of files) {
       if (item.path.toLowerCase().endsWith('.exe')) {
-        void controller.launch('exe-runner', { path: `${DESKTOP_DIR}/${item.path}` });
+        void controller.openFile(`${DESKTOP_DIR}/${item.path}`);
       }
     }
   };
@@ -304,7 +308,11 @@ export function Desktop({ controller }: DesktopProps) {
               }}
               onContextMenu={(e) => openItemMenu(e, item.name)}
             >
-              <span className="sc-desktop-icon-img">{isDir ? '📁' : desktopFileIcon(item.name)}</span>
+                            {isDir ? (
+                <img className="sc-desktop-icon-img" src="/icons/folder.png" alt="" draggable={false} />
+              ) : (
+                <img className="sc-desktop-icon-img" src={desktopFileIcon(item.name)} alt="" draggable={false} />
+              )}
               {renaming === item.name ? (
                 <input
                   ref={renameInputRef}

@@ -16,6 +16,7 @@ import type { ReactNode } from 'react';
 import { tokens } from '@specter-core/contracts';
 import {
   appForFile,
+  decodeText,
   installPackage as installPkg,
   listInstalledApps as listRegistryApps,
   toStorePath,
@@ -105,6 +106,22 @@ function reactContent(node: ReactNode): WindowContent {
   return { kind: 'react', render: (_controller: UiController) => node };
 }
 
+/** Real icon for a hosted guest window, chosen from the exe's name. */
+function guestIconFor(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes('notepad')) return '/icons/notepad.png';
+  if (lower.includes('cmd') || lower.includes('command') || lower.includes('console')) return '/icons/cmd.png';
+  if (lower.includes('explorer')) return '/icons/explorer.png';
+  if (lower.includes('paint') || lower.includes('photo') || lower.includes('image')) return '/icons/image-file.png';
+  return '/icons/application.png';
+}
+
+/** Map a virtual-disk store path to a Windows path the guest understands. */
+function toWindowsPath(storePath: string): string {
+  if (!storePath || storePath === '/') return 'C:\\';
+  return 'C:\\' + storePath.replace(/\//g, '\\');
+}
+
 /**
  * Desktop controller: the glue between the L6 shell, the kernel and the demo
  * app registry. Owns the React mount point, app launching and the installed
@@ -178,19 +195,13 @@ export class DesktopControllerImpl implements DesktopController {
         storePath: 'Windows/SysWOW64/notepad.exe',
         modulePath: 'C:/Windows/SysWOW64/notepad.exe',
         name: 'Notepad',
+        // Double-clicked txt → notepad opens it on startup (GetCommandLineW).
+        commandLine: args?.path ? toWindowsPath(args.path) : undefined,
       });
       return;
     }
     if (app.appId === 'command-prompt') {
       await this.openCommandPrompt();
-      return;
-    }
-    // Double-clicked .exe (open verb with a path): launch the REAL guest
-    // process directly — no RunExecutableApp shell window in between.
-    // cmd.exe gets its interactive terminal; anything else is hosted as a
-    // guest window (notepad-style) with its own window manager entries.
-    if (app.appId === 'exe-runner' && args?.path) {
-      await this.launchGuestExecutable(args.path);
       return;
     }
     // 带参数（open 动词：用某文件/目录打开）时始终新建窗口 —— 记事本已开着
@@ -211,19 +222,13 @@ export class DesktopControllerImpl implements DesktopController {
           ? 660
           : app.appId === 'image-viewer'
             ? 640
-            : app.appId === 'system-info' || app.appId === 'exe-runner'
-              ? 520
-              : 480,
+            : 520,
       height:
         app.appId === 'file-explorer'
           ? 460
           : app.appId === 'image-viewer'
             ? 460
-            : app.appId === 'exe-runner'
-              ? 420
-              : app.appId === 'minesweeper'
-                ? 420
-                : 380,
+            : 380,
       content: reactContent(app.render(args)),
       appId: app.appId,
     });
@@ -240,12 +245,68 @@ export class DesktopControllerImpl implements DesktopController {
       await this.launch('file-explorer', { path });
       return true;
     }
+    const lower = path.toLowerCase();
+    // Double-clicked .exe: launch the REAL guest process directly — no
+    // application-shell window in between.
+    if (lower.endsWith('.exe')) {
+      await this.launchGuestExecutable(path);
+      return true;
+    }
+    // Double-clicked .bkapp: install it straight onto the virtual disk.
+    if (lower.endsWith('.bkapp')) {
+      await this.installPackageFile(path);
+      return true;
+    }
     const appId = appForFile(path);
     if (appId) {
       await this.launch(appId, { path });
       return true;
     }
     return false;
+  }
+
+  /** Read a .bkapp manifest off the virtual disk and install it. */
+  private async installPackageFile(storePath: string): Promise<void> {
+    const fs = this.getFileSystem();
+    if (!fs) throw new Error('No virtual disk available');
+    const file = await fs.openFile(storePath, 'read');
+    let data: Uint8Array;
+    try {
+      const size = await file.size();
+      data = await file.read(0, size);
+    } finally {
+      await file.close();
+    }
+    const manifest = JSON.parse(decodeText(data)) as {
+      packageId: string;
+      name: string;
+      version: string;
+      icon: string;
+      description: string;
+      entryAppId: string;
+      entryTitle: string;
+      entryWidth: number;
+      entryHeight: number;
+      files: Array<{ path: string; data: string }>;
+    };
+    const binary = (b64: string): Uint8Array => {
+      const raw = atob(b64);
+      const out = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+      return out;
+    };
+    await installPkg(fs, {
+      packageId: manifest.packageId,
+      name: manifest.name,
+      version: manifest.version,
+      icon: manifest.icon,
+      description: manifest.description,
+      entryAppId: manifest.entryAppId,
+      entryTitle: manifest.entryTitle,
+      entryWidth: manifest.entryWidth,
+      entryHeight: manifest.entryHeight,
+      files: manifest.files.map((f) => ({ path: f.path, data: binary(f.data) })),
+    });
   }
 
   /**
@@ -293,6 +354,7 @@ export class DesktopControllerImpl implements DesktopController {
           title: opts.title || (kind === 'open' ? 'Open' : 'Save As'),
           width: 620,
           height: 460,
+          icon: '/icons/explorer.png',
           resizable: true,
           appId: 'file-dialog',
           content: reactContent(
@@ -423,7 +485,14 @@ export class DesktopControllerImpl implements DesktopController {
    * and hosts each guest top-level window as a REAL desktop window — no
    * application-shell window in between. Used by built-in apps (notepad).
    */
-  private async launchGuestWindow(source: { storePath: string; modulePath: string; name: string }): Promise<void> {
+  private async launchGuestWindow(source: {
+    storePath: string;
+    modulePath: string;
+    name: string;
+    /** Optional command line handed to the guest (e.g. 'C:\\Users\\a.txt' for
+     *  notepad to open on startup). GetCommandLineW/A return it verbatim. */
+    commandLine?: string;
+  }): Promise<void> {
     const fs = this.getFileSystem();
     if (!fs) {
       await this.showGuestError(source.name, 'No virtual disk available');
@@ -476,6 +545,7 @@ export class DesktopControllerImpl implements DesktopController {
       await runner.run(image, {
         createEngine: (mode) => new JitEngineImpl(runtime, mode),
         modulePath: source.modulePath,
+        commandLine: source.commandLine,
         readFile: async (p) => {
           const sp = toStorePath(p);
           try {
@@ -503,7 +573,7 @@ export class DesktopControllerImpl implements DesktopController {
                 title: `${w.className}${w.text ? ` — ${w.text}` : ''}`,
                 width: 680,
                 height: 500,
-                icon: '📝',
+                icon: guestIconFor(source.name),
                 resizable: true,
                 appId: 'guest-window',
                 content: reactContent(
@@ -637,7 +707,7 @@ export class DesktopControllerImpl implements DesktopController {
       title: source.name,
       width: 680,
       height: 420,
-      icon: '🖥',
+      icon: '/icons/cmd.png',
       resizable: true,
       appId: 'guest-console',
       content: reactContent(

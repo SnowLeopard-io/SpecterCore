@@ -96,7 +96,7 @@ export function Taskbar({ windows, openStart, onToggleStart }: TaskbarProps) {
             title={win.title}
             onClick={() => focusOrRestore(win)}
           >
-            <AppIcon icon={win.options.icon ?? '▣'} />
+            <AppIcon icon={win.options.icon ?? '▣'} className="sc-taskbar-icon" />
           </button>
         ))}
       </div>

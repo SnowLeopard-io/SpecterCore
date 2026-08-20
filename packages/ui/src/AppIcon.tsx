@@ -1,40 +1,61 @@
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
+import { fetchIcoAsPng } from './ico';
 
-/** 判断图标是否为资源路径（如 /icons/foo.ico），而非 emoji/字符。 */
+/** True if the icon is a resource path (e.g. /icons/foo.ico) — otherwise emoji. */
 function isIconPath(icon: string): boolean {
   return /^(https?:)?\//.test(icon) || /\.(ico|png|svg|jpg|jpeg|webp|gif|bmp)$/i.test(icon);
 }
 
 interface AppIconProps {
   icon: string;
-  /** 可选：资源类图标加载失败时的兜底字符（默认用原字符）。 */
+  /** Fallback shown while the icon loads (or if the .ico has no PNG payload). */
   fallback?: string;
   className?: string;
   alt?: string;
 }
 
 /**
- * 渲染应用图标：资源路径（.ico/.png/...）显示为 <img>，其余（emoji）原样输出。
- * 这样既能兼容既有 emoji 图标，也能使用真实 Windows 程序图标。
+ * Render an app icon: resource paths (PNG/SVG/...) become <img>; .ico paths
+ * are decoded asynchronously (Chromium/Edge can't render raw .ico in <img>);
+ * anything else is passed through as an emoji/character in a <span>.
  */
 export function AppIcon({ icon, fallback, className, alt }: AppIconProps): ReactNode {
-  if (isIconPath(icon)) {
-    return (
-      <img
-        className={className}
-        src={icon}
-        alt={alt ?? ''}
-        draggable={false}
-        onError={(e) => {
-          const el = e.currentTarget;
-          const fb = fallback ?? icon;
-          const span = document.createElement('span');
-          span.textContent = fb;
-          if (className) span.className = className;
-          el.replaceWith(span);
-        }}
-      />
-    );
+  // Decode .ico asynchronously; for other resource types the browser can
+  // render the path directly so no decode step is needed.
+  const icoUrl = isIcoPath(icon) ? icon : null;
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(icoUrl ? null : icon);
+
+  useEffect(() => {
+    if (!icoUrl) return;
+    let cancelled = false;
+    void fetchIcoAsPng(icoUrl).then((res) => {
+      if (cancelled) return;
+      setResolvedUrl(res.pngUrl ?? `__fallback__:${icon}`);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [icoUrl, icon]);
+
+  if (resolvedUrl === null) {
+    // Loading: render a transparent placeholder so layout doesn't jump.
+    return <span className={className} aria-hidden style={{ visibility: 'hidden' }}>{fallback ?? ''}</span>;
   }
-  return <span className={className}>{icon}</span>;
+  if (resolvedUrl.startsWith('__fallback__:')) {
+    // .ico had no PNG entry — fall back to the supplied character.
+    return <span className={className}>{fallback ?? icon}</span>;
+  }
+  return (
+    <img
+      className={className}
+      src={resolvedUrl}
+      alt={alt ?? ''}
+      draggable={false}
+    />
+  );
+}
+
+function isIcoPath(icon: string): boolean {
+  return /\.ico(\?|$)/i.test(icon);
 }

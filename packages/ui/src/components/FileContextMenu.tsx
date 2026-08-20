@@ -1,4 +1,12 @@
 import type { DirEntry } from '@specter-core/contracts';
+import {
+  OpenIcon,
+  DownloadIcon,
+  RunIcon,
+  CopyIcon,
+  RenameIcon,
+  DeleteIcon,
+} from './icons';
 
 export interface FileMenuActions {
   onOpen: () => void;
@@ -38,7 +46,7 @@ export function FileContextMenu({ x, y, entry, actions, onClose }: FileContextMe
             onClose();
           }}
         >
-          <span className="sc-context-icon">📂</span> Open
+          <span className="sc-context-icon"><OpenIcon size={14} /></span> Open
         </button>
         {entry.kind === 'file' && (
           <button
@@ -47,7 +55,7 @@ export function FileContextMenu({ x, y, entry, actions, onClose }: FileContextMe
               onClose();
             }}
           >
-            <span className="sc-context-icon">⬇</span> Download
+            <span className="sc-context-icon"><DownloadIcon size={14} /></span> Download
           </button>
         )}
         {isExe && (
@@ -57,7 +65,7 @@ export function FileContextMenu({ x, y, entry, actions, onClose }: FileContextMe
               onClose();
             }}
           >
-            <span className="sc-context-icon">▶</span> Run
+            <span className="sc-context-icon"><RunIcon size={14} /></span> Run
           </button>
         )}
         <hr />
@@ -67,14 +75,14 @@ export function FileContextMenu({ x, y, entry, actions, onClose }: FileContextMe
             onClose();
           }}
         >
-          <span className="sc-context-icon">📋</span> Copy
+          <span className="sc-context-icon"><CopyIcon size={14} /></span> Copy
         </button>
         <button
           onClick={() => {
             actions.onRename();
           }}
         >
-          <span className="sc-context-icon">✎</span> Rename
+          <span className="sc-context-icon"><RenameIcon size={14} /></span> Rename
         </button>
         <button
           className="sc-context-danger"
@@ -83,7 +91,7 @@ export function FileContextMenu({ x, y, entry, actions, onClose }: FileContextMe
             onClose();
           }}
         >
-          <span className="sc-context-icon">🗑</span> Delete
+          <span className="sc-context-icon"><DeleteIcon size={14} /></span> Delete
         </button>
       </div>
     </>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DirEntry, FileStore } from '@specter-core/contracts';
 import type { FileDialogOptions } from '@specter-core/core';
 import { useUi } from '../context';
+import { ExplorerPane } from '../components/ExplorerPane';
 
 function joinPath(base: string, name: string): string {
   return base === '' ? name : `${base}/${name}`;
@@ -25,16 +26,6 @@ function toStorePath(winPath: string): string {
   return cleaned.replace(/\\/g, '/');
 }
 
-function iconFor(entry: DirEntry): string {
-  if (entry.kind === 'directory') return '📁';
-  const lower = entry.name.toLowerCase();
-  if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.log') || lower.endsWith('.ini'))
-    return '📝';
-  if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.bmp'))
-    return '🖼️';
-  return '📄';
-}
-
 interface FileDialogAppProps {
   kind: 'open' | 'save';
   opts: FileDialogOptions;
@@ -44,7 +35,8 @@ interface FileDialogAppProps {
 
 /**
  * Host-driven common file dialog (comdlg32 GetOpenFileNameW/GetSaveFileNameW
- * provider). Renders a compact virtual-disk browser:
+ * provider). Reuses the same ExplorerPane as the File Explorer app so the
+ * dialog and the browser look identical:
  *  - open:  navigate + pick a file, double-click or [Open] confirms;
  *  - save:  navigate + type a file name, [Save] confirms (returns the path);
  * [Cancel] / closing the window resolves null.
@@ -128,87 +120,54 @@ export function FileDialogApp({ kind, opts, onResult }: FileDialogAppProps) {
 
   const cancel = (): void => onResult(null);
 
-  const segments = path.split('/').filter(Boolean);
   const canUp = path !== '';
 
   return (
-    <div className="sc-file-dialog">
-      <div className="sc-file-dialog-head">
-        <span className="sc-file-dialog-title">{opts.title || (kind === 'open' ? 'Open' : 'Save As')}</span>
-      </div>
-      <div className="sc-file-dialog-address">
-        <span className="sc-explorer-crumb" onClick={() => load('')}>
-          C:
-        </span>
-        {segments.map((seg, i) => {
-          const crumbPath = segments.slice(0, i + 1).join('/');
-          return (
-            <span key={crumbPath}>
-              <span className="sc-explorer-sep">›</span>
-              <span className="sc-explorer-crumb" onClick={() => load(crumbPath)}>
-                {seg}
-              </span>
-            </span>
-          );
-        })}
-        <span className="sc-file-dialog-up">
-          <button className="sc-explorer-btn" disabled={!canUp} onClick={() => load(parentPath(path))} aria-label="Up">
-            ▲
-          </button>
-          <button className="sc-explorer-btn" onClick={() => load(path)} aria-label="Refresh">
-            ↻
-          </button>
-        </span>
-      </div>
-      {error && <div className="sc-explorer-error">{error}</div>}
-      <div className="sc-file-dialog-list">
-        {loading && <div className="sc-explorer-empty">Loading…</div>}
-        {!loading && !fs && <div className="sc-explorer-empty">No virtual disk available.</div>}
-        {!loading && fs && entries.length === 0 && <div className="sc-explorer-empty">This folder is empty.</div>}
-        {!loading &&
-          entries.map((entry) => (
-            <div
-              key={entry.name}
-              className={`sc-explorer-row ${selected === entry.name ? 'selected' : ''}`}
-              onClick={() => enterDir(entry)}
-              onDoubleClick={() => {
-                if (entry.kind === 'directory') enterDir(entry);
-                else {
-                  setSelected(entry.name);
-                  if (kind === 'save') setFileName(entry.name);
-                  else confirm();
-                }
+    <ExplorerPane
+      path={path}
+      entries={entries}
+      loading={loading}
+      error={error}
+      selected={selected}
+      canBack={false}
+      canUp={canUp}
+      emptyText="This folder is empty."
+      onNavigate={(target) => load(target)}
+      onBack={() => {
+        // Dialogs have no history stack; Back stays disabled.
+      }}
+      onUp={() => load(parentPath(path))}
+      onRefresh={() => load(path)}
+      onSelect={(name) => setSelected(name)}
+      onOpen={enterDir}
+      onContextMenu={() => {
+        // No context menu in the dialog.
+      }}
+      showNavpane={false}
+      footer={
+        <div className="sc-file-dialog-foot">
+          {kind === 'save' && (
+            <input
+              className="sc-file-dialog-name"
+              value={fileName}
+              onChange={(e) => setFileName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') confirm();
               }}
-            >
-              <span className="sc-explorer-icon">{iconFor(entry)}</span>
-              <span className="sc-explorer-name">{entry.name}</span>
-              <span className="sc-explorer-size">{entry.kind === 'directory' ? '' : `${entry.size} B`}</span>
-              <span className="sc-explorer-type">{entry.kind === 'directory' ? 'Folder' : 'File'}</span>
-            </div>
-          ))}
-      </div>
-      <div className="sc-file-dialog-foot">
-        {kind === 'save' && (
-          <input
-            className="sc-file-dialog-name"
-            value={fileName}
-            onChange={(e) => setFileName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') confirm();
-            }}
-            placeholder="File name"
-            spellCheck={false}
-          />
-        )}
-        <div className="sc-file-dialog-actions">
-          <button className="sc-nt-btn" onClick={cancel}>
-            Cancel
-          </button>
-          <button className="sc-nt-btn primary" onClick={confirm}>
-            {kind === 'open' ? 'Open' : 'Save'}
-          </button>
+              placeholder="File name"
+              spellCheck={false}
+            />
+          )}
+          <div className="sc-file-dialog-actions">
+            <button className="sc-nt-btn" onClick={cancel}>
+              Cancel
+            </button>
+            <button className="sc-nt-btn primary" onClick={confirm}>
+              {kind === 'open' ? 'Open' : 'Save'}
+            </button>
+          </div>
         </div>
-      </div>
-    </div>
+      }
+    />
   );
 }

@@ -33,12 +33,11 @@ export function isImageFile(name: string): boolean {
 /**
  * 根据文件名推断关联的应用。
  * 返回 null 表示当前没有注册的应用可打开该文件（调用方可回退到预览等）。
+ * 注意：.exe 与 .bkapp 由 DesktopController.openFile 直接特殊处理
+ * （真实 guest 进程 / 安装），不走应用注册表，这里返回 null。
  */
 export function appForFile(name: string): string | null {
   const lower = name.toLowerCase();
-  if (lower.endsWith('.bkapp')) return 'installer';
-  // .exe 运行优先：双击进入「运行确认」，可运行（JIT 容器）或转安装器。
-  if (lower.endsWith('.exe')) return 'exe-runner';
   if (isImageFile(name)) return 'image-viewer';
   // Text files open in the REAL bundled Windows notepad.exe (windows-notepad,
   // launched via DesktopController). The old TS-simulated NotepadApp is gone.

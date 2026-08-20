@@ -7,6 +7,8 @@ import { collectDropFiles, importFiles } from '../import-files';
 import { downloadBytes } from '../download';
 import { FileContextMenu } from '../components/FileContextMenu';
 import { uiClipboard, type UiClipboardEntry } from '../ui-clipboard';
+import { ExplorerPane } from '../components/ExplorerPane';
+import { NewFolderIcon, PasteIcon, RefreshIcon } from '../components/icons';
 
 const MAX_PREVIEW_BYTES = 64 * 1024;
 
@@ -29,25 +31,6 @@ function basenameOf(path: string): string {
 function toWindowsPath(storePath: string): string {
   if (!storePath || storePath === '/') return 'C:\\';
   return 'C:\\' + storePath.replace(/\//g, '\\');
-}
-
-function iconFor(entry: DirEntry): string {
-  if (entry.kind === 'directory') return '📁';
-  const lower = entry.name.toLowerCase();
-  if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.log') || lower.endsWith('.ini'))
-    return '📝';
-  if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.gif') || lower.endsWith('.bmp'))
-    return '🖼️';
-  if (lower.endsWith('.wav') || lower.endsWith('.mp3') || lower.endsWith('.ogg')) return '🎵';
-  if (lower.endsWith('.exe') || lower.endsWith('.dll')) return '⚙️';
-  return '📄';
-}
-
-function formatSize(bytes: number): string {
-  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(2)} GB`;
-  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(2)} MB`;
-  if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(1)} KB`;
-  return `${bytes} B`;
 }
 
 interface Preview {
@@ -85,8 +68,6 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [dropActive, setDropActive] = useState(false);
-  const dragDepth = useRef(0);
   const reqRef = useRef(0);
   const [clipboard, setClipboard] = useState<UiClipboardEntry | null>(null);
   useEffect(() => uiClipboard.subscribe(() => setClipboard(uiClipboard.get())), []);
@@ -327,35 +308,19 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
     }
   };
 
-  const segments = path.split('/').filter(Boolean);
   const canBack = nav.index > 0;
   const canUp = path !== '';
 
   const selectedEntry = entries.find((e) => e.name === selected) ?? null;
-  const selectedIsDir = selectedEntry?.kind === 'directory';
-  const selectedIsExe =
-    selectedEntry?.kind === 'file' && selectedEntry.name.toLowerCase().endsWith('.exe');
 
-  const openCmdHere = (): void => {
-    // Open cmd.exe with the current folder as its initial working directory.
-    void controller.openCommandPrompt(undefined, toWindowsPath(path));
-  };
-  const openCmdInSelected = (): void => {
-    if (!selectedEntry || selectedEntry.kind !== 'directory') return;
-    void controller.openCommandPrompt(undefined, toWindowsPath(joinPath(path, selectedEntry.name)));
-  };
   const runSelectedExe = (): void => {
     if (!selectedEntry || selectedEntry.kind !== 'file') return;
     const full = joinPath(path, selectedEntry.name);
     void controller.openCommandPrompt(`start "" "${toWindowsPath(full)}"`, toWindowsPath(path));
   };
 
-  // 拖入真实文件 → 导入当前目录并刷新。
+  // 拖入真实文件 → 导入当前目录并刷新（拖放高亮由 ExplorerPane 管理）。
   const onDrop = async (e: ReactDragEvent): Promise<void> => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragDepth.current = 0;
-    setDropActive(false);
     if (!fs) return;
     const files = await collectDropFiles(e.dataTransfer);
     if (files.length === 0) return;
@@ -364,137 +329,34 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   };
 
   return (
-    <div
-      ref={explorerRef}
-      className="sc-explorer"
-      onDragEnter={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dragDepth.current += 1;
-        setDropActive(true);
-      }}
-      onDragOver={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      }}
-      onDragLeave={() => {
-        dragDepth.current = Math.max(0, dragDepth.current - 1);
-        if (dragDepth.current === 0) setDropActive(false);
-      }}
-      onDrop={onDrop}
+    <ExplorerPane
+      containerRef={explorerRef}
+      path={path}
+      entries={entries}
+      loading={loading}
+      error={error}
+      selected={selected}
+      canBack={canBack}
+      canUp={canUp}
+      renaming={renaming}
+      renameRef={renameInputRef}
+      emptyText="This folder is empty."
+      onNavigate={(target) => load(target)}
+      onBack={back}
+      onUp={up}
+      onRefresh={() => load(path)}
+      onSelect={(name) => setSelected(name)}
+      onOpen={openEntry}
+      onContextMenu={(e, entry) => openContextMenu(e, entry ? entry.name : null)}
+      onRenameCommit={(oldName, newName) => void commitRename(oldName, newName)}
+      onRenameCancel={() => setRenaming(null)}
+      onDrop={(e) => void onDrop(e)}
+      toolbarExtra={
+        <button className="sc-explorer-btn" onClick={() => void newFolder()} aria-label="New folder" title="New folder">
+          <NewFolderIcon size={16} />
+        </button>
+      }
     >
-      <div className="sc-explorer-toolbar">
-        <button className="sc-explorer-btn" disabled={!canBack} onClick={back} aria-label="Back">
-          ◀
-        </button>
-        <button className="sc-explorer-btn" disabled={!canUp} onClick={up} aria-label="Up">
-          ▲
-        </button>
-        <button className="sc-explorer-btn" onClick={() => load(path)} aria-label="Refresh">
-          ↻
-        </button>
-        <button className="sc-explorer-btn" onClick={() => void newFolder()} aria-label="New folder">
-          📁+
-        </button>
-        <button
-          className="sc-explorer-btn"
-          disabled={!selected}
-          onClick={() => void deleteSelected()}
-          aria-label="Delete"
-        >
-          🗑
-        </button>
-        <button
-          className="sc-explorer-btn"
-          disabled={!selected || entries.find((e) => e.name === selected)?.kind !== 'file'}
-          onClick={() => void downloadSelected()}
-          aria-label="Download"
-        >
-          ⬇
-        </button>
-        <button className="sc-explorer-btn" onClick={openCmdHere} aria-label="Open command prompt here" title="Open command prompt in this folder">
-          🖥
-        </button>
-        <button
-          className="sc-explorer-btn"
-          disabled={!selectedIsDir}
-          onClick={openCmdInSelected}
-          aria-label="Open command prompt in selected folder"
-          title="Open command prompt in selected folder"
-        >
-          📁🖥
-        </button>
-        <button
-          className="sc-explorer-btn"
-          disabled={!selectedIsExe}
-          onClick={runSelectedExe}
-          aria-label="Run executable"
-          title="Run selected executable in command prompt"
-        >
-          ▶
-        </button>
-        <div className="sc-explorer-address">
-          <span className="sc-explorer-crumb" onClick={() => load('')}>
-            C:
-          </span>
-          {segments.map((seg, i) => {
-            const crumbPath = segments.slice(0, i + 1).join('/');
-            return (
-              <span key={crumbPath}>
-                <span className="sc-explorer-sep">›</span>
-                <span className="sc-explorer-crumb" onClick={() => load(crumbPath)}>
-                  {seg}
-                </span>
-              </span>
-            );
-          })}
-        </div>
-      </div>
-
-      {error && <div className="sc-explorer-error">{error}</div>}
-
-      <div className="sc-explorer-list" onContextMenu={(e) => openContextMenu(e, null)}>
-        {loading && <div className="sc-explorer-empty">Loading…</div>}
-        {!loading && !fs && (
-          <div className="sc-explorer-empty">No virtual disk available in this environment.</div>
-        )}
-        {!loading && fs && entries.length === 0 && (
-          <div className="sc-explorer-empty">This folder is empty.</div>
-        )}
-        {!loading &&
-          entries.map((entry) => (
-            <div
-              key={entry.name}
-              className={`sc-explorer-row ${selected === entry.name ? 'selected' : ''}`}
-              onClick={() => setSelected(entry.name)}
-              onDoubleClick={() => openEntry(entry)}
-              onContextMenu={(e) => openContextMenu(e, entry.name)}
-            >
-              <span className="sc-explorer-icon">{iconFor(entry)}</span>
-              {renaming === entry.name ? (
-                <input
-                  ref={renameInputRef}
-                  className="sc-explorer-rename"
-                  defaultValue={entry.name}
-                  onClick={(e) => e.stopPropagation()}
-                  onDoubleClick={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void commitRename(entry.name, (e.target as HTMLInputElement).value);
-                    else if (e.key === 'Escape') setRenaming(null);
-                  }}
-                  onBlur={(e) => void commitRename(entry.name, e.target.value)}
-                />
-              ) : (
-                <span className="sc-explorer-name">{entry.name}</span>
-              )}
-              <span className="sc-explorer-size">
-                {entry.kind === 'directory' ? '' : formatSize(entry.size)}
-              </span>
-              <span className="sc-explorer-type">{entry.kind === 'directory' ? 'Folder' : 'File'}</span>
-            </div>
-          ))}
-      </div>
-
       {preview && (
         <div className="sc-explorer-preview">
           <div className="sc-explorer-preview-head">
@@ -564,7 +426,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
                         setMenu(null);
                       }}
                     >
-                      <span className="sc-context-icon">📁</span> New Folder
+                      <span className="sc-context-icon"><NewFolderIcon size={14} /></span> New Folder
                     </button>
                     {clipboard && (
                       <button
@@ -573,7 +435,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
                           setMenu(null);
                         }}
                       >
-                        <span className="sc-context-icon">📋</span> Paste
+                        <span className="sc-context-icon"><PasteIcon size={14} /></span> Paste
                       </button>
                     )}
                     <hr />
@@ -583,7 +445,7 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
                         setMenu(null);
                       }}
                     >
-                      <span className="sc-context-icon">↻</span> Refresh
+                      <span className="sc-context-icon"><RefreshIcon size={14} /></span> Refresh
                     </button>
                   </div>
                 </>
@@ -591,10 +453,6 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
             </>
           );
         })()}
-
-      {dropActive && (
-        <div className="sc-explorer-drop">Drop files to import into this folder</div>
-      )}
-    </div>
+    </ExplorerPane>
   );
 }
