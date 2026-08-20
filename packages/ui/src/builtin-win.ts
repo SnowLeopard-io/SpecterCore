@@ -1,4 +1,5 @@
 import type { FileStore } from '@specter-core/contracts';
+import { reportMediaProgress, MUSIC_FOLDER, PICTURES_FOLDER } from './media-progress';
 
 /**
  * Bundled Windows tools copied into the virtual disk so the guest runs with
@@ -125,12 +126,19 @@ async function fetchWithRetry(url: string, maxAttempts = 3): Promise<Uint8Array>
  * list, so an interrupted fetch along a slow CDN can't strand the default
  * music/images and prevent the remaining folders from being provisioned.
  */
-async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePath: string }>): Promise<void> {
+async function provisionFiles(
+  fs: FileStore,
+  files: Array<{ url: string; storePath: string }>,
+  onProgress?: (done: number, total: number, current: string | null) => void,
+): Promise<void> {
+  let done = 0;
   for (const f of files) {
     // Dedupe concurrent provisions of the same path (e.g. the background boot
     // provision racing a lazy ensureBuiltinWinFiles from launchGuestWindow).
     if (provisionInFlight.has(f.storePath)) continue;
     provisionInFlight.add(f.storePath);
+    const name = f.storePath.slice(f.storePath.lastIndexOf('/') + 1);
+    onProgress?.(done, files.length, name);
     try {
       // Ensure the parent directory tree exists (self-healing: replaces a
       // stale file entry with a directory so the write below can land).
@@ -148,7 +156,11 @@ async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePa
       } catch {
         // missing directory tree or other FS error — rewrite below
       }
-      if (existing && existing.kind === 'file' && existing.size > 0) continue;
+      if (existing && existing.kind === 'file' && existing.size > 0) {
+        done += 1;
+        onProgress?.(done, files.length, name);
+        continue;
+      }
       const data = await fetchWithRetry(f.url);
       const file = await fs.openFile(f.storePath, 'write');
       try {
@@ -156,6 +168,8 @@ async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePa
       } finally {
         await file.close();
       }
+      done += 1;
+      onProgress?.(done, files.length, name);
       console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
     } catch (err) {
       console.warn(`[specter-core] provision failed ${f.storePath}: ${String(err)}`);
@@ -169,33 +183,47 @@ export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
   await provisionFiles(fs, BUILTIN_WIN_FILES);
 }
 
+/**
+ * Create both public media folders up front (parallel, ~instant local OPFS
+ * operations) so the File Explorer quick-access entries and guest open dialogs
+ * resolve the very moment the desktop appears — the files are streamed in
+ * afterwards in the background. Self-healing: a stale file entry sitting on a
+ * folder path is replaced by a real directory.
+ */
+export async function ensureMediaFolders(fs: FileStore): Promise<void> {
+  await Promise.all([ensureDirectory(fs, MUSIC_FOLDER), ensureDirectory(fs, PICTURES_FOLDER)]);
+}
+
 export async function ensureBuiltinMusicFiles(fs: FileStore): Promise<void> {
-  // Create the folder up front (self-healing if a stale file is sitting
-  // there) so the File Explorer quick-access entry and any guest open dialog
-  // resolve even while the music is still being written.
-  await ensureDirectory(fs, 'Users/Public/Music');
-  await provisionFiles(fs, BUILTIN_MUSIC_FILES);
+  await ensureDirectory(fs, MUSIC_FOLDER);
+  await provisionFiles(fs, BUILTIN_MUSIC_FILES, (done, total, current) =>
+    reportMediaProgress({ folder: MUSIC_FOLDER, running: true, done, total, current }),
+  );
+  reportMediaProgress({ folder: MUSIC_FOLDER, running: false, total: BUILTIN_MUSIC_FILES.length, current: null });
 }
 
 export async function ensureBuiltinImageFiles(fs: FileStore): Promise<void> {
-  // Self-heal: if a previous run left a stale file at the Pictures path,
-  // delete it and recreate the directory. The quick-access entry and Photos
-  // app then resolve even when no default images have been bundled yet.
-  await ensureDirectory(fs, 'Users/Public/Pictures');
-  await provisionFiles(fs, BUILTIN_IMAGE_FILES);
+  await ensureDirectory(fs, PICTURES_FOLDER);
+  await provisionFiles(fs, BUILTIN_IMAGE_FILES, (done, total, current) =>
+    reportMediaProgress({ folder: PICTURES_FOLDER, running: true, done, total, current }),
+  );
+  reportMediaProgress({ folder: PICTURES_FOLDER, running: false, total: BUILTIN_IMAGE_FILES.length, current: null });
 }
 
 /**
  * Provision all bundled files (system tools, music, images) in the background.
  * Called AFTER the desktop mounts so a cold boot is never blocked by the
- * ~40 MB of fetch+write. Errors are logged, never thrown.
+ * fetch+write. Errors are logged, never thrown.
  *
- * Order matters: system tools first (guest apps such as notepad/cmd need them
- * to launch), then multimedia. If the user opens a guest app before this
- * finishes, launchGuestWindow/launchGuestConsole re-ensure the win files
- * lazily, so nothing breaks.
+ * Two stages, in order: (1) the two public media folders are created up front so
+ * Explorer always has Music/Pictures to open; (2) files are streamed into them.
+ * System tools go first (guest apps such as notepad/cmd need them to launch),
+ * then multimedia. If the user opens a guest app before this finishes,
+ * launchGuestWindow/launchGuestConsole re-ensure the win files lazily, so
+ * nothing breaks.
  */
 export async function provisionBundledFilesInBackground(fs: FileStore): Promise<void> {
+  await ensureMediaFolders(fs).catch((err) => console.warn('[specter-core] ensureMediaFolders failed:', err));
   await ensureBuiltinWinFiles(fs)
     .then(() => console.warn('[specter-core] builtin win files ready'))
     .catch((err) => console.warn('[specter-core] builtin win files failed:', err));

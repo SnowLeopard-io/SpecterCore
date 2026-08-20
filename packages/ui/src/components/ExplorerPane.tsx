@@ -96,6 +96,8 @@ export interface ExplorerPaneProps {
   toolbarExtra?: ReactNode;
   /** Extra bottom content (e.g. the save-as file name row). */
   footer?: ReactNode;
+  /** When set, renders a Win11-style "filling default media" progress banner. */
+  mediaProvisioning?: { done: number; total: number; current: string | null } | null;
   /** Rendered inside the explorer root (for absolutely-positioned overlays
    *  like context menus / previews that need .sc-explorer as their
    *  positioning context). */
@@ -137,6 +139,7 @@ export function ExplorerPane(props: ExplorerPaneProps): React.JSX.Element {
     showStatusbar = true,
     toolbarExtra,
     footer,
+    mediaProvisioning,
     children,
   } = props;
 
@@ -206,6 +209,30 @@ export function ExplorerPane(props: ExplorerPaneProps): React.JSX.Element {
       )}
 
       {error && <div className="sc-explorer-error">{error}</div>}
+
+      {mediaProvisioning && (
+        <div className="sc-explorer-prov" role="status">
+          <div className="sc-explorer-prov-head">
+            <span className="sc-explorer-prov-label">Syncing default media…</span>
+            <span className="sc-explorer-prov-count">
+              {mediaProvisioning.done}
+              {' of '}
+              {mediaProvisioning.total}
+            </span>
+          </div>
+          <div className="sc-explorer-prov-track">
+            <div
+              className="sc-explorer-prov-fill"
+              style={{
+                width: `${mediaProvisioning.total > 0 ? (mediaProvisioning.done / mediaProvisioning.total) * 100 : 0}%`,
+              }}
+            />
+          </div>
+          {mediaProvisioning.current && (
+            <div className="sc-explorer-prov-current">{mediaProvisioning.current}</div>
+          )}
+        </div>
+      )}
 
       <div className="sc-explorer-body">
         {showNavpane && (

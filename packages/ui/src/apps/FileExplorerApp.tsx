@@ -9,6 +9,11 @@ import { downloadBytes } from '../download';
 import { FileContextMenu } from '../components/FileContextMenu';
 import { uiClipboard, type UiClipboardEntry } from '../ui-clipboard';
 import { ExplorerPane } from '../components/ExplorerPane';
+import {
+  getMediaProgress,
+  subscribeMediaProgress,
+  type MediaProgress,
+} from '../media-progress';
 import { NewFolderIcon, PasteIcon, RefreshIcon } from '../components/icons';
 
 const MAX_PREVIEW_BYTES = 64 * 1024;
@@ -76,6 +81,11 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const [renaming, setRenaming] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const explorerRef = useRef<HTMLDivElement | null>(null);
+
+  // Live progress of the background media provisioning, surfaced as a fill bar
+  // only while the user is looking at the Music/Pictures folder being filled.
+  const [mediaProgress, setMediaProgress] = useState<MediaProgress>(() => getMediaProgress());
+  useEffect(() => subscribeMediaProgress(setMediaProgress), []);
 
   // Open the context menu at the mouse position, expressed RELATIVE to the
   // explorer container (the menu is absolute-positioned inside it). Using
@@ -380,6 +390,11 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
       onRenameCommit={(oldName, newName) => void commitRename(oldName, newName)}
       onRenameCancel={() => setRenaming(null)}
       onDrop={(e) => void onDrop(e)}
+      mediaProvisioning={
+        mediaProgress.running && mediaProgress.folder === path && mediaProgress.total > 0
+          ? { done: mediaProgress.done, total: mediaProgress.total, current: mediaProgress.current }
+          : null
+      }
       toolbarExtra={
         <button className="sc-explorer-btn" onClick={() => void newFolder()} aria-label="New folder" title="New folder">
           <NewFolderIcon size={16} />
