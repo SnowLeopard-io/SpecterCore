@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent } from 'react';
 import type { DirEntry, FileStore } from '@specter-core/contracts';
-import { copyRecursive, decodeText, deleteRecursive, moveRecursive, uniqueName } from '@specter-core/shared';
+import { copyRecursive, decodeText, deleteRecursive, dirname, moveRecursive, uniqueName } from '@specter-core/shared';
+import { tokens } from '@specter-core/contracts';
 import { useUi } from '../context';
 import { collectDropFiles, importFiles } from '../import-files';
 import { downloadBytes } from '../download';
@@ -58,7 +59,7 @@ interface MenuState {
 
 /** File Explorer (Windows 11 style): browse the virtual disk via the FileStore. */
 export function FileExplorerApp({ initialPath }: FileExplorerProps) {
-  const { controller } = useUi();
+  const { controller, kernel } = useUi();
   const fs = controller.getFileSystem() as FileStore | null;
 
   const [path, setPath] = useState('');
@@ -149,6 +150,26 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fs, initialPath]);
+
+  // 客户机（notepad 等）通过 FS 桥写入虚拟盘时自动刷新当前目录
+  // （如 notepad 保存到当前打开的文件夹，文件列表无需手动 F5 即出现）。
+  const pathRef = useRef(path);
+  pathRef.current = path;
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => {
+    if (!kernel.container.has(tokens.bridgeFs)) return;
+    const bridge = kernel.container.resolve(tokens.bridgeFs);
+    const cancel = bridge.onChange((change) => {
+      const current = pathRef.current;
+      if (dirname(change.path) === current || (change.to !== undefined && dirname(change.to) === current)) {
+        loadRef.current(current, false);
+      }
+    });
+    return () => {
+      void cancel();
+    };
+  }, [kernel]);
 
   const back = (): void => {
     if (nav.index <= 0) return;

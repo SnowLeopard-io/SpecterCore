@@ -4,8 +4,98 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpecterCore</title>
+    <style>
+      :root { color-scheme: dark; }
+      #sc-boot {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        background: radial-gradient(1000px 620px at 50% 38%, #142038 0%, #0a0f1a 62%, #060910 100%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        transition: opacity 0.5s ease, visibility 0s 0.5s;
+        color: #e8eef7;
+        font-family: 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+        cursor: default;
+      }
+      #sc-boot.done { opacity: 0; visibility: hidden; }
+      .sc-boot-logo {
+        width: 92px;
+        height: 92px;
+        display: grid;
+        place-items: center;
+        animation: sc-boot-breathe 3.2s ease-in-out infinite;
+      }
+      .sc-boot-logo svg { width: 100%; height: 100%; filter: drop-shadow(0 6px 18px rgba(47, 111, 221, 0.55)); }
+      @keyframes sc-boot-breathe {
+        0%, 100% { transform: scale(1); opacity: 0.92; }
+        50% { transform: scale(1.045); opacity: 1; }
+      }
+      .sc-boot-brand { text-align: center; }
+      .sc-boot-title {
+        font-size: 26px;
+        font-weight: 650;
+        letter-spacing: 0.4px;
+        color: #f2f6fc;
+      }
+      .sc-boot-sub {
+        margin-top: 5px;
+        font-size: 12.5px;
+        letter-spacing: 1.4px;
+        text-transform: uppercase;
+        color: #8ba3c7;
+      }
+      .sc-boot-bar {
+        width: 210px;
+        height: 4px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.1);
+        overflow: hidden;
+        position: relative;
+      }
+      .sc-boot-bar-fill {
+        position: absolute;
+        top: 0;
+        left: -32%;
+        width: 32%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #2f6fdd, #7ab8ff);
+        animation: sc-boot-slide 1.4s ease-in-out infinite;
+      }
+      @keyframes sc-boot-slide {
+        0% { left: -32%; }
+        100% { left: 100%; }
+      }
+      .sc-boot-hint {
+        font-size: 11.5px;
+        color: #6c7c97;
+        letter-spacing: 0.3px;
+      }
+    </style>
   </head>
   <body>
+    <div id="sc-boot" aria-label="Starting SpecterCore">
+      <div class="sc-boot-logo">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <g fill="#ffffff">
+            <rect x="4" y="4" width="19" height="19" rx="2.6" opacity="1" />
+            <rect x="25" y="4" width="19" height="19" rx="2.6" opacity="0.9" />
+            <rect x="4" y="25" width="19" height="19" rx="2.6" opacity="0.9" />
+            <rect x="25" y="25" width="19" height="19" rx="2.6" opacity="0.76" />
+          </g>
+        </svg>
+      </div>
+      <div class="sc-boot-brand">
+        <div class="sc-boot-title">SpecterCore</div>
+        <div class="sc-boot-sub">Virtual Windows · x86</div>
+      </div>
+      <div class="sc-boot-bar"><div class="sc-boot-bar-fill"></div></div>
+      <div class="sc-boot-hint">Loading virtual environment…</div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

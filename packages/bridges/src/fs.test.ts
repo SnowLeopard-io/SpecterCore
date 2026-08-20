@@ -162,6 +162,44 @@ describe('FileSystemBridgeImpl - find', () => {
   });
 });
 
+describe('FileSystemBridgeImpl - onChange notifications', () => {
+  it('notifies created/modified/deleted/moved with store paths', async () => {
+    const { bridge } = makeBridge();
+    const changes: Array<{ path: string; kind: string; to?: string }> = [];
+    bridge.onChange((c) => changes.push(c));
+    // Directories first: the store refuses to create a subdir under a dir that
+    // already contains files (assertNoAncestorFile). Clear dir notifications.
+    await bridge.createDirectory('C:/Desktop');
+    await bridge.createDirectory('C:/Desktop/sub');
+    changes.length = 0;
+
+    const h = (await bridge.createFile('C:/Desktop/a.txt', READ_WRITE, 0, CreationDisposition.CREATE_NEW)).handle;
+    expect(changes).toEqual([{ path: 'Desktop/a.txt', kind: 'created' }]);
+
+    await bridge.writeFile(h, enc.encode('hello'));
+    expect(changes[1]).toEqual({ path: 'Desktop/a.txt', kind: 'modified' });
+
+    await bridge.setEndOfFile(h);
+    expect(changes[2]).toEqual({ path: 'Desktop/a.txt', kind: 'modified' });
+    await bridge.closeHandle(h);
+
+    expect(await bridge.moveFile('C:/Desktop/a.txt', 'C:/Desktop/sub/a.txt', false)).toBe(E.NO_ERROR);
+    expect(changes[3]).toEqual({ path: 'Desktop/a.txt', kind: 'moved', to: 'Desktop/sub/a.txt' });
+
+    expect(await bridge.deleteFile('C:/Desktop/sub/a.txt')).toBe(E.NO_ERROR);
+    expect(changes[4]).toEqual({ path: 'Desktop/sub/a.txt', kind: 'deleted' });
+  });
+
+  it('unsubscribes via the returned dispose fn', async () => {
+    const { bridge } = makeBridge();
+    const seen: string[] = [];
+    const dispose = bridge.onChange((c) => seen.push(c.kind));
+    dispose();
+    await bridge.createFile('C:/x.txt', READ_WRITE, 0, CreationDisposition.CREATE_NEW);
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('FileSystemBridgeImpl - directories, attributes, move, lock', () => {
   it('create/remove directory', async () => {
     const { bridge } = makeBridge();

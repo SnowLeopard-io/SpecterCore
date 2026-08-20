@@ -1,3 +1,142 @@
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 18)
+
+> Single source of truth for continuing the work. Read fully before touching anything.
+> All addresses are absolute VAs (image base 0x400000).
+> Sessions 17 and earlier are preserved unchanged below as historical.
+
+## Session 18 summary — virtual-disk auto-refresh: guest file writes now update the desktop/explorer live
+> User report: notepad saving a file to the Desktop (or a folder open in File Explorer)
+> did NOT show up until a manual F5/right-click Refresh. Root cause: guest writes go
+> through `FileSystemBridgeImpl` (registered as `tokens.bridgeFs`), but the UI reads the
+> `FileStore` directly and only re-listed after its OWN actions — nothing bridged the gap.
+> Fixed with a change-notification hook on the FS bridge + subscriptions in Desktop and
+> FileExplorerApp. Verified: tsc exit 0; eslint 0 (4 pre-existing react-refresh warnings
+> only); vitest 260/260 (31 files, +2 new onChange tests); notepad-dialog-check PASS;
+> notepad-open-check PASS; cmd-cwd-check PASS.
+
+### The fix — `FileSystemBridge.onChange` subscription
+- Contract (`packages/contracts/src/bridge/fs.ts`): new `FsChange` event
+  `{ path, kind: 'created'|'modified'|'deleted'|'moved', to? }` carrying **store paths**
+  (relative, no drive prefix, e.g. `Desktop/notes.txt`); `FileSystemBridge.onChange(listener)`
+  returns a `Dispose` to unsubscribe.
+- Bridge (`packages/bridges/src/fs.ts`): listener set + `notify()`; fires on every store
+  mutation — `createFile` (truncate path → 'created'), `writeFile` (written>0 → 'modified'),
+  `setEndOfFile` ('modified'), `createDirectory`/`removeDirectory` ('created'/'deleted'),
+  `deleteFile` ('deleted'), `moveFile` ('moved' with `to`).
+- UI:
+  - `Desktop.tsx` — subscribes via `kernel.container.resolve(tokens.bridgeFs)`; when the
+    change's parent dir (or a move's destination parent) is `Desktop`, re-runs the icon
+    listing (`refreshDesktop`). Uses a `refreshDesktopRef` so the effect subscribes once
+    per kernel while always calling the latest refresh fn.
+  - `FileExplorerApp.tsx` — same subscription; reloads the CURRENT folder
+    (`load(path, false)`, no history push) when the change lands in the folder being
+    viewed. Uses `pathRef`/`loadRef` for the same reason.
+- Key wiring fact: the guest's `ApiHost.fs` IS the same singleton bridge
+  (`packages/core/src/plugin.ts` resolves `tokens.bridgeFs`), so notepad/cmd writes flow
+  straight into the UI subscription. `ensureBuiltinWinFiles` writes go directly to the
+  FileStore (not the bridge) → no stray notifications at startup.
+
+### Notes / gotchas
+- The store refuses `createDirectory` under a dir that already contains files
+  (`assertNoAncestorFile` in MemoryFileStore) — the new fs.test creates dirs BEFORE files.
+- React `useEffect` cleanup must not return a `Dispose` directly (it may return a Promise;
+  TS errors) — wrap in `() => { void cancel(); }`.
+- Guest saves via the comdlg32 dialog don't need FileDialogApp auto-refresh: the dialog
+  is open while the guest is suspended at GetSaveFileNameW, so no writes happen mid-dialog.
+- FileSystemBridge mocks updated with `onChange: () => () => {}`: sample-integration.test.ts,
+  scripts/run-exe.ts, scripts/diag-trap.ts.
+
+### Files modified (session 18)
+| File | Change |
+|---|---|
+| `packages/contracts/src/bridge/fs.ts` | `FsChange` + `FsChangeKind` + `FileSystemBridge.onChange(listener): Dispose` |
+| `packages/bridges/src/fs.ts` | onChange impl + notify() on all 7 mutation paths |
+| `packages/bridges/src/fs.test.ts` | +2 tests (event sequence with store paths; unsubscribe) |
+| `packages/ui/src/components/Desktop.tsx` | bridge onChange → auto refreshDesktop when Desktop dir affected |
+| `packages/ui/src/apps/FileExplorerApp.tsx` | bridge onChange → auto reload current folder |
+| `packages/core/src/process/sample-integration.test.ts` | mock + onChange |
+| `scripts/run-exe.ts`, `scripts/diag-trap.ts` | mock + onChange |
+
+### Next steps
+- Browser check: open notepad from the desktop, type text, Ctrl+S / Save As to the
+  Desktop — the icon should appear immediately (no manual refresh); same for saving into
+  a folder that's open in File Explorer.
+- Historical open items unchanged: Settings window (Wipe Virtual Disk), cut/move
+  clipboard ops, console-exe detection for double-clicked non-cmd exes, taskbar large
+  icon, notepad window title tracking (titleOk=false).
+
+---
+
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 17)
+
+> Single source of truth for continuing the work. Read fully before touching anything.
+> All addresses are absolute VAs (image base 0x400000).
+> Sessions 16 and earlier are preserved unchanged below as historical.
+
+## Session 17 summary — JIT shift-CF operand-order bug FIXED; Bug18/Bug19 probes DELETED
+> `scripts/cmd-dir-format-check.ts` now exits 0 with `dir` output byte-identical in
+> formatting to real Windows for 3/4/5/7-digit sizes: `1,024`, `4,096`, `99,999`,
+> `1,234,567` all correct — WITHOUT any formatting probes.
+> Verified: tsc exit 0; eslint 0; vitest 258/258 (31 files, incl. 5 new shift-CF
+> regression tests); cmd-cwd-check PASS; cmd-dir-format-check PASS; notepad
+> open-check PASS; notepad dialog-check PASS.
+
+### Root cause (FIXED) — emitShift computed CF with operands reversed (wasm `i32ShrU`)
+- `packages/core/src/jit/codegen.ts` `emitShift`: the CF computation pushed the
+  shift-amount operand FIRST and the value SECOND, but wasm `i32.shr_u` is
+  `a >>> b` (value first, amount second on the stack). So the codegen actually
+  computed `(count-1) >>> a` (or `(32-count) >>> a` for shl) instead of
+  `a >>> (count-1)` — CF came out 0 for every count-1 shift.
+- Why it mattered: cmd's dir padding formatter (0x42e327) fills the size column
+  with `rep stosd` of 0x200020 spaces; when the pad count is ODD (13 for the
+  time→size gap), it relies on `shr ecx,1` setting CF=1 then `adc ecx,ecx` to
+  emit one trailing `rep stosw`. With CF stuck at 0 the last wchar was never
+  written, leaving a residue byte (0x70 'p' / 0x33 '3') in the row buffer →
+  sizes like `31,024` instead of `1,024`. Only 4-digit sizes hit the odd-pad
+  path, which is why every historical cmd test (263,168 etc.) missed it.
+- Fix: swapped the operand order in the `shl`/`shr`/`sar` CF branches
+  (`fn.localGet(L_A)` before the count arithmetic). Added 5 vitest regressions
+  in `packages/core/src/jit/engine.test.ts` (shr/sar count=1 odd→CF=1, even→CF=0,
+  shr count=2→CF from bit1, shl count=1→CF from bit31).
+
+### Cleanup — Bug18/Bug19 runtime formatting probes REMOVED (no longer needed)
+- The shift-CF fix was the true root cause behind both historical workarounds:
+  - `0x4317b4` (Bug18, force separator len=1) — deleted. Digit-group separators
+    now come out right on their own (verified with and without the probe).
+  - `0x42e327` (Bug19, space-padding recompute) — deleted. `dir` columns align
+    correctly without it.
+- Removed `cmdFormatProbes()` from `packages/ui/src/desktop-controller.tsx` and
+  the probes array from `scripts/cmd-cwd-check.ts`; `probes:` option is now
+  unused in both guest launches (the GuestProcessRunner option stays — it's
+  still the generic mechanism if ever needed again).
+- **GS cookie patch (0x41dea0 → ret) STILL REQUIRED**: without it cmd's
+  interactive reader fast-fails with STATUS_STACK_BUFFER_OVERRUN before `dir`
+  can print (verified: BK_NO_GS=1 → dir produces no listing). This is a
+  separate JIT string-instruction-boundary quirk, unrelated to shift CF.
+  Keep the patch.
+
+### Files modified (session 17)
+| File | Change |
+|---|---|
+| `packages/core/src/jit/codegen.ts` | emitShift CF operand order fixed (shl/shr/sar) |
+| `packages/core/src/jit/engine.test.ts` | +5 shift-CF regression tests |
+| `packages/ui/src/desktop-controller.tsx` | removed `cmdFormatProbes()` + `probes:` |
+| `scripts/cmd-cwd-check.ts` | removed Bug18/19 probes array |
+| `scripts/cmd-dir-format-check.ts` | NEW: dir formatting verifier (digit-boundary dataset: 7/999/1,024/4,096/99,999/1,234,567; BK_NO_PROBES/BK_NO_GS/BK_NO_BUG18/BK_NO_BUG19 switches for A/B testing) |
+| `scripts/cmd-dir-debug.ts` | NEW: register/memory dump harness used to trace the bug (kept for future guest debugging) |
+
+### Next steps
+- Browser check: reload the desktop, open Command Prompt, run `dir` on a folder
+  with 4-digit file sizes — columns and thousands separators should now match
+  real Windows exactly.
+- The 64-bit number formatter (0x431749) and padding formatter (0x42e327) now
+  execute natively correct; no guest-code workarounds remain for cmd formatting.
+- Historical open items unchanged: Settings window (Wipe Virtual Disk),
+  cut/move clipboard ops, console-exe detection for double-clicked non-cmd exes,
+  taskbar large icon, notepad window title tracking (titleOk=false).
+
+---
+
 # specter-core Windows PE Emulator — Handover (2026-08-20, session 16)
 
 > Single source of truth for continuing the work. Read fully before touching anything.

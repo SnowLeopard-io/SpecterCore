@@ -5,6 +5,7 @@ import type {
   FindData,
   FindFirstResult,
   FindNextResult,
+  FsChange,
   GetFileAttributesResult,
   GetFileInformationResult,
   ReadFileResult,
@@ -19,7 +20,7 @@ import {
   FileMoveMethod,
   WinError as E,
 } from '@specter-core/contracts';
-import { normalizePath, splitWildcard, wildcardMatch } from '@specter-core/shared';
+import { normalizePath, splitWildcard, toStorePath, wildcardMatch } from '@specter-core/shared';
 import { FileHandleTable } from './handle-table';
 
 /**
@@ -30,12 +31,26 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
   private readonly handles = new FileHandleTable();
   private readonly searches = new Map<number, { entries: FindData[]; cursor: number }>();
   private readonly attributes = new Map<string, number>();
+  private readonly changeListeners = new Set<(change: FsChange) => void>();
   private nextSearch = 0x20;
 
   constructor(
     private readonly store: FileStore,
     private readonly onError?: (path: string, error: WinError, operation: string) => void,
   ) {}
+
+  onChange(listener: (change: FsChange) => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  /** 通知订阅者虚拟盘发生了变化（store 路径，无盘符）。 */
+  private notify(change: FsChange): void {
+    if (this.changeListeners.size === 0) return;
+    for (const listener of this.changeListeners) listener(change);
+  }
 
   private report(path: string, error: WinError, operation: string): void {
     this.onError?.(path, error, operation);
@@ -90,6 +105,7 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
       await this.store.deleteFile(norm).catch(() => {});
       const f = await this.store.openFile(norm, 'create');
       await f.close();
+      this.notify({ path: toStorePath(norm), kind: 'created' });
     };
 
     try {
@@ -198,6 +214,7 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
       const written = await file.write(offset, data);
       await file.close();
       if (filePointer === undefined) record.pointer = offset + written;
+      if (written > 0) this.notify({ path: toStorePath(record.path), kind: 'modified' });
       return { bytesWritten: written, error: E.NO_ERROR };
     } catch (err) {
       const winErr = this.mapError(err);
@@ -266,6 +283,7 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
       const file = await this.store.openFile(record.path, 'readwrite');
       await file.truncate(record.pointer);
       await file.close();
+      this.notify({ path: toStorePath(record.path), kind: 'modified' });
       return E.NO_ERROR;
     } catch (err) {
       const winErr = this.mapError(err);
@@ -342,6 +360,7 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
     try {
       await this.store.createDirectory(norm);
       this.attributes.set(norm, FileAttributeFlags.FILE_ATTRIBUTE_DIRECTORY);
+      this.notify({ path: toStorePath(norm), kind: 'created' });
       return E.NO_ERROR;
     } catch (err) {
       const winErr = this.mapError(err);
@@ -355,6 +374,7 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
     try {
       await this.store.removeDirectory(norm);
       this.attributes.delete(norm);
+      this.notify({ path: toStorePath(norm), kind: 'deleted' });
       return E.NO_ERROR;
     } catch (err) {
       const winErr = this.mapError(err);
@@ -368,6 +388,7 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
     try {
       await this.store.deleteFile(norm);
       this.attributes.delete(norm);
+      this.notify({ path: toStorePath(norm), kind: 'deleted' });
       return E.NO_ERROR;
     } catch (err) {
       const winErr = this.mapError(err);
@@ -410,6 +431,7 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
         this.attributes.delete(src);
         this.attributes.set(dst, attrs);
       }
+      this.notify({ path: toStorePath(src), kind: 'moved', to: toStorePath(dst) });
       return E.NO_ERROR;
     } catch (err) {
       const winErr = this.mapError(err);

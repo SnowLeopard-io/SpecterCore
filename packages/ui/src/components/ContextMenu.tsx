@@ -14,7 +14,16 @@ interface ContextMenuProps {
 /** Desktop right-click context menu (Windows 11 style). */
 export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onPaste, onClose }: ContextMenuProps) {
   return (
-    <div className="sc-context-menu" style={{ left: x, top: y }}>
+    <>
+      <div
+        className="sc-context-menu-overlay"
+        onClick={onClose}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onClose();
+        }}
+      />
+      <div className="sc-context-menu" data-sc-context-menu style={{ left: x, top: y }}>
       <button
         onClick={() => {
           onOpenExplorer();
@@ -53,6 +62,7 @@ export function ContextMenu({ x, y, onRefresh, onNewFolder, onOpenExplorer, onPa
       <button onClick={onClose}>
         <span className="sc-context-icon"><WindowsLogoIcon /></span> Properties
       </button>
-    </div>
+      </div>
+    </>
   );
 }

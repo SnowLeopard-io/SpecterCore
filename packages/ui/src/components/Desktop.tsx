@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import type { DesktopController, DirEntry, WindowHandle } from '@specter-core/contracts';
-import { copyRecursive, deleteRecursive, moveRecursive, uniqueName } from '@specter-core/shared';
+import { copyRecursive, deleteRecursive, dirname, moveRecursive, uniqueName } from '@specter-core/shared';
+import { tokens } from '@specter-core/contracts';
 import { useUi } from '../context';
 import { WindowFrame } from './WindowFrame';
 import { Taskbar } from './Taskbar';
@@ -100,6 +101,24 @@ export function Desktop({ controller }: DesktopProps) {
     refreshDesktop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fs]);
+
+  // 客户机（notepad 等）通过 FS 桥写虚拟盘后自动刷新桌面图标，无需手动 F5。
+  // 变化事件携带 store 路径（如 'Desktop/notes.txt'）；只要其父目录命中桌面
+  // 目录（或 moved 的目标落入桌面），就重列桌面目录。
+  const refreshDesktopRef = useRef(refreshDesktop);
+  refreshDesktopRef.current = refreshDesktop;
+  useEffect(() => {
+    if (!kernel.container.has(tokens.bridgeFs)) return;
+    const bridge = kernel.container.resolve(tokens.bridgeFs);
+    const cancel = bridge.onChange((change) => {
+      if (dirname(change.path) === DESKTOP_DIR || (change.to !== undefined && dirname(change.to) === DESKTOP_DIR)) {
+        refreshDesktopRef.current();
+      }
+    });
+    return () => {
+      void cancel();
+    };
+  }, [kernel]);
 
   const createFolder = (): void => {
     if (!fs) return;

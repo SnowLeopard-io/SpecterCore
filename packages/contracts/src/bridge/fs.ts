@@ -2,6 +2,7 @@
  * L2 文件系统桥接契约：Windows 文件 API → FileStore。
  */
 
+import type { Dispose } from '../kernel';
 import type { FileStat } from '../host';
 
 // ---------------------------------------------------------------------------
@@ -143,6 +144,17 @@ export interface FindNextResult {
   error: WinError;
 }
 
+/** 客户机写入虚拟盘后触发的变化事件（store 路径，不含盘符前缀）。 */
+export type FsChangeKind = 'created' | 'modified' | 'deleted' | 'moved';
+
+export interface FsChange {
+  /** 变化的 store 路径，如 'Desktop/notes.txt'（相对路径，无盘符）。 */
+  path: string;
+  kind: FsChangeKind;
+  /** 仅 kind === 'moved'：目标 store 路径。 */
+  to?: string;
+}
+
 export interface FileSystemBridge {
   /** CreateFile：按 creationDisposition 语义打开/创建/截断文件 */
   createFile(
@@ -176,4 +188,9 @@ export interface FileSystemBridge {
   unlockFile(handle: number): Promise<WinError>;
   /** 释放桥接层所有句柄（进程退出时调用） */
   releaseAll(): Promise<void>;
+  /**
+   * 订阅虚拟盘变化（客户机进程通过本桥创建/写入/删除/移动文件时触发）。
+   * 返回取消订阅函数。UI 层用它实现桌面/资源管理器的自动刷新。
+   */
+  onChange(listener: (change: FsChange) => void): Dispose;
 }

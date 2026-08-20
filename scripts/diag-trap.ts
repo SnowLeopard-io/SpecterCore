@@ -415,6 +415,9 @@ function buildExeFs(exePath: string, exeBytes: Uint8Array): FileSystemBridge {
     async releaseAll() {
       handles.clear();
     },
+    onChange() {
+      return () => {};
+    },
   };
 }
 

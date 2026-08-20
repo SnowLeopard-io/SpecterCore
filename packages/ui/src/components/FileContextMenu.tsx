@@ -39,7 +39,7 @@ export function FileContextMenu({ x, y, entry, actions, onClose }: FileContextMe
           onClose();
         }}
       />
-      <div className="sc-file-menu" style={{ left: x, top: y }}>
+      <div className="sc-file-menu" data-sc-context-menu style={{ left: x, top: y }}>
         <button
           onClick={() => {
             actions.onOpen();
