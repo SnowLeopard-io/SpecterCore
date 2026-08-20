@@ -90,3 +90,62 @@
 2. 重新 trace，看 ret 是否还跳到 0x2000cd0
 3. 若仍跳：0x1022092 处 dump [rsp] 栈内容 + 0x100a0c0 段代码的路径消费逻辑
 4. 跑通 notepad-x64 → cmd-x64（此前 @0x1024a10 unsupported opcode 0x7）→ 桌面集成（builtin-win.ts 切 64 位 System32）→ typecheck + vitest + 文档
+
+---
+
+## 2026-08-21 会话更新：栈漂移根因已定位并修复
+
+### 根因（重要，本轮确认）
+**x64 动态陷阱桩生成了 `ret N`（stdcall）而不是裸 `ret`**，导致每次陷阱调用后 guest 栈 rsp 多退 N 字节（漂移 +0x10），最终把数据指针当返回地址弹出。
+
+- `allocDynamicStub`（guest-process.ts ~1053）**没有区分 x64**，仍用 `X86_API_ARG_COUNT`（如 SHGetKnownFolderPath=4）→ 生成 10 字节桩 `b8 <idx>; cd 2e; c2 10 00`（`ret 16`）。
+- x64 调用约定是调用方清理栈，桩必须是 8 字节 `b8 <idx>; cd 2e; c3`（裸 ret）。
+- 实测：桩 0x200a38 入口 rsp=0x7ffeda8，执行 `ret 16` 后 rsp=0x7ffedc0（+0x18，正确应 +0x8）→ 之后所有 block 持续漂移 +0x10。
+- 影响链：函数入口 E=0x7ffede8，prologue 后应 rsp=E-0x38=0x7ffedb0；SHGetKnownFolderPath 写 path 到 out=[E+0x10]=0x7ffedf8（guest 局部槽，正确）；但因 rsp 漂移，epilogue 的 `ret` 从 [rsp+0x38]=[0x7ffedf8] 弹出 **0x2000cd0（Documents 路径缓冲）** → 跳数据区 fault。
+- mapper.ts 静态桩**正确**（`argCount = pe.is64 ? 0 : X86_API_ARG_COUNT[...]`）；只有 allocDynamicStub 漏了 x64 判断。
+
+### 修复已应用
+- `allocDynamicStub` 中 `const argCount = pe.is64 ? 0 : (X86_API_ARG_COUNT 查表...)`。
+- **作用域坑**：`allocDynamicStub` 定义在 `installStartupHandlers`（guest-process.ts:480，参数含 `pe`）内，`mode` 是 `run` 方法（:393）的局部量，闭包不可见 → 首次编辑用 `mode === 'x64'` 报 `TS2304: Cannot find name 'mode'`（guest-process.ts:1070）。已改用 `pe.is64`。
+- `pnpm typecheck` 确认 guest-process.ts 无新增错误（仅剩预存的 codegen.ts XmmOperand/BrowserApp 错误，基线就存在，勿修）。
+
+### 桌面集成（用户要求"接到桌面"）
+- `builtin-win.ts`：新增 `win/notepad-x64.exe` + `en-US/notepad-x64.exe.mui` → `Windows/System32/notepad.exe`(.mui)。
+- `apps.tsx`：新增 app `windows-notepad-x64`（"Notepad (x64)"，System 组）。
+- `desktop-controller.tsx`：`windows-notepad-x64` → `launchGuestWindow({ storePath: 'Windows/System32/notepad.exe', modulePath: 'C:/Windows/System32/notepad.exe', name: 'Notepad (x64)' })`。
+- `vite build` 被预存 tsc 错误挡住，但 `vite dev`（跳过 typecheck）可跑；dev server 已起在 http://localhost:5173。**用户实测：点开 64 位直接卡死（主线程被 guest 占死）。**
+
+### 卡死原因调查（进行中，未解决）
+- headless 复现：guest 不进 trap、不报 fault，纯 CPU 空转 → **卡在 delay-load 路径的坏跳转**。
+- exec 日志（SPECTER_TRACE_EXEC=1）关键序列：
+  ```
+  0x10272d0 -> 0          ; __delayLoadHelper2 包装函数（call 0x10272fb 后 rax=0x200a30 动态 stub，正常）
+  0x2009a0 -> 1 (trap)
+  0x1027302 -> 0
+  0x1002d37 -> 0          ; delay-load helper 区（lea rax; jmp rax）
+  0x1002d6f -> 0
+  0x200a30 -> 1 (trap)
+  0x102200e -> 0
+  0x1022017/21/25 -> ...  ; wcslen 循环（正常终止，非死循环）
+  0x10274e0 -> 0          ; `ff 25 6a 2f 00 00` = jmp [rip+0x2f6a] → [0x102a450]
+  0x1027500 -> 0          ; `ff e0` = jmp rax，此时 rax=0x6e0065（垃圾）
+  0x6e0065 -> 0           ; 跳进数据区，之后每 +0x400 一个 block 线性执行
+  0x6e0465 ... 0x7dc065 ... 0x81a465  ; 时间黑洞（20s 才走 ~250KB）
+  ```
+- **根因候选**：0x102a450 是 **delay-load（.didat）IAT 槽**。mapper 只改写普通导入表（pe.imports），delay-load 槽只被 applyRelocations 从 0x140027500 rebase 成 0x1027500，**未被填成 trap stub**。0x1027500 是裸 `jmp rax`，期望 rax 已装载真实函数地址，但 rax=0x6e0065。
+- trace 确认：`ResolveDelayLoadedAPI` **从未被调用**（无 `[rd]` 日志），所以 delay-load 槽 0x102a450 从未被动态填 stub。
+- 0x6e0065 来源未定（疑似从某寄存器/内存拼出的错误地址，或 wcslen 段后 rax 残留）。
+
+### 待验证假设（下一步）
+1. **ResolveDelayLoadedAPI 未触发**：notepad-x64 的 delay-load helper（0x10272d0/0x1002d37）走的是自实现路径而非 kernel32 的 ResolveDelayLoadedAPI？检查 0x10272d0 的 call 0x10272fb 目标、以及 delay-load 是如何被期望解析的（_FLoad 标志 / __delayLoadHelper2 直接调用 GetProcAddress？）。
+2. **0x102a450 槽为何是 0x1027500**：确认这是 applyRelocations 的结果（delay-load 原始值 0x140027500）。若 helper 期望 call 时 rax=槽地址而 codegen 未正确装载，需查 0x1027500 前的 rax 来源。
+3. 若 delay-load helper 走 GetProcAddress(module, name) → 检查 GetProcAddress handler 对 delay-load 的返回是否被正确消费（allocDynamicStub 现在已 x64 正确）。
+4. 0x6e0065 溯源：在 0x10274e0 前 dump rax 变化（0x1027302 rax=0x200a30 → 0x10274ac rax=0x2001188 → 0x10274e0 rax=0x6e0065，中间某指令污染 rax）。
+5. 之后：跑通 notepad-x64 → cmd-x64 → 桌面 → typecheck+vitest+文档。
+
+### 本轮调试工具变更
+- `scripts/trace-x64.ts`：新增 `[wcs]`（0x1022025 wcslen 循环 dump rdx 缓冲）、`[dl]`（0x1026f00-0x1027600 delay-load 区，含 0x10274e0 的 IAT 槽值）、`[rd]`（ResolveDelayLoadedAPI 参数）探针，改用 `console.error` 直写 stderr（防缓冲吞日志）。
+- `packages/core/src/jit/executor.ts`：临时加了 `SPECTER_TRACE_EXEC` 环境变量逐 block 打印（诊断用，可留可删）。
+- `scripts/run-exe-debug.ts`（新）：headless 复现卡死，maxSteps 400M。
+- `scripts/dump-x64.ts`（新）：按 PE 静态映射后 dump 指定地址字节/IAT 槽。
+- 注意：headless 后台跑需要 Start-Process + RedirectStandardError，进程不退出时 stderr 可能全缓冲在文件（PowerShell 管道会等进程退出）。

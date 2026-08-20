@@ -1063,10 +1063,14 @@ export class GuestProcessRunner {
       // procName "#N" which is meaningless alone (Wldp.dll#10 = 3 stdcall args,
       // Wldp.dll#2 = 5). Without this the stub `ret 0` leaks 4*N bytes per call
       // and drifts the guest stack (cmd parser 0x40b743 +12 -> ebx clobbered).
-      const argCount =
+      // x64 uses the Microsoft x64 calling convention: the CALLER cleans the
+      // stack, so every stub must be a plain `ret` (c3). Only 32-bit stdcall
+      // imports need `ret <args*4>` — an x64 `ret N` pops N extra bytes and
+      // drifts the guest stack (SHGetKnownFolderPath: ret 16 vs ret -> +0x10).
+      const argCount = pe.is64 ? 0 : (
         (moduleName ? X86_API_ARG_COUNT[`${moduleName.toLowerCase()}!${procName.toLowerCase()}`] : undefined) ??
         X86_API_ARG_COUNT[procName.toLowerCase()] ??
-        0;
+        0);
       const index = stubs.length;
       const stubAddress = dynCursor();
       const stubLen = argCount === 0 ? 8 : 10;

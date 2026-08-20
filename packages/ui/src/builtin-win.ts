@@ -12,6 +12,9 @@ export const BUILTIN_WIN_FILES: Array<{ url: string; storePath: string }> = [
   { url: 'win/notepad.exe', storePath: 'Windows/SysWOW64/notepad.exe' },
   { url: 'win/en-US/notepad.exe.mui', storePath: 'Windows/SysWOW64/en-US/notepad.exe.mui' },
   { url: 'win/zh-CN/notepad.exe.mui', storePath: 'Windows/SysWOW64/zh-CN/notepad.exe.mui' },
+  // 64-bit notepad + MUI (PE32+; x64 guest under System32 on the virtual disk).
+  { url: 'win/notepad-x64.exe', storePath: 'Windows/System32/notepad.exe' },
+  { url: 'win/en-US/notepad-x64.exe.mui', storePath: 'Windows/System32/en-US/notepad.exe.mui' },
   // Real cmd.exe (+ MUI) so the desktop "Command Prompt" app runs the actual
   // guest binary instead of a JS reimplementation (see launchGuestConsole).
   { url: 'win/cmd.exe', storePath: 'Windows/SysWOW64/cmd.exe' },

@@ -81,6 +81,7 @@ export class Executor {
       } catch (err) {
         return { status: 'fault', eip: address, error: err };
       }
+      if (typeof process !== 'undefined' && process.env.SPECTER_TRACE_EXEC) console.error(`[exec] 0x${address.toString(16)} -> ${status}`);
 
       if (status === STATUS_TRAP || status === BlockStatus.Trap) {
         const vector = this.runtime.getIntVector();

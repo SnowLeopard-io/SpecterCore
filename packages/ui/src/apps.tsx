@@ -82,6 +82,14 @@ export const DEFAULT_APPS: AppDefinition[] = [
     // notepad as a real guest window (no application-shell window).
     render: () => null,
   },
+  {
+    appId: 'windows-notepad-x64',
+    name: 'Notepad (x64)',
+    icon: 'icons/notepad.svg',
+    description: 'Run the bundled 64-bit notepad.exe (PE32+) with its MUI resources',
+    group: 'System',
+    render: () => null,
+  },
 ];
 
 export function toDesktopApp(app: AppDefinition): DesktopAppInfo {

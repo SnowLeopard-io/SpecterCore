@@ -195,14 +195,25 @@ const REGS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'] as const;
 
 function dumpAt(label: string, rt: WasmRuntimeImpl, extraOffsets: number[]): void {
   const regs = REGS.map((r) => `${r}=0x${(rt.getReg(r as never) >>> 0).toString(16)}`).join(' ');
+  let eflags = -1;
+  try {
+    eflags = rt.readInt32(0x1084) >>> 0; // CTX_BASE + EFLAGS_OFFSET
+  } catch {
+    /* ignore */
+  }
   console.error(`\n[probe] ${label}`);
-  console.error(`[probe]   ${regs}`);
+  console.error(`[probe]   ${regs} eflags=0x${eflags.toString(16)} (SF=${(eflags >> 7) & 1} OF=${(eflags >> 11) & 1} ZF=${(eflags >> 6) & 1} CF=${eflags & 1})`);
   const esp = rt.getReg('esp') >>> 0;
   const words: string[] = [];
   for (let i = 0; i < 8; i++) {
     words.push(`+${(i * 4).toString(16)}:0x${(rt.readInt32(esp + i * 4) >>> 0).toString(16)}`);
   }
   console.error(`[probe]   stack ${words.join(' ')}`);
+  // TEMP: dump runtime bytes at 0x407460 to check .text mapping shift
+  try {
+    const b = rt.readBytes(0x407460, 32);
+    console.error(`[probe]   mem@0x407460 = ${[...b].map((x) => x.toString(16).padStart(2, '0')).join(' ')}`);
+  } catch { /* ignore */ }
   for (const off of extraOffsets) {
     const addr = esp + off;
     console.error(
@@ -233,6 +244,7 @@ async function main(): Promise<void> {
   const modulePath = resolve(file);
 
   const runtime = new WasmRuntimeImpl();
+  (globalThis as { __bk_seh_debug?: boolean }).__bk_seh_debug = true;
   const host = {
     memory: {
       read: (address: number, length: number) => runtime.readBytes(address, length),

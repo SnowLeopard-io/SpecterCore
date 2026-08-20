@@ -764,6 +764,20 @@ class DecoderState {
       case 0xfd:
         return { inst: { op: 'std' }, terminator: false };
 
+      case 0xfe: {
+        // INC/DEC r/m8 (group 4). Same modrm encoding as 0xff but 8-bit.
+        const raw = this.decodeRm(8);
+        const rm = this.rmOperand(raw, 8);
+        switch (GROUP5[raw.modrmReg]) {
+          case 'inc':
+            return { inst: { op: 'inc', dst: rm }, terminator: false };
+          case 'dec':
+            return { inst: { op: 'dec', dst: rm }, terminator: false };
+          default:
+            throw new UnsupportedError(this.abs(), `group4 modrm reg=${raw.modrmReg} not implemented`);
+        }
+      }
+
       case 0xff: {
         const raw = this.decodeRm(size);
         const rm = this.rmOperand(raw, size);
@@ -794,9 +808,14 @@ class DecoderState {
         // FSTCW writes the standard default control word, and the plain
         // memory <-> ST(0) moves (FLD/FST/FSTP) are raw 8-byte copies through
         // an 8-slot register file. Arithmetic (FADD/FMUL/...) is unsupported.
-        if (opcode === 0xdb && this.code[this.pos] === 0xe3) {
-          this.pos += 1; // FNINIT
-          return { inst: { op: 'finit' }, terminator: false };
+        if (opcode === 0xdb) {
+          const b = this.code[this.pos];
+          // DB E0..E4 are the no-modrm 286/387 opcodes FNENI/FNDISI/FNCLEX/
+          // FNINIT/FNSETPM — all no-ops on modern CPUs and for our FPU model.
+          if (b >= 0xe0 && b <= 0xe4) {
+            this.pos += 1;
+            return { inst: { op: 'finit' }, terminator: false };
+          }
         }
         const raw = this.decodeXmmRm();
         const mem: Operand | undefined = raw.mem
@@ -855,6 +874,24 @@ class DecoderState {
                 return { inst: { op: 'fstp', dst: mem, size: 64 }, terminator: false }; // FSTP m64
               default:
                 throw new UnsupportedError(this.abs(), `unsupported x87 dd modrm reg=${raw.reg}`);
+            }
+          case 0xdb:
+            // FILD/FISTP integer <-> FPU conversions. m32/m16 forms need real
+            // int<->double conversion (codegen emitFpuIntMove); m64 forms are
+            // raw 8-byte copies (the Delphi move-through-FPU idiom, see 0xdf).
+            switch (raw.reg) {
+              case 0:
+                return { inst: { op: 'fild', src: mem, size: 32 }, terminator: false }; // FILD m32int
+              case 2:
+                return { inst: { op: 'fist', dst: mem, size: 32 }, terminator: false }; // FIST m32int
+              case 3:
+                return { inst: { op: 'fistp', dst: mem, size: 32 }, terminator: false }; // FISTP m32int
+              case 5:
+                return { inst: { op: 'fild', src: mem, size: 64 }, terminator: false }; // FILD m64int
+              case 7:
+                return { inst: { op: 'fistp', dst: mem, size: 64 }, terminator: false }; // FISTP m64int
+              default:
+                throw new UnsupportedError(this.abs(), `unsupported x87 db modrm reg=${raw.reg}`);
             }
           case 0xdf:
             // FILD/FISTP integer loads/stores through the FPU. Our FPU is a

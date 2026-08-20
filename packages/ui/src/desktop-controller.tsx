@@ -142,6 +142,15 @@ export class DesktopControllerImpl implements DesktopController {
       });
       return;
     }
+    if (app.appId === 'windows-notepad-x64') {
+      await this.launchGuestWindow({
+        storePath: 'Windows/System32/notepad.exe',
+        modulePath: 'C:/Windows/System32/notepad.exe',
+        name: 'Notepad (x64)',
+        commandLine: args?.path ? toWindowsPath(args.path) : undefined,
+      });
+      return;
+    }
     if (app.appId === 'command-prompt') {
       await this.openCommandPrompt();
       return;

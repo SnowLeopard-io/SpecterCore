@@ -385,6 +385,28 @@ export class WasmFunction {
     this.buf.push(0xa7);
   }
 
+  // ---- f64 memory + conversions (for x87 FILD/FISTP) ----
+  f64Load(offset = 0): void {
+    this.buf.push(0x2a);
+    this.memarg(3, offset);
+  }
+  f64Store(offset = 0): void {
+    this.buf.push(0x39);
+    this.memarg(3, offset);
+  }
+  f64ConvertI32S(): void {
+    this.buf.push(0xb7);
+  }
+  f64ConvertI32U(): void {
+    this.buf.push(0xb8);
+  }
+  i32TruncF64S(): void {
+    this.buf.push(0xaa);
+  }
+  i32TruncF64U(): void {
+    this.buf.push(0xab);
+  }
+
   // ---- parametric ----
   select(): void {
     this.buf.push(0x1b);

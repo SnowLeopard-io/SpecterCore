@@ -62,6 +62,10 @@ async function main(): Promise<void> {
   interceptor.dispatch = (ctx: { module: string; proc: string; rawArgs?: number[] }) => {
     const name = `${String(ctx.module)}!${String(ctx.proc)}`;
     called.push(name);
+    console.error(`[trap] ${name} idx=${called.length}`);
+    if (String(ctx.proc).toLowerCase() === 'resolvedelayloadedapi') {
+      console.error(`[rd] ResolveDelayLoadedAPI args=${(ctx.rawArgs ?? []).map((a) => '0x' + (a >>> 0).toString(16)).join(',')}`);
+    }
     if (String(ctx.proc).toLowerCase() === 'shgetknownfolderpath') {
       const rsp = runtime.getReg('rsp');
       const ret = runtime.readInt32(rsp);
@@ -85,18 +89,24 @@ async function main(): Promise<void> {
     readFile: async () => null,
     onOutput: () => {},
     probes: [],
-    onStep: (eip, rt) => {
+onStep: (eip, rt) => {
       tail.push(eip);
       if (tail.length > 120) tail.shift();
-      if (eip >= 0x1008000 && eip <= 0x1022100) {
-        console.log(`[t] 0x${eip.toString(16)} rsp=0x${rt.getReg('rsp').toString(16)}`);
-      }
-      if (eip === 0x1022092) {
-        const rsp = rt.getReg('rsp');
+      if (eip === 0x1022025) {
+        const d = rt.getReg('rdx');
+        const off = rt.getReg('rbx') * 2;
         const words: string[] = [];
-        for (let i = 0; i < 12; i++) words.push(`[rsp+0x${(i * 8).toString(16)}]=0x${rt.readInt32(rsp + i * 8).toString(16)}:0x${rt.readInt32(rsp + i * 8 + 4).toString(16)}`);
-        console.log(`[epilogue] rsp=0x${rsp.toString(16)} ${words.join(' ')}`);
-        console.log(`[epilogue] rax=0x${rt.getReg('rax').toString(16)} rdi=0x${rt.getReg('rdi').toString(16)} rbx=0x${rt.getReg('rbx').toString(16)}`);
+        for (let i = 0; i < 16; i++) words.push(`${[...rt.readBytes((d + i * 2) >>> 0, 2)].map(x=>x.toString(16).padStart(2,'0')).join('')}`);
+        console.error(`[wcs] rbx=0x${rt.getReg('rbx').toString(16)} [rdx+0..]: ${words.join(' ')}`);
+        if (rt.getReg('rbx') === 0) {
+          const dump: string[] = [];
+          for (let i = 0; i < 64; i += 4) dump.push(`+${i.toString(16).padStart(2,'0')}=${rt.readInt32((d + i) >>> 0).toString(16)}`);
+          console.error(`[wcs] rdx=0x${d.toString(16)} dump: ${dump.join(' ')}`);
+        }
+      }
+      if (eip >= 0x1026f00 && eip <= 0x1027600) {
+        console.error(`[dl] 0x${eip.toString(16)} rax=0x${rt.getReg('rax').toString(16)} rsp=0x${rt.getReg('rsp').toString(16)}`);
+        if (eip === 0x10274e0) console.error(`[dl] IAT[0x102a450]=0x${rt.readInt32(0x102a450).toString(16)}`);
       }
     },
   });

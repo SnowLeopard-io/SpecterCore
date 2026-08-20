@@ -189,16 +189,33 @@ function emitZspFlags(fn: WasmFunction, size: Size): void {
   orFlag(fn, 2);
 }
 
-/** Emits OF = ((a^b) & (a^s)) >> (size-1). */
-function emitOfBinary(fn: WasmFunction, size: Size): void {
+/**
+ * Emits OF for a binary op. ADD/XADD: OF = ((a^s) & (b^s)) >> (size-1)
+ * (overflow only when a and b share a sign that the result flips).
+ * SUB/SBB/CMP: OF = ((a^b) & (a^s)) >> (size-1) (borrow across the sign bit).
+ * Logical ops: OF is always 0.
+ */
+function emitOfBinary(fn: WasmFunction, size: Size, op: Instruction['op']): void {
   const mask = flagMask(size);
-  fn.localGet(L_A);
-  fn.localGet(L_B);
-  fn.i32Xor();
-  fn.localGet(L_A);
-  fn.localGet(L_S);
-  fn.i32Xor();
-  fn.i32And();
+  if (op === 'add' || op === 'adc' || op === 'xadd') {
+    fn.localGet(L_A);
+    fn.localGet(L_S);
+    fn.i32Xor();
+    fn.localGet(L_B);
+    fn.localGet(L_S);
+    fn.i32Xor();
+    fn.i32And();
+  } else if (op === 'sub' || op === 'sbb' || op === 'cmp') {
+    fn.localGet(L_A);
+    fn.localGet(L_B);
+    fn.i32Xor();
+    fn.localGet(L_A);
+    fn.localGet(L_S);
+    fn.i32Xor();
+    fn.i32And();
+  } else {
+    fn.i32Const(0);
+  }
   fn.i32Const(mask);
   fn.i32And();
   fn.i32Const(size - 1);
@@ -258,15 +275,27 @@ function emitZspFlags64(fn: WasmFunction): void {
   orFlag(fn, 2);
 }
 
-/** Emits OF = ((a^b) & (a^s)) bit 63. */
-function emitOfBinary64(fn: WasmFunction): void {
-  fn.localGet(L_I64A);
-  fn.localGet(L_I64B);
-  fn.i64Xor();
-  fn.localGet(L_I64A);
-  fn.localGet(L_I64);
-  fn.i64Xor();
-  fn.i64And();
+/** Emits OF for a 64-bit binary op (same sign rules as emitOfBinary). */
+function emitOfBinary64(fn: WasmFunction, op: Instruction['op']): void {
+  if (op === 'add' || op === 'adc' || op === 'xadd') {
+    fn.localGet(L_I64A);
+    fn.localGet(L_I64);
+    fn.i64Xor();
+    fn.localGet(L_I64B);
+    fn.localGet(L_I64);
+    fn.i64Xor();
+    fn.i64And();
+  } else if (op === 'sub' || op === 'sbb' || op === 'cmp') {
+    fn.localGet(L_I64A);
+    fn.localGet(L_I64B);
+    fn.i64Xor();
+    fn.localGet(L_I64A);
+    fn.localGet(L_I64);
+    fn.i64Xor();
+    fn.i64And();
+  } else {
+    fn.i64Const(0);
+  }
   fn.i64Const(63);
   fn.i64ShrU();
   fn.i32WrapI64();
@@ -467,6 +496,11 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
     case 'fst':
     case 'fstp':
       emitFpuMove(fn, inst.op as 'fld' | 'fst' | 'fstp', inst.dst as MemOperand | undefined, inst.src as MemOperand | undefined, inst.size === 32 ? 32 : 64);
+      return;
+    case 'fild':
+    case 'fist':
+    case 'fistp':
+      emitFpuIntMove(fn, inst.op as 'fild' | 'fist' | 'fistp', inst.dst as MemOperand | undefined, inst.src as MemOperand | undefined, inst.size === 32 ? 32 : 64);
       return;
     case 'fld1':
     case 'fldz': {
@@ -786,7 +820,7 @@ function emitArith(fn: WasmFunction, op: Instruction['op'], size: Size, dst: Ope
   // ---- flags ----
   beginFlags(fn);
   emitZspFlags(fn, size);
-  emitOfBinary(fn, size);
+  emitOfBinary(fn, size, op);
 
   if (op === 'add' || op === 'adc') {
     // CF: (s <u a) | (s <u s1) for adc; for add just s <u a
@@ -924,7 +958,7 @@ function emitArith64(fn: WasmFunction, op: Instruction['op'], dst: Operand, src:
   // flags
   beginFlags(fn);
   emitZspFlags64(fn);
-  emitOfBinary64(fn);
+  emitOfBinary64(fn, op);
   if (op === 'add') {
     // CF: s <u a
     fn.localGet(L_I64);
@@ -1806,6 +1840,40 @@ function emitFpuMove(fn: WasmFunction, op: 'fld' | 'fst' | 'fstp', dst: MemOpera
   // no operand (register forms we don't model) — no-op
 }
 
+/**
+ * x87 FILD/FIST/FISTP integer <-> double conversions. m32 forms do a real
+ * signed int<->f64 conversion through ST(0); m64 forms are raw 8-byte copies
+ * (the Delphi move-through-FPU integer idiom, where the bits round-trip).
+ */
+function emitFpuIntMove(fn: WasmFunction, op: 'fild' | 'fist' | 'fistp', dst: MemOperand | undefined, src: MemOperand | undefined, size: 32 | 64): void {
+  if (op === 'fild' && src) {
+    if (size === 64) {
+      emitFpuMove(fn, 'fld', undefined, src, 64);
+      return;
+    }
+    // ST(0) <- (double)(int32)[src]
+    fn.i32Const(fpuAddr(0));
+    emitEa(fn, src);
+    fn.i32Load();
+    fn.f64ConvertI32S();
+    fn.f64Store();
+    return;
+  }
+  if ((op === 'fist' || op === 'fistp') && dst) {
+    if (size === 64) {
+      emitFpuMove(fn, 'fstp', dst, undefined, 64);
+      return;
+    }
+    // [dst] <- (int32)ST(0)
+    emitEa(fn, dst);
+    fn.i32Const(fpuAddr(0));
+    fn.f64Load();
+    fn.i32TruncF64S();
+    fn.i32Store();
+    return;
+  }
+}
+
 function emitShift(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror', size: Size, dst: Operand, count: Operand): void {
   if (size === 64) {
     emitShift64(fn, op, dst, count);
@@ -2459,7 +2527,7 @@ function emitXadd(fn: WasmFunction, size: Size, dst: Operand, src: Operand): voi
   // flags: same as ADD
   beginFlags(fn);
   emitZspFlags(fn, size);
-  emitOfBinary(fn, size);
+  emitOfBinary(fn, size, 'add');
   fn.localGet(L_S);
   fn.localGet(L_A);
   fn.i32LtU();
@@ -2487,7 +2555,7 @@ function emitXadd64(fn: WasmFunction, dst: Operand, src: Operand): void {
   // flags: same as ADD
   beginFlags(fn);
   emitZspFlags64(fn);
-  emitOfBinary64(fn);
+  emitOfBinary64(fn, 'add');
   fn.localGet(L_I64);
   fn.localGet(L_I64A);
   fn.i64LtU();

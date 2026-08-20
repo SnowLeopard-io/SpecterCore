@@ -199,6 +199,9 @@ export type Op =
   | 'fld'
   | 'fst'
   | 'fstp'
+  | 'fild'
+  | 'fist'
+  | 'fistp'
   | 'fld1'
   | 'fldz'
   // x87 stack-housekeeping ops. With the flat ST(0)-only FPU model these carry
