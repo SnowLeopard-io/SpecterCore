@@ -74,10 +74,12 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
     : win.bounds;
 
   const onPointerDown = (e: ReactPointerEvent): void => {
-    void controller.focus(win.id);
-    // Clicks on caption buttons (min/max/close) must not start a drag or
-    // capture the pointer, otherwise their click events get swallowed.
+    // Clicks on caption buttons (min/max/close) must not start a drag,
+    // capture the pointer, or trigger a focus re-render that swallows their
+    // click — otherwise closing/minimizing an unfocused window needs two
+    // clicks (first focuses it, second actually fires the button).
     if ((e.target as HTMLElement).closest('.sc-title-controls')) return;
+    void controller.focus(win.id);
     if (isMaximized) return;
     setDragging(true);
     setDragStart({ x: e.clientX - win.bounds.x, y: e.clientY - win.bounds.y });
@@ -100,7 +102,10 @@ export function WindowFrame({ window: win, controller, focused, renderContent }:
     <div
       className={`sc-window ${focused ? 'focused' : ''} ${isMaximized ? 'maximized' : ''} ${closing ? 'closing' : ''}`}
       style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex: win.zIndex }}
-      onPointerDown={() => void controller.focus(win.id)}
+      onPointerDown={(e) => {
+        if ((e.target as HTMLElement).closest('.sc-title-controls')) return;
+        void controller.focus(win.id);
+      }}
     >
       <div
         className="sc-titlebar"
