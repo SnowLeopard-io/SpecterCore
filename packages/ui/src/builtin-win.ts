@@ -79,41 +79,52 @@ export const BUILTIN_IMAGE_FILES: Array<{ url: string; storePath: string }> = [
   ...imageRange(1, 14),
 ];
 
+/** Store paths currently being provisioned (dedupes concurrent writes). */
+const provisionInFlight = new Set<string>();
+
 /** Idempotent: writes each bundled file when missing/empty (fetch + write). */
 async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePath: string }>): Promise<void> {
   for (const f of files) {
-    // Skip only when a real (non-empty) copy already exists — a stale empty
-    // file (e.g. created by an old openFile('read') bug) must be overwritten.
-    let existing = null;
+    // Dedupe concurrent provisions of the same path (e.g. the background boot
+    // provision racing a lazy ensureBuiltinWinFiles from launchGuestWindow).
+    if (provisionInFlight.has(f.storePath)) continue;
+    provisionInFlight.add(f.storePath);
     try {
-      existing = await fs.stat(f.storePath);
-    } catch {
-      // missing directory tree or other FS error — rewrite below
-    }
-    if (existing && existing.kind === 'file' && existing.size > 0) continue;
-    const res = await fetch(f.url);
-    if (!res.ok) {
-      console.warn(`[specter-core] builtin fetch failed ${f.url}: ${res.status}`);
-      continue;
-    }
-    const data = new Uint8Array(await res.arrayBuffer());
-    const dirs = f.storePath.split('/').slice(0, -1);
-    let cur = '';
-    for (const d of dirs) {
-      cur = cur ? `${cur}/${d}` : d;
+      // Skip only when a real (non-empty) copy already exists — a stale empty
+      // file (e.g. created by an old openFile('read') bug) must be overwritten.
+      let existing = null;
       try {
-        await fs.createDirectory(cur);
+        existing = await fs.stat(f.storePath);
       } catch {
-        // already exists
+        // missing directory tree or other FS error — rewrite below
       }
-    }
-    const file = await fs.openFile(f.storePath, 'write');
-    try {
-      await file.write(0, data);
+      if (existing && existing.kind === 'file' && existing.size > 0) continue;
+      const res = await fetch(f.url);
+      if (!res.ok) {
+        console.warn(`[specter-core] builtin fetch failed ${f.url}: ${res.status}`);
+        continue;
+      }
+      const data = new Uint8Array(await res.arrayBuffer());
+      const dirs = f.storePath.split('/').slice(0, -1);
+      let cur = '';
+      for (const d of dirs) {
+        cur = cur ? `${cur}/${d}` : d;
+        try {
+          await fs.createDirectory(cur);
+        } catch {
+          // already exists
+        }
+      }
+      const file = await fs.openFile(f.storePath, 'write');
+      try {
+        await file.write(0, data);
+      } finally {
+        await file.close();
+      }
+      console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
     } finally {
-      await file.close();
+      provisionInFlight.delete(f.storePath);
     }
-    console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
   }
 }
 
@@ -122,6 +133,9 @@ export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
 }
 
 export async function ensureBuiltinMusicFiles(fs: FileStore): Promise<void> {
+  // Create the folder up front so the File Explorer quick-access entry and any
+  // guest open dialog resolve even while the music is still being written.
+  await fs.createDirectory('Users/Public/Music').catch(() => {});
   await provisionFiles(fs, BUILTIN_MUSIC_FILES);
 }
 
@@ -130,4 +144,26 @@ export async function ensureBuiltinImageFiles(fs: FileStore): Promise<void> {
   // resolves even when no default images are bundled yet.
   await fs.createDirectory('Users/Public/Pictures').catch(() => {});
   await provisionFiles(fs, BUILTIN_IMAGE_FILES);
+}
+
+/**
+ * Provision all bundled files (system tools, music, images) in the background.
+ * Called AFTER the desktop mounts so a cold boot is never blocked by the
+ * ~40 MB of fetch+write. Errors are logged, never thrown.
+ *
+ * Order matters: system tools first (guest apps such as notepad/cmd need them
+ * to launch), then multimedia. If the user opens a guest app before this
+ * finishes, launchGuestWindow/launchGuestConsole re-ensure the win files
+ * lazily, so nothing breaks.
+ */
+export async function provisionBundledFilesInBackground(fs: FileStore): Promise<void> {
+  await ensureBuiltinWinFiles(fs)
+    .then(() => console.warn('[specter-core] builtin win files ready'))
+    .catch((err) => console.warn('[specter-core] builtin win files failed:', err));
+  await ensureBuiltinMusicFiles(fs)
+    .then(() => console.warn('[specter-core] builtin music files ready'))
+    .catch((err) => console.warn('[specter-core] builtin music files failed:', err));
+  await ensureBuiltinImageFiles(fs)
+    .then(() => console.warn('[specter-core] builtin image files ready'))
+    .catch((err) => console.warn('[specter-core] builtin image files failed:', err));
 }

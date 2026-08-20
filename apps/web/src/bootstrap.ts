@@ -3,7 +3,7 @@ import { HostLayerPlugin } from '@specter-core/host';
 import { BridgeLayerPlugin } from '@specter-core/bridges';
 import { CoreLayerPlugin } from '@specter-core/core';
 import { DriverLayerPlugin } from '@specter-core/drivers';
-import { UiLayerPlugin, ensureBuiltinImageFiles, ensureBuiltinMusicFiles, ensureBuiltinWinFiles } from '@specter-core/ui';
+import { UiLayerPlugin, provisionBundledFilesInBackground } from '@specter-core/ui';
 import { tokens, type FileStore } from '@specter-core/contracts';
 import type { DesktopController } from '@specter-core/contracts';
 
@@ -60,24 +60,17 @@ export async function bootstrap(container: HTMLElement): Promise<Kernel> {
   await kernel.init();
   await kernel.start();
 
-  // Pre-provision the bundled notepad (+ MUI) into the virtual disk.
-  if (kernel.container.has(tokens.hostFileStore)) {
-    const fs = kernel.container.resolve(tokens.hostFileStore) as FileStore;
-    await ensureBuiltinWinFiles(fs)
-      .then(() => console.warn('[specter-core] builtin win files ready'))
-      .catch((err) => console.warn('[specter-core] builtin win files failed:', err));
-    // Seed the Music folder (Users/Public/Music) with the bundled audio.
-    await ensureBuiltinMusicFiles(fs)
-      .then(() => console.warn('[specter-core] builtin music files ready'))
-      .catch((err) => console.warn('[specter-core] builtin music files failed:', err));
-    // Seed the Pictures folder (Users/Public/Pictures) with the bundled images.
-    await ensureBuiltinImageFiles(fs)
-      .then(() => console.warn('[specter-core] builtin image files ready'))
-      .catch((err) => console.warn('[specter-core] builtin image files failed:', err));
-  }
-
+  // Mount the desktop FIRST — a cold boot must never wait for the ~40 MB of
+  // bundled files (system tools + music + images) to be fetched and written
+  // into OPFS. Provisioning runs in the background afterwards; guest apps
+  // (notepad/cmd) lazily re-ensure the win files if launched before it finishes.
   const desktop = kernel.container.resolve(tokens.uiDesktop) as DesktopController;
   await desktop.mount(container);
+
+  if (kernel.container.has(tokens.hostFileStore)) {
+    const fs = kernel.container.resolve(tokens.hostFileStore) as FileStore;
+    void provisionBundledFilesInBackground(fs);
+  }
 
   return kernel;
 }

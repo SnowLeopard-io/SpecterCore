@@ -33,8 +33,17 @@ At startup, `apps/web/src/bootstrap.ts` copies the files listed in
 - `BUILTIN_IMAGE_FILES` -> `ensureBuiltinImageFiles()`
 - `BUILTIN_WIN_FILES`   -> `ensureBuiltinWinFiles()` (system tools, leave alone)
 
+All three run through `provisionBundledFilesInBackground()`, which the bootstrap
+**fires AFTER the desktop mounts** so a cold boot is never blocked by fetching
+and writing the ~40 MB of bundled content. On a first visit the Music/Pictures
+folders may briefly appear empty while the background provisioning fills them;
+navigate away and back (or hit Refresh) to see the latest files. Guest apps
+(notepad/cmd) lazily re-ensure the win files if launched before provisioning
+finishes.
+
 The provisioning is **idempotent**: a file is only copied when it is missing or
-empty on the virtual disk. See `provisionFiles()` in `builtin-win.ts`.
+empty on the virtual disk. Concurrent provisions of the same path are deduped
+(`provisionInFlight`). See `provisionFiles()` in `builtin-win.ts`.
 
 ## Adding a new song
 
