@@ -90,6 +90,15 @@ async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePa
     if (provisionInFlight.has(f.storePath)) continue;
     provisionInFlight.add(f.storePath);
     try {
+      // Ensure the parent directory tree exists before any fetch, so built-in
+      // folders (Pictures/Music/etc.) are present even when a bundled resource
+      // is missing or fails to download (e.g. an outdated deployment).
+      const dirs = f.storePath.split('/').slice(0, -1);
+      let cur = '';
+      for (const d of dirs) {
+        cur = cur ? `${cur}/${d}` : d;
+        await fs.createDirectory(cur).catch(() => {});
+      }
       // Skip only when a real (non-empty) copy already exists — a stale empty
       // file (e.g. created by an old openFile('read') bug) must be overwritten.
       let existing = null;
@@ -105,16 +114,6 @@ async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePa
         continue;
       }
       const data = new Uint8Array(await res.arrayBuffer());
-      const dirs = f.storePath.split('/').slice(0, -1);
-      let cur = '';
-      for (const d of dirs) {
-        cur = cur ? `${cur}/${d}` : d;
-        try {
-          await fs.createDirectory(cur);
-        } catch {
-          // already exists
-        }
-      }
       const file = await fs.openFile(f.storePath, 'write');
       try {
         await file.write(0, data);
