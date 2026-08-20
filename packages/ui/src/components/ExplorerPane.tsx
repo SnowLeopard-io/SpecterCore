@@ -54,6 +54,8 @@ export function typeOf(name: string): string {
 
 const QUICK_ACCESS: ReadonlyArray<{ label: string; path: string; icon: string }> = [
   { label: 'Desktop', path: 'Desktop', icon: 'icons/folder.svg' },
+  { label: 'Music', path: 'Users/Public/Music', icon: 'icons/audio-file.svg' },
+  { label: 'Pictures', path: 'Users/Public/Pictures', icon: 'icons/image-file.svg' },
   { label: 'Users', path: 'Users', icon: 'icons/folder.svg' },
   { label: 'Windows', path: 'Windows', icon: 'icons/folder.svg' },
 ];

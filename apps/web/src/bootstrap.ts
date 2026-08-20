@@ -3,7 +3,7 @@ import { HostLayerPlugin } from '@specter-core/host';
 import { BridgeLayerPlugin } from '@specter-core/bridges';
 import { CoreLayerPlugin } from '@specter-core/core';
 import { DriverLayerPlugin } from '@specter-core/drivers';
-import { UiLayerPlugin, ensureBuiltinWinFiles } from '@specter-core/ui';
+import { UiLayerPlugin, ensureBuiltinImageFiles, ensureBuiltinMusicFiles, ensureBuiltinWinFiles } from '@specter-core/ui';
 import { tokens, type FileStore } from '@specter-core/contracts';
 import type { DesktopController } from '@specter-core/contracts';
 
@@ -66,6 +66,14 @@ export async function bootstrap(container: HTMLElement): Promise<Kernel> {
     await ensureBuiltinWinFiles(fs)
       .then(() => console.warn('[specter-core] builtin win files ready'))
       .catch((err) => console.warn('[specter-core] builtin win files failed:', err));
+    // Seed the Music folder (Users/Public/Music) with the bundled audio.
+    await ensureBuiltinMusicFiles(fs)
+      .then(() => console.warn('[specter-core] builtin music files ready'))
+      .catch((err) => console.warn('[specter-core] builtin music files failed:', err));
+    // Seed the Pictures folder (Users/Public/Pictures) with the bundled images.
+    await ensureBuiltinImageFiles(fs)
+      .then(() => console.warn('[specter-core] builtin image files ready'))
+      .catch((err) => console.warn('[specter-core] builtin image files failed:', err));
   }
 
   const desktop = kernel.container.resolve(tokens.uiDesktop) as DesktopController;

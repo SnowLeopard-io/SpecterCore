@@ -30,9 +30,58 @@ export const BUILTIN_WIN_FILES: Array<{ url: string; storePath: string }> = [
   { url: 'win/Fonts/consola.ttf', storePath: 'Windows/Fonts/consola.ttf' },
 ];
 
+/**
+ * Bundled music seeded into the virtual disk's Music folder so the Audio
+ * Player app has real playable content out of the box.
+ *
+ * Source files live under apps/web/public/media/music/. Add your own songs by
+ * dropping the file into that folder and appending one entry here:
+ *
+ *   { url: 'media/music/my-song.mp3', storePath: 'Users/Public/Music/my-song.mp3' },
+ *
+ * The Audio Player opens any audio file via the file association in
+ * @specter-core/shared (mp3/wav/ogg/flac/aac/m4a -> audio-player).
+ *
+ * See apps/web/public/media/README.md for the full guide on extending the
+ * default multimedia content (music / images / videos).
+ */
+export const BUILTIN_MUSIC_FILES: Array<{ url: string; storePath: string }> = [
+  { url: 'media/music/Dream It Possible.mp3', storePath: 'Users/Public/Music/Dream It Possible.mp3' },
+  { url: 'media/music/Over the Horizon.mp3', storePath: 'Users/Public/Music/Over the Horizon.mp3' },
+  { url: 'media/music/We Are The Brave.mp3', storePath: 'Users/Public/Music/We Are The Brave.mp3' },
+  { url: 'media/music/Windows95.mp3', storePath: 'Users/Public/Music/Windows95.mp3' },
+];
+
+/**
+ * Bundled images seeded into the virtual disk's Pictures folder so the Photos
+ * app has real content out of the box. Drop images into
+ * apps/web/public/media/images/ and append one entry here:
+ *
+ *   { url: 'media/images/my-photo.jpg', storePath: 'Users/Public/Pictures/my-photo.jpg' },
+ *
+ * The Photos app opens any image via the file association in @specter-core/shared
+ * (png/jpg/jpeg/gif/bmp/webp/ico -> image-viewer).
+ *
+ * See apps/web/public/media/README.md for the full guide.
+ */
+
+/** Expand a contiguous `NN.jpg` sequence (01..14) into builtin image entries. */
+function imageRange(from: number, to: number): Array<{ url: string; storePath: string }> {
+  const out: Array<{ url: string; storePath: string }> = [];
+  for (let i = from; i <= to; i++) {
+    const name = `${String(i).padStart(2, '0')}.jpg`;
+    out.push({ url: `media/images/${name}`, storePath: `Users/Public/Pictures/${name}` });
+  }
+  return out;
+}
+
+export const BUILTIN_IMAGE_FILES: Array<{ url: string; storePath: string }> = [
+  ...imageRange(1, 14),
+];
+
 /** Idempotent: writes each bundled file when missing/empty (fetch + write). */
-export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
-  for (const f of BUILTIN_WIN_FILES) {
+async function provisionFiles(fs: FileStore, files: Array<{ url: string; storePath: string }>): Promise<void> {
+  for (const f of files) {
     // Skip only when a real (non-empty) copy already exists — a stale empty
     // file (e.g. created by an old openFile('read') bug) must be overwritten.
     let existing = null;
@@ -66,4 +115,19 @@ export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
     }
     console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
   }
+}
+
+export async function ensureBuiltinWinFiles(fs: FileStore): Promise<void> {
+  await provisionFiles(fs, BUILTIN_WIN_FILES);
+}
+
+export async function ensureBuiltinMusicFiles(fs: FileStore): Promise<void> {
+  await provisionFiles(fs, BUILTIN_MUSIC_FILES);
+}
+
+export async function ensureBuiltinImageFiles(fs: FileStore): Promise<void> {
+  // Always create the Pictures folder so the File Explorer quick-access entry
+  // resolves even when no default images are bundled yet.
+  await fs.createDirectory('Users/Public/Pictures').catch(() => {});
+  await provisionFiles(fs, BUILTIN_IMAGE_FILES);
 }
