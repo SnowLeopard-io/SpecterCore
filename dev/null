@@ -1,149 +1,58 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { MemoryFileStore } from "../packages/host/src/memory-store";
-import { FileSystemBridgeImpl } from "@specter-core/bridges";
-import {
-  ApiInterceptorImpl,
-  GuestProcessRunner,
-  JitEngineImpl,
-  PeLoaderImpl,
-  registerDefaultHandlers,
-  WasmRuntimeImpl
-} from "@specter-core/core";
-class LoggingInterceptor extends ApiInterceptorImpl {
-  rt;
-  constructor(host, rt) {
-    super(host);
-    this.rt = rt;
-  }
-  async dispatch(ctx) {
-    const result = await super.dispatch(ctx);
-    if (/FindFirstFile|FindNextFile|WriteConsole|ReadConsole|GetFileAttributes|listDir/i.test(ctx.proc)) {
-      const args = ctx.rawArgs.slice(0, 5).map((a) => `0x${(a >>> 0).toString(16)}`);
-      console.error(`[api] ${ctx.module}!${ctx.proc}(${args.join(", ")}) -> 0x${(result.returnValue >>> 0).toString(16)}`);
-    }
-    return result;
-  }
-}
-async function seed(store, path, data) {
-  const f = await store.openFile(path, "create");
-  await f.write(0, data);
-  await f.close();
-}
-async function main() {
-  const file = resolve(process.argv[2] ?? "C:/Windows/SysWOW64/cmd.exe");
-  const cwd = process.argv[3] ?? "C:\\Windows";
-  const image = new Uint8Array(await readFile(file));
-  const modulePath = "C:/Windows/SysWOW64/cmd.exe";
-  const store = new MemoryFileStore("C", 2 * 1024 * 1024 * 1024);
-  await store.createDirectory("Windows");
-  await store.createDirectory("Windows/SysWOW64");
-  await store.createDirectory("Windows/SysWOW64/en-US");
-  await store.createDirectory("Windows/SysWOW64/zh-CN");
-  await seed(store, "Windows/SysWOW64/cmd.exe", image);
-  for (const lang of ["en-US", "zh-CN"]) {
-    if (process.env.BK_NO_MUI === "1") break;
+const BUILTIN_WIN_FILES = [
+  { url: "/win/notepad.exe", storePath: "Windows/SysWOW64/notepad.exe" },
+  { url: "/win/en-US/notepad.exe.mui", storePath: "Windows/SysWOW64/en-US/notepad.exe.mui" },
+  { url: "/win/zh-CN/notepad.exe.mui", storePath: "Windows/SysWOW64/zh-CN/notepad.exe.mui" },
+  // Real cmd.exe (+ MUI) so the desktop "Command Prompt" app runs the actual
+  // guest binary instead of a JS reimplementation (see launchGuestConsole).
+  { url: "/win/cmd.exe", storePath: "Windows/SysWOW64/cmd.exe" },
+  { url: "/win/en-US/cmd.exe.mui", storePath: "Windows/SysWOW64/en-US/cmd.exe.mui" },
+  { url: "/win/zh-CN/cmd.exe.mui", storePath: "Windows/SysWOW64/zh-CN/cmd.exe.mui" },
+  // Real files copied from the host C: drive so the virtual disk (and the
+  // file explorer / notepad open dialog) has genuine content by default.
+  { url: "/win/win.ini", storePath: "Windows/win.ini" },
+  { url: "/win/hosts", storePath: "Windows/System32/drivers/etc/hosts" },
+  { url: "/win/readme.txt", storePath: "Users/Public/Documents/readme.txt" },
+  // A handful of real Windows system fonts (small subset; copied from the
+  // host at build time) so guest apps that load fonts via AddFontResource/
+  // GDI have real glyph data instead of broken placeholder TTF stubs.
+  { url: "/win/Fonts/arial.ttf", storePath: "Windows/Fonts/arial.ttf" },
+  { url: "/win/Fonts/arialbd.ttf", storePath: "Windows/Fonts/arialbd.ttf" },
+  { url: "/win/Fonts/tahoma.ttf", storePath: "Windows/Fonts/tahoma.ttf" },
+  { url: "/win/Fonts/consola.ttf", storePath: "Windows/Fonts/consola.ttf" }
+];
+async function ensureBuiltinWinFiles(fs) {
+  for (const f of BUILTIN_WIN_FILES) {
+    let existing = null;
     try {
-      const mui = new Uint8Array(await readFile(`C:/Windows/System32/${lang}/cmd.exe.mui`));
-      await seed(store, `Windows/SysWOW64/${lang}/cmd.exe.mui`, mui);
+      existing = await fs.stat(f.storePath);
     } catch {
     }
-  }
-  const runtime = new WasmRuntimeImpl();
-  const host = {
-    memory: {
-      read: (address, length) => runtime.readBytes(address, length),
-      write: (address, data) => runtime.writeBytes(address, data)
-    },
-    fs: new FileSystemBridgeImpl(store)
-  };
-  const interceptor = new LoggingInterceptor(host, runtime);
-  registerDefaultHandlers(interceptor);
-  const runner = new GuestProcessRunner(
-    runtime,
-    new JitEngineImpl(runtime),
-    new PeLoaderImpl(),
-    interceptor
-  );
-  const probes = [
-    {
-      eip: 4383527,
-      fn: (rt) => {
-        const rd32 = (a) => {
-          const b = rt.readBytes(a >>> 0, 4);
-          return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
-        };
-        const ecx = rt.getReg("ecx") >>> 0;
-        const esp = rt.getReg("esp") >>> 0;
-        const retAddr = rd32(esp) >>> 0;
-        if (retAddr === 4394578 || retAddr === 4217682) {
-          const bufPtr = rd32(ecx + 16) >>> 0;
-          let actualLen = 0;
-          for (let i = 0; i < 300; i++) {
-            const ch = rd32(bufPtr + i * 2) & 65535;
-            if (ch === 0) break;
-            actualLen++;
-          }
-          const numSpaces = retAddr === 4394578 ? 4 : 2;
-          const space = new Uint8Array(2);
-          new DataView(space.buffer).setUint16(0, 32, true);
-          for (let i = 0; i < numSpaces; i++) rt.writeBytes(bufPtr + (actualLen + i) * 2, space);
-          rt.writeBytes(bufPtr + (actualLen + numSpaces) * 2, new Uint8Array(2));
-          const len = new Uint8Array(4);
-          new DataView(len.buffer).setUint32(0, actualLen + numSpaces, true);
-          rt.writeBytes(ecx + 8, len);
-        }
-      }
-    },
-    {
-      eip: 4396980,
-      fn: (rt) => {
-        const ebp = rt.getReg("ebp") >>> 0;
-        const b = new Uint8Array(4);
-        new DataView(b.buffer).setUint32(0, 1, true);
-        rt.writeBytes(ebp - 216 >>> 0, b);
-      }
+    if (existing && existing.kind === "file" && existing.size > 0) continue;
+    const res = await fetch(f.url);
+    if (!res.ok) {
+      console.warn(`[specter-core] builtin fetch failed ${f.url}: ${res.status}`);
+      continue;
     }
-  ];
-  setTimeout(() => runner.postInput("dir C:\\Windows\r\n"), 2e3);
-  setTimeout(() => runner.postInput("exit\r\n"), 4e3);
-  let out = "";
-  const result = await runner.run(image, {
-    createEngine: (mode) => new JitEngineImpl(runtime, mode),
-    modulePath,
-    commandLine: process.env.BK_ARGS ?? "",
-    interactive: true,
-    cwd,
-    patches: [{ va: 4316832, bytes: [195] }],
-    probes: process.env.BK_NO_PROBES === "1" ? void 0 : probes,
-    readFile: async (p) => {
-      const segs = p.split(/[\\/]/).filter(Boolean);
-      if (segs.length && /^[A-Za-z]:$/.test(segs[0])) segs.shift();
-      const sp = segs.join("/");
+    const data = new Uint8Array(await res.arrayBuffer());
+    const dirs = f.storePath.split("/").slice(0, -1);
+    let cur = "";
+    for (const d of dirs) {
+      cur = cur ? `${cur}/${d}` : d;
       try {
-        const f = await store.openFile(sp, "read");
-        const size = await f.size();
-        const data = await f.read(0, size);
-        await f.close();
-        return data;
+        await fs.createDirectory(cur);
       } catch {
-        return null;
       }
-    },
-    onOutput: (bytes) => {
-      out += new TextDecoder("utf-8").decode(bytes);
-      process.stdout.write(Buffer.from(bytes));
     }
-  });
-  console.error(`
-[diag] exitCode=${result.exitCode}`);
-  const lastSeg = cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
-  const printed = out.replace(/\0/g, "");
-  const ok = printed.includes(cwd) || printed.includes(cwd.replace(/\\/g, "/")) || printed.includes(lastSeg);
-  console.error(`[diag] cwd check (${cwd}) ${ok ? "PASS" : "FAIL"}`);
-  process.exit(ok ? 0 : 1);
+    const file = await fs.openFile(f.storePath, "write");
+    try {
+      await file.write(0, data);
+    } finally {
+      await file.close();
+    }
+    console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
+  }
 }
-main().catch((err) => {
-  console.error(err);
-  process.exit(2);
-});
+export {
+  BUILTIN_WIN_FILES,
+  ensureBuiltinWinFiles
+};

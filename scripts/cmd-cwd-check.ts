@@ -22,16 +22,31 @@ import {
 } from '@specter-core/core';
 
 class LoggingInterceptor extends ApiInterceptorImpl {
+  private readonly memHost: ApiHost;
   private readonly rt: WasmRuntimeImpl;
   constructor(host: ApiHost, rt: WasmRuntimeImpl) {
     super(host);
+    this.memHost = host;
     this.rt = rt;
   }
   override async dispatch(ctx: ApiCallContext): Promise<ApiResult> {
     const result = await super.dispatch(ctx);
-    if (/FindFirstFile|FindNextFile|WriteConsole|ReadConsole|GetFileAttributes|listDir/i.test(ctx.proc)) {
+    if (/FindFirstFile|FindNextFile|WriteConsole|ReadConsole|GetFileAttributes|CurrentDirectory|FullPathName|FormatMessage|GetLastError/i.test(ctx.proc)) {
       const args = ctx.rawArgs.slice(0, 5).map((a) => `0x${(a >>> 0).toString(16)}`);
-      console.error(`[api] ${ctx.module}!${ctx.proc}(${args.join(', ')}) -> 0x${(result.returnValue >>> 0).toString(16)}`);
+      let extra = '';
+      if (/FindFirstFile|FullPathName/i.test(ctx.proc) && ctx.rawArgs[0]) {
+        try {
+          const raw = this.memHost.memory.read(ctx.rawArgs[0] >>> 0, 64);
+          let s = '';
+          for (let i = 0; i + 1 < raw.byteLength; i += 2) {
+            const c = raw[i] | (raw[i + 1] << 8);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          extra = ` path=${JSON.stringify(s)}`;
+        } catch {}
+      }
+      console.error(`[api] ${ctx.module}!${ctx.proc}(${args.join(', ')}) -> 0x${(result.returnValue >>> 0).toString(16)}${result.errorCode ? ` err=${result.errorCode}` : ''}${extra}`);
     }
     return result;
   }
@@ -128,7 +143,8 @@ async function main(): Promise<void> {
     },
   ];
 
-  setTimeout(() => runner.postInput('dir C:\\Windows\r\n'), 2000);
+  setTimeout(() => runner.postInput('cd Windows\r\n'), 2000);
+  setTimeout(() => runner.postInput('cd\r\n'), 2500);
   setTimeout(() => runner.postInput('exit\r\n'), 4000);
 
   let out = '';

@@ -21,6 +21,13 @@ export const BUILTIN_WIN_FILES: Array<{ url: string; storePath: string }> = [
   { url: '/win/win.ini', storePath: 'Windows/win.ini' },
   { url: '/win/hosts', storePath: 'Windows/System32/drivers/etc/hosts' },
   { url: '/win/readme.txt', storePath: 'Users/Public/Documents/readme.txt' },
+  // A handful of real Windows system fonts (small subset; copied from the
+  // host at build time) so guest apps that load fonts via AddFontResource/
+  // GDI have real glyph data instead of broken placeholder TTF stubs.
+  { url: '/win/Fonts/arial.ttf', storePath: 'Windows/Fonts/arial.ttf' },
+  { url: '/win/Fonts/arialbd.ttf', storePath: 'Windows/Fonts/arialbd.ttf' },
+  { url: '/win/Fonts/tahoma.ttf', storePath: 'Windows/Fonts/tahoma.ttf' },
+  { url: '/win/Fonts/consola.ttf', storePath: 'Windows/Fonts/consola.ttf' },
 ];
 
 /** Idempotent: writes each bundled file when missing/empty (fetch + write). */

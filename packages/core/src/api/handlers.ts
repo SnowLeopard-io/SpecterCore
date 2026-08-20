@@ -15,6 +15,21 @@ function fail(errorCode: number): ApiResult {
 }
 
 /**
+ * Stable 32-bit volume serial derived from the root path name. Real Windows
+ * derives it from volume creation time/format info; here we hash the path so
+ * the same drive always reports the same serial and cmd's "%04X-%04X"
+ * formatting shows something other than the placeholder.
+ */
+function volumeSerial(rootPath: string): number {
+  let h = 5381 >>> 0;
+  for (let i = 0; i < rootPath.length; i++) {
+    h = (((h << 5) + h) ^ rootPath.charCodeAt(i)) >>> 0;
+  }
+  // Fold to 16 bits per half so the printed "HHHH-HHHH" stays short.
+  return ((h ^ (h >>> 16)) & 0xffff) | (((h >>> 16) ^ (h & 0xffff)) << 16);
+}
+
+/**
  * Minimal but correct __stdio_common_vswprintf for cmd.exe's formatting.
  *
  * cmd.exe formats every `dir` listing row through this CRT universal formatter
@@ -268,9 +283,16 @@ function memWStr(host: ApiHost, address: number, maxChars = 2048): string {
 
 /** Splits 'C:\\Windows\\*.txt' into { dir: 'C:\\Windows', pattern: '*.txt' }. */
 function splitFindPattern(path: string): { dir: string; pattern: string } {
-  const idx = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
-  if (idx === -1) return { dir: '', pattern: path };
-  return { dir: path.slice(0, idx), pattern: path.slice(idx + 1) };
+  // Normalize trailing separators: "C:\Windows\" -> "C:\Windows" (cmd's `cd`
+  // probes the target dir itself via FindFirstFileW with a trailing backslash;
+  // an empty pattern after the last separator would match nothing -> err 18).
+  let p = path.replace(/[\\/]+$/, '');
+  // Bare drive: "C:" enumerates the drive root (match everything).
+  if (/^[A-Za-z]:$/.test(p)) return { dir: '', pattern: '*' };
+  if (p === '') return { dir: '', pattern: '*' };
+  const idx = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
+  if (idx === -1) return { dir: '', pattern: p };
+  return { dir: p.slice(0, idx), pattern: p.slice(idx + 1) };
 }
 
 /** Writes a WIN32_FIND_DATAW record (592 bytes) from a bridge FindData. */
@@ -694,6 +716,7 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     // 0 return (default handler) sets ERROR_CALL_NOT_IMPLEMENTED and cmd
     // aborts the dir command with exit code 1 before printing anything.
     GetVolumeInformationW: (ctx, host) => {
+      const root = memWStr(host, raw(ctx, 0)) ?? '';
       const nameBuf = raw(ctx, 1);
       const nameCap = raw(ctx, 2);
       const serialBuf = raw(ctx, 3);
@@ -711,10 +734,10 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
         }
         host.memory.write(addr, w);
       };
-      writeW(nameBuf, nameCap, ''); // empty label -> "has no label"
+      writeW(nameBuf, nameCap, 'Specter FS'); // virtual-disk label
       if (serialBuf) {
         const w = new Uint8Array(4);
-        new DataView(w.buffer).setUint32(0, 0x1234abcd, true);
+        new DataView(w.buffer).setUint32(0, volumeSerial(root), true);
         host.memory.write(serialBuf, w);
       }
       if (maxLenBuf) {
@@ -731,6 +754,7 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       return ok(1);
     },
     GetVolumeInformationA: (ctx, host) => {
+      const root = memCStr(host, raw(ctx, 0)) ?? '';
       const nameBuf = raw(ctx, 1);
       const nameCap = raw(ctx, 2);
       const serialBuf = raw(ctx, 3);
@@ -745,10 +769,10 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
         for (let i = 0; i < n; i++) w[i] = s.charCodeAt(i) & 0xff;
         host.memory.write(addr, w);
       };
-      writeA(nameBuf, nameCap, '');
+      writeA(nameBuf, nameCap, 'Specter FS');
       if (serialBuf) {
         const w = new Uint8Array(4);
-        new DataView(w.buffer).setUint32(0, 0x1234abcd, true);
+        new DataView(w.buffer).setUint32(0, volumeSerial(root), true);
         host.memory.write(serialBuf, w);
       }
       if (maxLenBuf) {
@@ -764,6 +788,20 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       writeA(fsBuf, fsCap, 'NTFS');
       return ok(1);
     },
+    // GetDriveTypeW/A(rootPath): cmd.exe's `cd`/`pushd` validate the drive letter
+    // first — a 0 (DRIVE_UNKNOWN) makes cd fail with ERROR_INVALID_DRIVE (15).
+    // The virtual disk is always mounted as C:, so any drive-lettered root is a
+    // fixed disk; empty/invalid roots are unknown.
+    GetDriveTypeW: (ctx, host) => {
+      const root = memWStr(host, raw(ctx, 0)) ?? '';
+      return ok(/^[A-Za-z]:/.test(root.trim()) ? 3 : 0); // DRIVE_FIXED=3
+    },
+    GetDriveTypeA: (ctx, host) => {
+      const root = memCStr(host, raw(ctx, 0)) ?? '';
+      return ok(/^[A-Za-z]:/.test(root.trim()) ? 3 : 0); // DRIVE_FIXED=3
+    },
+    // GetLogicalDrives: the virtual disk mounts drive C: -> bitmask 0x4.
+    GetLogicalDrives: () => ok(0x4),
     // cmd.exe opens its own thread during console init; a NULL handle aborts.
     OpenThread: () => ok(0x5001),
     GetExitCodeThread: () => ok(0),

@@ -1338,7 +1338,21 @@ export class GuestProcessRunner {
       const cap = ctx.rawArgs[1] ?? 0;
       const buf = ctx.rawArgs[2] ?? 0;
       const filePart = ctx.rawArgs[3] ?? 0;
-      const absolute = /^[A-Za-z]:[\\/]/.test(input) ? input : `${this.cwd.replace(/[\\/]$/, '')}\\${input}`;
+      // Path resolution per Win32 rules:
+      //   drive-absolute ("C:\...")  -> as-is.
+      //   root-relative ("\foo")       -> prepend current drive (NOT cwd).
+      //   relative ("foo")              -> prepend cwd.
+      let absolute: string;
+      if (/^[A-Za-z]:[\\/]/.test(input)) {
+        absolute = input;
+      } else if (input.startsWith('\\') || input.startsWith('/')) {
+        // Strip leading separators, take the current drive ("C:").
+        const rest = input.replace(/^[\\/]+/, '');
+        const drive = this.cwd.match(/^[A-Za-z]:/) ? this.cwd.slice(0, 2) : 'C:';
+        absolute = rest ? `${drive}\\${rest}` : `${drive}\\`;
+      } else {
+        absolute = `${this.cwd.replace(/[\\/]$/, '')}\\${input}`;
+      }
       if (!buf || !cap) return { returnValue: absolute.length, errorCode: E.NO_ERROR };
       if (absolute.length >= cap) {
         writeW(buf, absolute, cap);
