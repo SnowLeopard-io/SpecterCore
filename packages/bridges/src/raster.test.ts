@@ -14,6 +14,8 @@ import {
 const red: Color = { r: 255, g: 0, b: 0, a: 255 };
 const blue: Color = { r: 0, g: 0, b: 255, a: 255 };
 const black: Color = { r: 0, g: 0, b: 0, a: 255 };
+// GdiSurface 初始背景 = 不透明白（Windows COLOR_WINDOW 默认），未绘制区域断言白。
+const white: Color = { r: 255, g: 255, b: 255, a: 255 };
 const transparentBlack: Color = { r: 0, g: 0, b: 0, a: 0 };
 
 describe('ropIndex（ROP3 32 位码 → 8 位真值表索引）', () => {
@@ -109,8 +111,8 @@ describe('GdiSurface', () => {
     s.fillRect({ x: 2, y: 3, width: 5, height: 4 }, red);
     expect(s.getPixel(2, 3)).toEqual(red);
     expect(s.getPixel(6, 6)).toEqual(red);
-    expect(s.getPixel(1, 3)).toEqual(black);
-    expect(s.getPixel(7, 6)).toEqual(black);
+    expect(s.getPixel(1, 3)).toEqual(white);
+    expect(s.getPixel(7, 6)).toEqual(white);
   });
 
   it('fillRect 带 PATINVERT 执行 XOR（画刷/pattern 语义）', () => {
@@ -127,7 +129,7 @@ describe('GdiSurface', () => {
     expect(s.getPixel(0, 0)).toEqual(blue);
     expect(s.getPixel(2, 2)).toEqual(blue);
     expect(s.getPixel(5, 5)).toEqual(blue);
-    expect(s.getPixel(3, 1)).toEqual(black);
+    expect(s.getPixel(3, 1)).toEqual(white);
   });
 
   it('ellipse 填充中心着色、外部不着色', () => {
@@ -135,14 +137,14 @@ describe('GdiSurface', () => {
     s.ellipse({ x: 2, y: 2, width: 12, height: 12 }, red);
     expect(s.getPixel(8, 8)).toEqual(red); // 中心
     expect(s.getPixel(2, 8)).toEqual(red); // 左边界
-    expect(s.getPixel(1, 8)).toEqual(black); // 外
+    expect(s.getPixel(1, 8)).toEqual(white); // 外
   });
 
   it('frameEllipse 画椭圆边框（中心为空洞）', () => {
     const s = new GdiSurface(20, 20);
     s.frameEllipse({ x: 2, y: 2, width: 12, height: 12 }, red);
     expect(s.getPixel(2, 8)).toEqual(red);
-    expect(s.getPixel(8, 8)).toEqual(black); // 中心不填充
+    expect(s.getPixel(8, 8)).toEqual(white); // 中心不填充
   });
 
   it('polygon 扫描线填充三角形', () => {
@@ -157,7 +159,7 @@ describe('GdiSurface', () => {
     );
     expect(s.getPixel(8, 4)).toEqual(red);
     expect(s.getPixel(8, 10)).toEqual(red);
-    expect(s.getPixel(2, 6)).toEqual(black);
+    expect(s.getPixel(2, 6)).toEqual(white);
   });
 
   it('roundRect 填充圆角矩形', () => {
@@ -165,7 +167,7 @@ describe('GdiSurface', () => {
     s.roundRect({ x: 2, y: 2, width: 12, height: 12 }, 3, 3, red);
     expect(s.getPixel(4, 4)).toEqual(red);
     expect(s.getPixel(12, 12)).toEqual(red);
-    expect(s.getPixel(2, 2)).toEqual(black); // 角被切
+    expect(s.getPixel(2, 2)).toEqual(white); // 角被切
   });
 
   it('frameRect 只画边框', () => {
@@ -173,7 +175,7 @@ describe('GdiSurface', () => {
     s.frameRect({ x: 1, y: 1, width: 6, height: 6 }, red);
     expect(s.getPixel(1, 1)).toEqual(red);
     expect(s.getPixel(6, 6)).toEqual(red);
-    expect(s.getPixel(3, 3)).toEqual(black); // 中心空洞
+    expect(s.getPixel(3, 3)).toEqual(white); // 中心空洞
   });
 
   it('blit SRCCOPY 复制整块', () => {
@@ -187,7 +189,7 @@ describe('GdiSurface', () => {
       Rop3.SRCCOPY,
     );
     expect(b.getPixel(5, 5)).toEqual(red);
-    expect(b.getPixel(0, 0)).toEqual(black);
+    expect(b.getPixel(0, 0)).toEqual(white);
   });
 
   it('blit SRCINVERT = 目标 XOR 源', () => {
@@ -228,7 +230,7 @@ describe('GdiSurface', () => {
       }
     }
     expect(s.getPixel(1, 1)).toEqual(red);
-    expect(s.getPixel(5, 5)).toEqual(black);
+    expect(s.getPixel(5, 5)).toEqual(white);
   });
 
   it('clip 矩形裁剪：只画裁剪区内', () => {
@@ -236,8 +238,8 @@ describe('GdiSurface', () => {
     s.clip = { type: 'rect', rect: { x: 2, y: 2, width: 6, height: 6 } };
     s.fillRect({ x: 0, y: 0, width: 16, height: 16 }, red);
     expect(s.getPixel(4, 4)).toEqual(red);
-    expect(s.getPixel(1, 1)).toEqual(black);
-    expect(s.getPixel(8, 8)).toEqual(black);
+    expect(s.getPixel(1, 1)).toEqual(white);
+    expect(s.getPixel(8, 8)).toEqual(white);
   });
 
   it('clip 椭圆裁剪', () => {
@@ -245,7 +247,7 @@ describe('GdiSurface', () => {
     s.clip = { type: 'ellipse', rect: { x: 2, y: 2, width: 12, height: 12 } };
     s.fillRect({ x: 0, y: 0, width: 16, height: 16 }, red);
     expect(s.getPixel(8, 8)).toEqual(red); // 椭圆内
-    expect(s.getPixel(2, 2)).toEqual(black); // 角在椭圆外
+    expect(s.getPixel(2, 2)).toEqual(white); // 角在椭圆外
   });
 
   it('clear 清空为指定颜色', () => {
@@ -253,7 +255,7 @@ describe('GdiSurface', () => {
     s.clear(red);
     expect(s.getPixel(3, 3)).toEqual(red);
     s.clear();
-    expect(s.getPixel(3, 3)).toEqual(black);
+    expect(s.getPixel(3, 3)).toEqual(black); // clear() 默认清为黑色
   });
 
   it('toRgba 输出 RGBA 字节序', () => {
