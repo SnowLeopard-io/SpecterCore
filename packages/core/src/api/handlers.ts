@@ -286,7 +286,7 @@ function splitFindPattern(path: string): { dir: string; pattern: string } {
   // Normalize trailing separators: "C:\Windows\" -> "C:\Windows" (cmd's `cd`
   // probes the target dir itself via FindFirstFileW with a trailing backslash;
   // an empty pattern after the last separator would match nothing -> err 18).
-  let p = path.replace(/[\\/]+$/, '');
+  const p = path.replace(/[\\/]+$/, '');
   // Bare drive: "C:" enumerates the drive root (match everything).
   if (/^[A-Za-z]:$/.test(p)) return { dir: '', pattern: '*' };
   if (p === '') return { dir: '', pattern: '*' };

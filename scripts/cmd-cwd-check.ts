@@ -44,7 +44,9 @@ class LoggingInterceptor extends ApiInterceptorImpl {
             s += String.fromCharCode(c);
           }
           extra = ` path=${JSON.stringify(s)}`;
-        } catch {}
+        } catch {
+          // path dump is best-effort; skip on invalid address
+        }
       }
       console.error(`[api] ${ctx.module}!${ctx.proc}(${args.join(', ')}) -> 0x${(result.returnValue >>> 0).toString(16)}${result.errorCode ? ` err=${result.errorCode}` : ''}${extra}`);
     }

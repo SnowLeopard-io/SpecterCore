@@ -2519,7 +2519,6 @@ export class GuestProcessRunner {
    */
   private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64'): void {
     const runtime = this.runtime;
-    const sentinel = this.sehSentinelAddr;
     // Bounds-checked 32-bit guest read (never grows the linear memory).
     const peek = (a: number): number => {
       if (a < 0 || a + 4 > runtime.memory.buffer.byteLength) return 0;

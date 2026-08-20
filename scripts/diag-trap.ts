@@ -1423,13 +1423,13 @@ async function main(): Promise<void> {
           return s;
         };
         // dump the 64-bit value at valPtr (lo, hi) and the fmt string
-        const valLo = valPtr ? rd32(valPtr) : 0;
-        const valHi = valPtr ? rd32(valPtr + 4) : 0;
-        const fmtStr = readW(rt.getReg('edx') >>> 0);
+        const _valLo = valPtr ? rd32(valPtr) : 0;
+        const _valHi = valPtr ? rd32(valPtr + 4) : 0;
+        const _fmtStr = readW(rt.getReg('edx') >>> 0);
         // dump obj fields
         const obj = rt.getReg('ecx') >>> 0;
         const o8 = obj ? rd32(obj + 8) : 0;
-        const oC = obj ? rd32(obj + 0xc) : 0;
+        const _oC = obj ? rd32(obj + 0xc) : 0;
         const o10 = obj ? rd32(obj + 0x10) : 0;
         const retAddr = rd32(rt.getReg('esp') >>> 0) >>> 0;
         // Also dump current buffer content and savedLen
