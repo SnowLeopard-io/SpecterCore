@@ -91,6 +91,12 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getcurrentprocessid': 0,
   'getcurrentthreadid': 0,
   'getsysteminfo': 1,
+  // GetNativeSystemInfo(LPSYSTEM_INFO) — 1 stdcall arg (ret 4). Resolved via
+  // GetProcAddress/delay-load by 32-bit installers; a missing argCount makes
+  // the dynamic stub `ret 0`, leaking 4 bytes per call and drifting the
+  // caller's frame so its `ret` pops a stale slot (VSCode Setup ia32: the
+  // .itext dispatch fn's ret popped 0x10100 instead of its real return addr).
+  'getnativesysteminfo': 1,
   'virtualquery': 3,
   'getsystemtime': 1,
   'getlocaltime': 1,

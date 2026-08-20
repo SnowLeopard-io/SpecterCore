@@ -59,12 +59,30 @@ while (va < end) {
   for (const d of decoded.instructions) {
     const i = d.inst;
     const iaddr = d.nextAddress - d.length;
+    const ops: string[] = [];
+    for (const o of [i.dst, i.src, i.target]) {
+      if (!o) continue;
+      if (o.kind === 'reg') ops.push(o.reg);
+      else if (o.kind === 'imm') ops.push(`0x${(o.value >>> 0).toString(16)}`);
+      else if (o.kind === 'rel') ops.push(`0x${((d.nextAddress + o.delta) >>> 0).toString(16)}`);
+      else if (o.kind === 'xmm') ops.push(`xmm${o.reg}`);
+      else if (o.kind === 'mem') {
+        let m = '[';
+        if (o.base) m += o.base;
+        if (o.index) m += `${o.base ? '+' : ''}${o.index}*${o.scale}`;
+        if (o.disp) m += `${o.base || o.index ? (o.disp > 0 ? '+' : '') : ''}${o.disp.toString(16)}`;
+        m += ']';
+        ops.push(m);
+      }
+    }
     let line = `0x${iaddr.toString(16)}  ${i.op}`;
     if (i.rep) line += ' rep';
     if (i.repne) line += ' repne';
     if (i.cond !== undefined) line += ` ${i.cond}`;
-    if ((i.op === 'call' || i.op === 'jmp') && i.disp !== undefined) line += ` rel=${i.disp}`;
+    if (i.vector !== undefined) line += ` vec=${i.vector}`;
+    if (i.popBytes !== undefined) line += ` pop=${i.popBytes}`;
     if (i.size !== undefined) line += ` size=${i.size}`;
+    if (ops.length) line += ` ${ops.join(', ')}`;
     console.log(line);
     va = decoded.endAddress;
   }

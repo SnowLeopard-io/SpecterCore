@@ -88,6 +88,9 @@ async function main(): Promise<void> {
     onStep: (eip, rt) => {
       tail.push(eip);
       if (tail.length > 120) tail.shift();
+      if (eip >= 0x1008000 && eip <= 0x1022100) {
+        console.log(`[t] 0x${eip.toString(16)} rsp=0x${rt.getReg('rsp').toString(16)}`);
+      }
       if (eip === 0x1022092) {
         const rsp = rt.getReg('rsp');
         const words: string[] = [];

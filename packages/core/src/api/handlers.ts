@@ -1098,27 +1098,8 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     },
     GetCommandLineA: () => ok(0),
     GetCommandLineW: () => ok(0),
-    GetSystemInfo: (ctx, host) => {
-      // SYSTEM_INFO (x86, 36 bytes): oemid/arch word pair, page size,
-      // min/max app address, active processor mask, cpu count, cpu type,
-      // allocation granularity, processor level, processor revision.
-      const out = raw(ctx, 0);
-      const w = new Uint8Array(36);
-      const view = new DataView(w.buffer);
-      view.setUint16(0, 0, true); // wProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL
-      view.setUint16(2, 0, true);
-      view.setUint32(4, 4096, true); // dwPageSize
-      view.setUint32(8, 0x10000, true); // lpMinimumApplicationAddress
-      view.setUint32(12, 0x7ffeffff, true); // lpMaximumApplicationAddress
-      view.setUint32(16, 1, true); // dwActiveProcessorMask
-      view.setUint32(20, 1, true); // dwNumberOfProcessors
-      view.setUint32(24, 586, true); // dwProcessorType
-      view.setUint32(28, 65536, true); // dwAllocationGranularity
-      view.setUint16(32, 6, true); // wProcessorLevel
-      view.setUint16(34, 0, true); // wProcessorRevision
-      host.memory.write(out, w);
-      return ok(0);
-    },
+    GetSystemInfo: (ctx, host) => writeSystemInfo(ctx, host),
+    GetNativeSystemInfo: (ctx, host) => writeSystemInfo(ctx, host),
     VirtualQuery: (ctx, host) => {
       // MEMORY_BASIC_INFORMATION (x86, 28 bytes). The whole guest linear
       // memory is one committed, read-write, private region — good enough for
@@ -1436,6 +1417,32 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     },
   };
   interceptor.hookBatch('ucrtbase.dll', ucrtbase);
+}
+
+/**
+ * SYSTEM_INFO (x86, 36 bytes): oemid/arch word pair, page size, min/max app
+ * address, active processor mask, cpu count, cpu type, allocation granularity,
+ * processor level, processor revision. Shared by GetSystemInfo and
+ * GetNativeSystemInfo (32-bit installers query the native one via
+ * GetProcAddress/delay-load).
+ */
+function writeSystemInfo(ctx: ApiCallContext, host: ApiHost): ApiResult {
+  const out = raw(ctx, 0);
+  const w = new Uint8Array(36);
+  const view = new DataView(w.buffer);
+  view.setUint16(0, 0, true); // wProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL
+  view.setUint16(2, 0, true);
+  view.setUint32(4, 4096, true); // dwPageSize
+  view.setUint32(8, 0x10000, true); // lpMinimumApplicationAddress
+  view.setUint32(12, 0x7ffeffff, true); // lpMaximumApplicationAddress
+  view.setUint32(16, 1, true); // dwActiveProcessorMask
+  view.setUint32(20, 1, true); // dwNumberOfProcessors
+  view.setUint32(24, 586, true); // dwProcessorType
+  view.setUint32(28, 65536, true); // dwAllocationGranularity
+  view.setUint16(32, 6, true); // wProcessorLevel
+  view.setUint16(34, 0, true); // wProcessorRevision
+  host.memory.write(out, w);
+  return ok(0);
 }
 
 /** Case-insensitive wide string compare (returns -1/0/1 like wcsicmp). */
