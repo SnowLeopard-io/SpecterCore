@@ -11,32 +11,32 @@ interface TaskbarProps {
 
 const WindowsLogo = (
   <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
-    <rect x="1.5" y="1.5" width="7.5" height="7.5" rx="1.2" fill="currentColor" />
-    <rect x="11" y="1.5" width="7.5" height="7.5" rx="1.2" fill="currentColor" />
-    <rect x="1.5" y="11" width="7.5" height="7.5" rx="1.2" fill="currentColor" />
-    <rect x="11" y="11" width="7.5" height="7.5" rx="1.2" fill="currentColor" />
+    <rect x="1.5" y="1.5" width="7.5" height="7.5" rx="1.5" fill="currentColor" />
+    <rect x="11" y="1.5" width="7.5" height="7.5" rx="1.5" fill="currentColor" />
+    <rect x="1.5" y="11" width="7.5" height="7.5" rx="1.5" fill="currentColor" />
+    <rect x="11" y="11" width="7.5" height="7.5" rx="1.5" fill="currentColor" />
   </svg>
 );
 
 const SearchIcon = (
   <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
-    <circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
-    <line x1="12.5" y1="12.5" x2="17" y2="17" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    <circle cx="8.5" cy="8.5" r="6" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    <line x1="13" y1="13" x2="17.5" y2="17.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
   </svg>
 );
 
 const WifiIcon = (
   <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
-    <path d="M10 14a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z" fill="currentColor" />
-    <path d="M5.5 9.5a6.5 6.5 0 0 1 9 0" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-    <path d="M2.5 6a10 10 0 0 1 15 0" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    <circle cx="10" cy="15" r="1.5" fill="currentColor" />
+    <path d="M6 11a5.5 5.5 0 0 1 8 0" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    <path d="M3 7.5a9.5 9.5 0 0 1 14 0" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
   </svg>
 );
 
 const VolumeIcon = (
   <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
-    <path d="M3 7.5h3l3-3v11l-3-3H3z" fill="currentColor" />
-    <path d="M12 6.5a4.5 4.5 0 0 1 0 7M14 4a7.5 7.5 0 0 1 0 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    <path d="M3 8h3l3-3.5v11L6 12H3z" fill="currentColor" />
+    <path d="M12 7a4.5 4.5 0 0 1 0 6M14 4.5a7.5 7.5 0 0 1 0 11" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
   </svg>
 );
 

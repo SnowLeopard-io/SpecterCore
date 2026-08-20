@@ -1,20 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
   <defs>
-    <linearGradient id="monitor" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="pcScreen" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#5BB8FF"/>
       <stop offset="1" stop-color="#0078D4"/>
     </linearGradient>
-    <linearGradient id="stand" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="pcStand" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#C8C8C8"/>
       <stop offset="1" stop-color="#909090"/>
     </linearGradient>
   </defs>
-  <rect x="6" y="8" width="36" height="24" rx="2" fill="url(#monitor)"/>
-  <rect x="9" y="11" width="30" height="18" rx="1" fill="#E8F4FF"/>
-  <rect x="11" y="14" width="10" height="2" rx="1" fill="#0078D4"/>
-  <rect x="11" y="18" width="16" height="1.5" rx="0.75" fill="#5BB8FF"/>
-  <rect x="11" y="21" width="13" height="1.5" rx="0.75" fill="#5BB8FF"/>
-  <rect x="11" y="24" width="14" height="1.5" rx="0.75" fill="#5BB8FF"/>
-  <path d="M20 32 L28 32 L30 38 L18 38 Z" fill="url(#stand)"/>
-  <rect x="14" y="38" width="20" height="3" rx="1.5" fill="#A0A0A0"/>
+  <rect x="4" y="4" width="40" height="40" rx="7.5" fill="#FFFFFF"/>
+  <rect x="8" y="8" width="32" height="22" rx="2" fill="url(#pcScreen)"/>
+  <rect x="11" y="11" width="26" height="16" rx="1" fill="#FFF" opacity="0.9"/>
+  <rect x="14" y="14" width="8" height="1.5" rx="0.75" fill="#0078D4"/>
+  <rect x="14" y="17.5" width="14" height="1.5" rx="0.75" fill="#5BB8FF" opacity="0.6"/>
+  <rect x="14" y="21" width="11" height="1.5" rx="0.75" fill="#5BB8FF" opacity="0.6"/>
+  <path d="M20 30 L28 30 L30 36 L18 36 Z" fill="url(#pcStand)"/>
+  <rect x="14" y="36" width="20" height="2.5" rx="1.25" fill="#A0A0A0"/>
 </svg>

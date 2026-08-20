@@ -1,14 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
-  <defs>
-    <linearGradient id="pkgBg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#5BB8FF"/>
-      <stop offset="1" stop-color="#0078D4"/>
-    </linearGradient>
-  </defs>
-  <rect x="8" y="14" width="32" height="28" rx="3" fill="url(#pkgBg)"/>
-  <path d="M8 14 Q8 10 12 10 L20 10 L22 14 L36 14 Q40 14 40 18 L40 22 L8 22 Z" fill="#005A9E"/>
-  <path d="M8 14 Q8 10 12 10 L20 10 L22 14 L36 14 Q40 14 40 18 L40 22 L8 22 Z" fill="none" stroke="#003D6B" stroke-width="0.5"/>
-  <rect x="22" y="26" width="4" height="16" fill="#003D6B" opacity="0.3"/>
-  <rect x="14" y="28" width="8" height="8" rx="1" fill="#FFFFFF" opacity="0.2"/>
-  <rect x="26" y="28" width="8" height="8" rx="1" fill="#FFFFFF" opacity="0.2"/>
+  <rect x="4" y="4" width="40" height="40" rx="7.5" fill="#FFFFFF"/>
+  <rect x="8" y="14" width="32" height="26" rx="3" fill="#005A9E"/>
+  <path d="M8 14 Q8 10 12 10 L20 10 L22 14 L36 14 Q40 14 40 18 L40 22 L8 22 Z" fill="#003D6B"/>
+  <rect x="22" y="24" width="4" height="16" fill="#003D6B" opacity="0.3"/>
+  <rect x="14" y="26" width="8" height="8" rx="1" fill="#FFF" opacity="0.15"/>
+  <rect x="26" y="26" width="8" height="8" rx="1" fill="#FFF" opacity="0.15"/>
 </svg>

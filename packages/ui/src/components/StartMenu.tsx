@@ -9,22 +9,16 @@ interface StartMenuProps {
 }
 
 const SearchIcon = (
-  <svg viewBox="0 0 20 20" aria-hidden>
-    <circle cx="8.5" cy="8.5" r="6" fill="none" stroke="currentColor" strokeWidth="2" />
+  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
+    <circle cx="8.5" cy="8.5" r="6" fill="none" stroke="currentColor" strokeWidth="1.8" />
     <line x1="13" y1="13" x2="17.5" y2="17.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
   </svg>
 );
 
 const PowerIcon = (
-  <svg viewBox="0 0 20 20" aria-hidden>
+  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden>
     <path d="M10 2.5v7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    <path
-      d="M5.5 6.5a6.5 6.5 0 1 0 9 0"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-    />
+    <path d="M5.5 6.5a6.5 6.5 0 1 0 9 0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
   </svg>
 );
 

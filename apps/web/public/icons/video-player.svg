@@ -1,19 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
   <defs>
-    <linearGradient id="vidBg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1a1d29"/>
-      <stop offset="1" stop-color="#0d0f15"/>
-    </linearGradient>
-    <linearGradient id="vidAccent" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="vpAccent" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#00B4D8"/>
       <stop offset="1" stop-color="#0077B6"/>
     </linearGradient>
   </defs>
-  <rect x="4" y="4" width="40" height="40" rx="6" fill="url(#vidBg)"/>
-  <rect x="4" y="4" width="40" height="40" rx="6" fill="none" stroke="#00B4D8" stroke-width="1" opacity="0.3"/>
-  <circle cx="24" cy="22" r="12" fill="url(#vidAccent)" opacity="0.9"/>
-  <path d="M20 16 L32 22 L20 28 Z" fill="#FFF"/>
-  <rect x="8" y="38" width="32" height="3" rx="1.5" fill="#00B4D8" opacity="0.4"/>
-  <rect x="8" y="38" width="12" height="3" rx="1.5" fill="#00B4D8"/>
-  <circle cx="34" cy="39.5" r="1" fill="#00B4D8"/>
+  <rect x="4" y="4" width="40" height="40" rx="7.5" fill="#FFFFFF"/>
+  <rect x="4" y="4" width="40" height="40" rx="7.5" fill="none" stroke="#D0D0D0" stroke-width="0.5"/>
+  <rect x="8" y="10" width="32" height="22" rx="3" fill="url(#vpAccent)" opacity="0.9"/>
+  <path d="M20 15 L30 21 L20 27 Z" fill="#FFF"/>
+  <rect x="8" y="35" width="32" height="2.5" rx="1.25" fill="#00B4D8" opacity="0.3"/>
+  <rect x="8" y="35" width="14" height="2.5" rx="1.25" fill="#00B4D8"/>
 </svg>

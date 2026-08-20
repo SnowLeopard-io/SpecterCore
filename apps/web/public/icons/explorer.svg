@@ -1,19 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
   <defs>
-    <linearGradient id="folderBody" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="expFront" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#FFD56B"/>
       <stop offset="1" stop-color="#FFA928"/>
     </linearGradient>
-    <linearGradient id="folderTab" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="expFrontTab" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#FFC940"/>
       <stop offset="1" stop-color="#FF9510"/>
     </linearGradient>
-    <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.3"/>
-      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
-    </linearGradient>
   </defs>
-  <path d="M6 14 Q6 12 8 12 L18 12 L22 15 L40 15 Q42 15 42 17 L42 34 Q42 36 40 36 L8 36 Q6 36 6 34 Z" fill="url(#folderTab)"/>
-  <path d="M6 18 Q6 17 7 17 L42 17 Q42 17 42 18 L42 34 Q42 36 40 36 L8 36 Q6 36 6 34 Z" fill="url(#folderBody)"/>
-  <path d="M6 18 Q6 17 7 17 L42 17 Q42 17 42 18 L42 34 Q42 36 40 36 L8 36 Q6 36 6 34 Z" fill="url(#glass)"/>
+  <rect x="4" y="4" width="40" height="40" rx="7.5" fill="#FFFFFF"/>
+  <path d="M11 16 Q11 13 13 13 L20 13 L24 16 L37 16 Q39 16 39 18 L39 34 Q39 36 37 36 L13 36 Q11 36 11 34 Z" fill="url(#expFrontTab)"/>
+  <path d="M11 19 Q11 17 12 17 L39 17 Q39 17 39 19 L39 34 Q39 36 37 36 L13 36 Q11 36 11 34 Z" fill="url(#expFront)"/>
+  <path d="M11 19 Q11 17 12 17 L39 17 Q39 17 39 19 L39 34 Q39 36 37 36 L13 36 Q11 36 11 34 Z" fill="#FFF" opacity="0.12"/>
 </svg>
