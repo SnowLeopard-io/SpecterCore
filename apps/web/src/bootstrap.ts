@@ -6,6 +6,7 @@ import { DriverLayerPlugin } from '@specter-core/drivers';
 import { UiLayerPlugin, provisionBundledFilesInBackground } from '@specter-core/ui';
 import { tokens, type FileStore } from '@specter-core/contracts';
 import type { DesktopController } from '@specter-core/contracts';
+import { preloadUiResources } from './resource-preload';
 
 /**
  * Bootstraps the whole system: assemble the kernel with one plugin per layer,
@@ -60,6 +61,12 @@ export async function bootstrap(container: HTMLElement): Promise<Kernel> {
   await kernel.init();
   await kernel.start();
 
+  // 开机阶段预加载壁纸/头像/图标到浏览器缓存：进桌面前资源即就绪，
+  // 首屏渲染不再闪烁或跳变。失败仅告警，绝不阻塞启动。
+  setBootHint('Loading desktop resources…');
+  await preloadUiResources();
+  setBootHint('Mounting desktop…');
+
   // Mount the desktop FIRST — a cold boot must never wait for the ~40 MB of
   // bundled files (system tools + music + images) to be fetched and written
   // into OPFS. Provisioning runs in the background afterwards; guest apps
@@ -73,4 +80,10 @@ export async function bootstrap(container: HTMLElement): Promise<Kernel> {
   }
 
   return kernel;
+}
+
+/** Update the boot-splash status line (null-safe no-op when absent). */
+function setBootHint(text: string): void {
+  const hint = document.getElementById('sc-boot-hint');
+  if (hint) hint.textContent = text;
 }
