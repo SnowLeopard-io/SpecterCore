@@ -1,9 +1,32 @@
-# specter-core Windows PE Emulator — Handover (2026-08-20, session 9)
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 10)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
+> Session 9's full handover is preserved below unchanged; this session was CI-only.
 
-## Goal (this session)
+## Session 10 summary — CI fully green (typecheck + lint + test)
+
+**GitHub Actions now passes all three gates for the first time.** Session 9 shipped
+the interactive cmd desktop; this session unblocked CI, which had never run past
+`pnpm install`. Fixed in sequence:
+
+| Gate | Failure | Fix | Commit |
+|---|---|---|---|
+| install | `ERR_PNPM_OUTDATED_LOCKFILE` — `packages/ui` importer missing `@specter-core/bridges` | `pnpm-lock.yaml`: added `link:../bridges` entry (same shape as `apps/web`'s existing entry); deleted `pages.yml` (duplicate of `deploy.yml`, same name/trigger/concurrency) | `e76f464` |
+| typecheck | 6 pre-existing errors in `handlers.ts` `vswprintfImpl` (`f[i]`/`out[k]` possibly-undefined under `noUncheckedIndexedAccess`) | `const ch = f[i] ?? ''`, `isDigit(f[i] ?? '')`, `const conv = f[i] ?? ''`, `(out[k] ?? 0)` guards; also removed deploy.yml's duplicate `Typecheck, lint and test` step (ci.yml runs those on every push) | `2bb9273` |
+| lint | 7 errors: `prefer-const` (`handlers.ts:289 let p`); `no-unused-vars` ×5 (`guest-process.ts sentinel`; `diag-trap.ts valLo/valHi/fmtStr/oC` → `_`-prefixed); `no-empty` (`cmd-cwd-check.ts` catch block) | all fixed; local `eslint .` and `tsc --noEmit` both exit 0 | `d5e9556` |
+| test | 11 failures in `raster.test.ts` — `GdiSurface` constructor fills pixels `0xffffffff` (white) but 14 background assertions expected black | **User decision: keep white** (Windows default `COLOR_WINDOW`; notepad renders white-bg/black-text correctly). Test contract updated: unpainted-background assertions `black` → `white`; the `clear()` no-arg default-black assertion stays black | `6fd919c` |
+
+Decisions locked in this session (do not regress):
+- **Surface background stays WHITE** (`0xffffffff`, `COLOR_WINDOW`). Do not revert the
+  constructor; the test contract now matches it.
+- `clear()` with no args clears to **black** — unchanged, still covered by a test.
+- CI split: `ci.yml` (verify: typecheck+lint+test) / `deploy.yml` (install+build+publish
+  only). No duplicate validation in the deploy path; never re-add `pages.yml`.
+- Local verification loop before pushing: `tsc --noEmit` (exit 0) + `eslint .` (exit 0)
+  + `vitest run` (all green). These three now define "done".
+
+## Goal (this session, preserved from session 9)
 
 Take the session-8 milestone (`cmd /c dir` works headless) and turn it into a REAL
 interactive "Command Prompt" app in the browser desktop, then make `cd`/`dir`/`echo`
@@ -194,8 +217,8 @@ both separators by comparing the last path component).
 - **GS cookie patch still required** for interactive cmd: `0x41dea0 → ret`. Root cause
   (JIT stack-cookie slot overflow in the interactive reader) still unfixed — the same
   family as session 8's Bug18/Bug19.
-- `tsc --noEmit`: 6 pre-existing errors in `handlers.ts` (lines ~82/109/128/220/238/239,
-  `ch`/`conv` possibly-undefined) — untouched by this session; all session-9 files are clean.
+- CI is green as of session 10 (typecheck/lint/test all pass — see Session 10 summary
+  above). Keep `tsc --noEmit` / `eslint .` / `vitest run` at exit 0 before pushing.
 - The old JS `CommandPromptApp.tsx` (JS shell) is unused; kept on disk for reference.
 - `dir` column widths rely on the two probes; if a future cmd build shifts those VAs,
   the probes silently no-op (output stays readable but columns may collapse).
