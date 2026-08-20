@@ -27,6 +27,8 @@ export enum WinError {
   ERROR_INVALID_PARAMETER = 87,
   ERROR_DISK_FULL = 112,
   ERROR_ALREADY_EXISTS = 183,
+  ERROR_FILENAME_EXCED_RANGE = 206,
+  ERROR_CANCELLED = 1223,
   ERROR_NOT_IMPLEMENTED = 120,
   ERROR_OPERATION_ABORTED = 995,
   ERROR_BAD_ARGUMENTS = 160,
@@ -143,6 +145,8 @@ export interface FileSystemBridge {
   readFile(handle: number, bytesToRead: number, filePointer?: number): Promise<ReadFileResult>;
   writeFile(handle: number, data: Uint8Array, filePointer?: number): Promise<WriteFileResult>;
   setFilePointer(handle: number, distance: number, moveMethod: number): Promise<SetFilePointerResult>;
+  /** SetEndOfFile：把文件截断/扩展到当前文件指针位置 */
+  setEndOfFile(handle: number): Promise<WinError>;
   getFileSize(handle: number): Promise<number>;
   getFilePointer(handle: number): number;
   closeHandle(handle: number): Promise<WinError>;

@@ -281,6 +281,18 @@ function memWStr(host: ApiHost, address: number, maxChars = 2048): string {
   return s;
 }
 
+/** Exactly `count` UTF-16 code units at `address` (no NUL scan). */
+function memWStrLen(host: ApiHost, address: number, count: number): string {
+  if (!address || count <= 0) return '';
+  const bytes = host.memory.read(address, count * 2);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let s = '';
+  for (let i = 0; i + 1 < bytes.byteLength && i / 2 < count; i += 2) {
+    s += String.fromCharCode(view.getUint16(i, true));
+  }
+  return s;
+}
+
 /** Splits 'C:\\Windows\\*.txt' into { dir: 'C:\\Windows', pattern: '*.txt' }. */
 function splitFindPattern(path: string): { dir: string; pattern: string } {
   // Normalize trailing separators: "C:\Windows\" -> "C:\Windows" (cmd's `cd`
@@ -544,6 +556,70 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     },
     GetThreadLocale: () => ok(0x409),
     GetUserDefaultLCID: () => ok(0x409),
+    // ANSI code page. notepad's save path calls GetACP + WideCharToMultiByte
+    // to convert the EDIT text into bytes before WriteFile. CP_ACP=65001
+    // (UTF-8) makes the conversion handlers below agree with the wide strings
+    // we store everywhere.
+    GetACP: () => ok(65001),
+    GetOEMCP: () => ok(65001),
+    WideCharToMultiByte: (ctx, host) => {
+      // (CodePage, dwFlags, lpWideCharStr, cchWideChar, lpMultiByteStr,
+      //  cbMultiByte, lpDefaultChar, lpUsedDefaultChar)
+      const widePtr = raw(ctx, 2);
+      const cchWide = raw(ctx, 3) | 0;
+      const mbPtr = raw(ctx, 4);
+      const cbMultiByte = raw(ctx, 5) | 0;
+      // lpUsedDefaultChar is an OUT param: notepad's save flow checks it
+      // after the call to detect conversion failures (chars that fell back to
+      // the default char). Leaving it untouched means whatever was on the
+      // guest stack survives — a stale non-zero value makes notepad believe
+      // the text couldn't be encoded and it aborts the save. Always clear it.
+      const usedDefaultPtr = raw(ctx, 7);
+      if (usedDefaultPtr) host.memory.write(usedDefaultPtr, new Uint8Array(4));
+      // cchWideChar semantics: -1 = NUL-terminated; some callers pass 0 to
+      // mean "scan until NUL" (notepad's save flow). Treat <= 0 as NUL scan.
+      const s = cchWide > 0 ? memWStrLen(host, widePtr, cchWide) : memWStr(host, widePtr, 4096);
+      const bytes = new TextEncoder().encode(s); // UTF-8
+      if (mbPtr === 0 || cbMultiByte === 0) {
+        // Length query: required size. An EXPLICIT cchWideChar (a real char
+        // count, not a NUL scan) converts exactly that many chars and does
+        // NOT append a NUL — the query must not add +1, or the caller
+        // (notepad's write helper 0x410a66) sizes WriteFile one byte too
+        // large and the saved file gains a trailing NUL. NUL-scan mode
+        // (cchWide <= 0) includes the terminator, so +1 applies there.
+        return ok(bytes.byteLength + (cchWide > 0 ? 0 : 1));
+      }
+      // Actual conversion: write up to cbMultiByte bytes (no forced NUL).
+      const n = Math.min(bytes.byteLength, Math.max(0, cbMultiByte));
+      host.memory.write(mbPtr, bytes.subarray(0, n));
+      return ok(n);
+    },
+    MultiByteToWideChar: (ctx, host) => {
+      // (CodePage, dwFlags, lpMultiByteStr, cbMultiByte, lpWideCharStr,
+      //  cchWideChar)
+      const mbPtr = raw(ctx, 2);
+      const cbMultiByte = raw(ctx, 3) | 0;
+      const widePtr = raw(ctx, 4);
+      const cchWide = raw(ctx, 5) | 0;
+      if (!mbPtr) return ok(0);
+      const bytes = host.memory.read(mbPtr, cbMultiByte < 0 ? 4096 : cbMultiByte);
+      const len = cbMultiByte < 0 ? bytes.byteLength : Math.min(cbMultiByte, bytes.byteLength);
+      const s = new TextDecoder('utf-8', { fatal: false }).decode(bytes.subarray(0, len));
+      const chars = [...s]; // UTF-16 code units
+      if (widePtr === 0 || cchWide === 0) {
+        // Length query. NUL-terminated source (cbMultiByte == -1) includes
+        // the terminator in the count; an explicit byte count does not.
+        return ok(chars.length + (cbMultiByte < 0 ? 1 : 0));
+      }
+      const n = Math.min(chars.length, Math.max(0, cchWide));
+      const w = new Uint8Array(n * 2 + 2);
+      for (let i = 0; i < n; i++) {
+        w[i * 2] = chars[i]!.charCodeAt(0) & 0xff;
+        w[i * 2 + 1] = (chars[i]!.charCodeAt(0) >> 8) & 0xff;
+      }
+      host.memory.write(widePtr, w);
+      return ok(n);
+    },
     // FILETIME <-> SYSTEMTIME: cmd formats `dir` row dates/times from the
     // WIN32_FIND_DATAW times. Unhandled, these return 0 + ERROR_NOT_IMPLEMENTED
     // and cmd aborts the dir command before printing rows.
@@ -970,14 +1046,18 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       const path = memWStr(host, raw(ctx, 0));
       if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
       const res = await host.fs.getFileAttributes(path);
-      if (res.error !== E.NO_ERROR) return fail(res.error);
+      // Windows semantics: INVALID_FILE_ATTRIBUTES = -1 on failure. callers
+      // (notepad's save flow, cmd's dir) test `== -1` to detect a missing
+      // path — returning 0 makes them treat a non-existent file as an
+      // existing file with no attribute bits.
+      if (res.error !== E.NO_ERROR) return { returnValue: 0xffffffff, errorCode: res.error };
       return ok(res.attributes);
     },
     GetFileAttributesA: async (ctx, host) => {
       const path = memCStr(host, raw(ctx, 0));
       if (!path) return fail(E.ERROR_FILE_NOT_FOUND);
       const res = await host.fs.getFileAttributes(path);
-      if (res.error !== E.NO_ERROR) return fail(res.error);
+      if (res.error !== E.NO_ERROR) return { returnValue: 0xffffffff, errorCode: res.error };
       return ok(res.attributes);
     },
     GetCommandLineA: () => ok(0),

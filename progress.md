@@ -1,8 +1,133 @@
-# specter-core Windows PE Emulator — Handover (2026-08-20, session 10)
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 11)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
-> Session 9's full handover is preserved below unchanged; this session was CI-only.
+> Session 10's full handover is preserved below unchanged.
+
+## Session 11 summary — notepad Save As (Full comdlg32 dialog fix), IN PROGRESS
+
+**Goal (user decision): implement the FULL comdlg32 fix** — real `GetOpenFileNameW` /
+`GetSaveFileNameW` handlers driven by a host-side virtual-disk dialog, so notepad's
+File > Open and Save As actually work. (The "quick Ctrl+S" fix was explicitly REJECTED
+by the user — do NOT do the commandLine/file-path shortcut.)
+
+**Current status (one paragraph):** The dialog layer is fully wired: comdlg32
+GetOpenFileNameW/A + GetSaveFileNameW/A handlers + OPENFILENAME marshal + a React
+virtual-disk dialog (FileDialogApp) are in place. The headless verifier
+(scripts/notepad-dialog-check.ts) drives a REAL notepad.exe Save As and the flow now
+**advances past every previously-blocking API**: GetSaveFileNameW→TRUE, PathFileExistsW,
+CreateFileW (with GetLastError cleared → 0), EM_GETHANDLE, LocalLock, GetACP,
+WideCharToMultiByte (length query → 24). **But the file write still does not happen**:
+after the WideCharToMultiByte length query notepad jumps straight to SetEndOfFile /
+LocalUnlock / EM_SETMODIFY / CloseHandle — i.e. it thinks the save is done (no error
+MessageBox anymore!) yet **WriteFile is never called**. Disassembly (below) shows
+notepad's internal write helper 0x410a66 bails out early (returns 1, "nothing to write")
+because a stack slot [esp+0x18] is 0. This is the current debugging frontier.
+
+## Changes made this session (all verified: typecheck + lint pass)
+
+| File | Change |
+|---|---|
+| `packages/core/src/pe/mapper.ts` | `X86_API_ARG_COUNT` += `getopenfilenamew/a:1`, `getsavefilenamew/a:1`, `commdlgextendederror:0`, `deletefilew/a:1`, `pathfileexistsw/a:1`, `widechartomultibyte:8`, `multibytetowidechar:6`, `wcsnlen:2`, `setendoffile:1`, `getfileattributesexw/a:3`, `pathfindextensionw:1`, `pathfindfilenamew:1` (stdcall arg counts so dynamic stubs `ret N` correctly) |
+| `packages/contracts/src/bridge/fs.ts` | `WinError` += `ERROR_FILENAME_EXCED_RANGE=206`, `ERROR_CANCELLED=1223` |
+| `packages/core/src/process/guest-process.ts` | `GuestProcessOptions.fileDialog?: (kind, opts: FileDialogOptions) => Promise<string\|null>` + exported `FileDialogOptions`; `installFileDialogs()` (4 comdlg32 handlers + OPENFILENAME 32-bit struct marshal: reads lpstrFile/nMaxFile/lpstrInitialDir/lpstrTitle/lpstrFilter, calls host `fileDialog`, writes path back UTF-16 + nFileOffset/nFileExtension, returns TRUE/FALSE; `CommDlgExtendedError`→ERROR_CANCELLED); CreateFileW success now `setLastError(pid, 0)` (was leaving stale error → notepad aborted save); NEW DeleteFileW/A (notepad deletes target before rewriting; missing → "This function is not supported on this system."); NEW PathFileExistsW/A (shlwapi + kernel32 alias); NEW LocalLock/LocalUnlock (fixed-block lock returns handle); NEW ucrtbase string handlers (wcsnlen/wcslen/strlen/wcscpy/wcsncpy/strcpy/strncpy/wcschr/wcsrchr/strchr/strrchr/wcsncmp/wcscmp/strncmp/strcmp); `guestHeapAlloc` field (bumpAlloc lifted out so GUI bridge can allocate); SendMessageW EDIT case `0x00bd EM_GETHANDLE` (allocates guest UTF-16 buffer with the text, returns its address — notepad reads it directly for save) |
+| `packages/core/src/api/handlers.ts` | GetFileAttributesW/A failure now returns `0xffffffff` (INVALID_FILE_ATTRIBUTES) instead of 0 (notepad tests `== -1` for missing file); NEW GetACP→65001 / GetOEMCP→65001; NEW WideCharToMultiByte / MultiByteToWideChar (UTF-8 via TextEncoder/Decoder; cchWideChar<=0 treated as NUL-scan; **clears lpUsedDefaultChar output — notepad checks it after the call**); NEW `memWStrLen` helper |
+| `packages/ui/src/apps/FileDialogApp.tsx` | NEW — React virtual-disk file dialog (open: pick file; save: pick dir + type name; Cancel/close → null), reuses sc-explorer styling |
+| `packages/ui/src/desktop-controller.tsx` | `launchGuestWindow` passes `fileDialog` → new `showFileDialog(kind, opts)`: opens a desktop window with FileDialogApp, resolves with the chosen Windows path or null; window-chrome close counts as cancel |
+| `packages/ui/src/styles.css` | `.sc-file-dialog*` styles appended |
+| `scripts/notepad-dialog-check.ts` | NEW — headless end-to-end verifier (see below) |
+
+## The verifier: scripts/notepad-dialog-check.ts
+
+Runs the REAL `C:/Windows/SysWOW64/notepad.exe` against the REAL in-memory disk
+(MemoryFileStore + FileSystemBridgeImpl — same stack as the browser desktop), then:
+1. at 2.5 s posts EDIT text "Typed by dialog-check\r\n" and sends the File > Save As
+   menu command (WM_COMMAND id=4, found from the parsed RT_MENU);
+2. the host `fileDialog` provider returns a fixed path `C:\Users\Guest\Desktop\saved.txt`;
+3. at 20 s posts WM_CLOSE to stop the guest (notepad otherwise loops forever);
+4. asserts `dialogCalls >= 1` and the saved file contains "dialog-check".
+
+```bash
+BS=$(ls -d node_modules/.pnpm/esbuild@*/node_modules/esbuild/bin/esbuild | head -1)
+"$BS" --bundle scripts/notepad-dialog-check.ts --outfile=node_modules/.cache/notepad-dialog-check.cjs \
+  --platform=node --format=cjs --target=es2020 --external:typescript
+"C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe" \
+  node_modules/.cache/notepad-dialog-check.cjs "C:/Windows/SysWOW64/notepad.exe" \
+  > node_modules/.cache/notepad-dialog-out.bin 2> node_modules/.cache/notepad-dialog-out.log
+```
+
+## The save flow today (from the log — each line is a fixed blocker)
+
+```
+GetSaveFileNameW                 -> 1     (dialog returned our path)
+GetFileAttributesW(NULL)         -> 0 err=2 (notepad probes NULL; harmless)
+PathFileExistsW(saved.txt)       -> 0     (does not exist yet)
+CreateFileW(OPEN_ALWAYS=4)       -> 0x10  (handle OK)
+GetLastError                     -> 0     (FIXED: was stale 2 → save aborted)
+SendMessageW(WM_GETTEXTLENGTH 0xe)-> 23
+SendMessageW(EM_GETHANDLE 0xbd)  -> 0x2004570 (FIXED: guest text buffer)
+LocalLock(0x2004570)             -> 0x2004570 (FIXED)
+GetACP                           -> 65001 (FIXED)
+WideCharToMultiByte(65001,...,cchWide=0,...) -> 24  (length query OK)
+   ^^^ NEXT DEBUGGING FRONTIER — after this notepad does NOT convert/write
+SetEndOfFile                     -> 0 err=120 [NOT_IMPL]  (called, but no WriteFile happened before it)
+LocalUnlock / EM_SETMODIFY / CloseHandle -> save considered "done", file is EMPTY
+```
+
+No error MessageBox appears anymore ("This function is not supported on this system."
+is GONE — that was the DeleteFileW/NOT_IMPL blocker, fixed). The process reaches the
+normal completion path but writes nothing.
+
+## Disassembly evidence (notepad.exe) — why WriteFile is skipped
+
+- The save routine lives around `0x410c00..0x41105a`. The write helper is `0x410a66`
+  (it calls WideCharToMultiByte via IAT `0x42a3fc`, WriteFile via IAT `0x42a29c`,
+  LocalUnlock via `0x42a2c4`).
+- At `0x410d41..0x410d54` after the length query:
+  - `cmp [esp+0x24], 0` — this is the **lpUsedDefaultChar** slot (we now clear it).
+  - `mov ecx, eax` (ecx = 24), `test ecx,ecx; jne 0x410d7e` → takes the write path.
+- `0x410d7e` loads args and calls `0x410a66`.
+- **`0x410a66` starts with `cmp dword ptr [ebp+0x10], 0; jne continue; xor eax,eax;
+  inc eax; jmp return` — i.e. if its 3rd argument (a stack slot, loaded from
+  `[esp+0x18]` at `0x410d4a`) is ZERO it returns 1 ("nothing to write") and skips
+  the WideCharToMultiByte conversion + WriteFile entirely.**
+- `0x410d4a: mov eax, [esp+0x18]` — that slot is currently 0 in our runs, so the
+  helper bails. On real Windows it is presumably non-zero (likely a "convert needed"
+  flag / encoding id / code page saved earlier in the routine).
+
+**Next step (this is THE bug to fix):** find what notepad writes into `[esp+0x18]`
+before `0x410d4a` and why it is 0 here. Look at the routine's prologue
+(`0x410c00` region: `mov [esp+0x2c], eax` after GetLastError at 0x410c61, and
+`mov [esp+0x28], eax` = WM_GETTEXTLENGTH at 0x410c91) — the value at `[esp+0x18]`
+is probably set by one of these stores with a different slot offset than the reader
+expects, or it is initialized from `[0x428e74]` (encoding global) / a prior call.
+Options: (a) dump/compare `[esp+0x18]` under the disassembler and set it correctly
+via a runtime probe (probes framework already exists — see desktop-controller
+`cmdFormatProbes` / guest-process `probes` option); (b) more likely, one of OUR
+handlers is writing the wrong number of stack bytes or corrupting the slot — check
+the return path of the WideCharToMultiByte handler and the dispatcher's `ret N`
+stack cleanup for `widechartomultibyte: 8` (32 bytes) — a wrong cleanup would shift
+`[esp+0x18]` reads. Verify with a probe at `0x410d4a` printing `[esp+0x18]`.
+
+Also still unimplemented along the path: `SetEndOfFile` (needs a truncate handler on
+the FileSystemBridge handle — check `host.fs` for an existing truncate/setEndOfFile),
+`PathFindExtensionW`, `GetFileAttributesExW`, `GetWindowPlacement`, `CharUpperW`,
+`SetCursor`, `SetThreadDpiAwarenessContext`, `IsProcessorFeaturePresent` — most are
+cosmetic (return 0 keeps notepad going), but `SetEndOfFile` matters once writing works.
+
+## Other things to know
+
+- `GetFileAttributesW(NULL)` returning 0 err=2 is FINE (notepad passes a NULL probe).
+- `defaultName` from the dialog was `"*.txt"` — notepad pre-fills lpstrFile with the
+  filter pattern, not a real name; harmless, do not chase.
+- Keep `commandLine: ''` for cmd (session 9 rule) — untouched this session.
+- notepad runs with `interactive: true`; the verifier's 20 s WM_CLOSE stops it.
+- Local verification loop before pushing stays: `tsc --noEmit` + `eslint .` +
+  `vitest run` all exit 0 (verified green after this session's changes).
+
+---
+
+# Session 10 historical handover (CI green) — preserved unchanged
 
 ## Session 10 summary — CI fully green (typecheck + lint + test)
 
@@ -26,7 +151,7 @@ Decisions locked in this session (do not regress):
 - Local verification loop before pushing: `tsc --noEmit` (exit 0) + `eslint .` (exit 0)
   + `vitest run` (all green). These three now define "done".
 
-## Goal (this session, preserved from session 9)
+## Goal (session 10, from session 9)
 
 Take the session-8 milestone (`cmd /c dir` works headless) and turn it into a REAL
 interactive "Command Prompt" app in the browser desktop, then make `cd`/`dir`/`echo`
@@ -37,7 +162,7 @@ Project root: `C:\Users\HUAWEI\Desktop\windows` (pnpm workspace, package `@spect
 Target binary: `C:/Windows/SysWOW64/cmd.exe` (a CUSTOM build — its PE import table
 parses as absent/nonstandard, and it has quirks documented below).
 
-## Current Status (one paragraph)
+## Current Status (session 10, one paragraph)
 
 **The browser desktop "Command Prompt" app now runs the REAL cmd.exe interactively:
 banner, prompt, `dir`, `echo`, `cd <path>` (absolute and relative), `exit` all work,
@@ -48,8 +173,9 @@ format-string artifacts remain (`Not enough storage is available...` on stderr a
 startup, and a `%0` tail on the banner) — they are pre-existing cmd quirks, harmless.
 notepad **cannot save**: root cause fully identified (comdlg32 `GetSaveFileNameW` not
 implemented + desktop launch doesn't pass a file path), fix pending user decision.
+**Session 11: user chose the FULL comdlg32 dialog fix (this handover's top section).**
 
-## How the desktop cmd works now (architecture)
+## How the desktop cmd works now (architecture, session 10)
 
 - `apps.tsx`: `command-prompt` app → `render: () => null` (mirrors notepad's
   special-casing so the controller intercepts it).
@@ -76,7 +202,7 @@ implemented + desktop launch doesn't pass a file path), fix pending user decisio
   `printf` path; do NOT UTF-16-decode it — it corrupts `echo`/`dir`). WriteConsoleW is
   decoded UTF-16LE → UTF-8, stopping at the first NUL (banner/prompt path).
 
-## Root causes found & fixed this session
+## Root causes found & fixed (session 10)
 
 | # | Symptom | Root cause | Fix |
 |---|---|---|---|
@@ -87,7 +213,7 @@ implemented + desktop launch doesn't pass a file path), fix pending user decisio
 | 5 | `cd Windows` failed (relative) | cmd calls `GetFullPathNameW("\Windows", ...)` — leading-`\` = **relative to drive root, not cwd**; old handler prepended cwd → `C:\Desktop\Windows` (nonexistent) | `GetFullPathNameW`: 3-way — drive-absolute as-is; `\`-prefixed → prepend current drive letter; else prepend cwd |
 | 6 | `Volume in drive C has no label.` + `1234-ABCD` | hardcoded placeholders in `GetVolumeInformationW/A` | label `'Specter FS'`; serial = `volumeSerial(rootPath)` (djb2 of root path, folded to 16-bit halves → `C:\` = `CDC7-CDC7`) |
 
-## New core capability: runtime probes
+## New core capability: runtime probes (session 10)
 
 `GuestProcessOptions.probes: Array<{ eip: number; fn: (rt: WasmRuntimeImpl) => void }>`
 — per-block runtime workarounds driven from `onStep` (fired at block starts). Needed
@@ -103,7 +229,7 @@ dispatch when probes are provided.
 - `0x4317b4` — 64-bit number formatter loop condition: force `[ebp-0xd8]` (saved
   separator length) to 1. (Bug18 — thousands separator for file sizes.)
 
-## Files modified this session
+## Files modified (session 10)
 
 | File | Change |
 |---|---|
@@ -127,27 +253,22 @@ dispatch when probes are provided.
 - `0x4317b4` — 64-bit number formatter loop condition (Bug18 probe, now also in the desktop runner).
 - Session 8's dir-chain addresses (0x431749, 0x424be0, 0x430e4d, 0x405b52, 0x41d755, 0x408b1c, ...) are preserved below in the Session 8 appendix.
 
-## notepad cannot save — root cause (PENDING FIX, decision needed)
+## notepad cannot save — root cause (session 10/11)
 
 Two independent layers:
 
 1. **Save As / Open dialog — completely unimplemented.** notepad's Save As goes
-   through `comdlg32!GetSaveFileNameW`; File > Open uses `GetOpenFileNameW`. **There
-   are ZERO handlers for either** (grep of `packages/core/src` and `packages/ui/src`
-   is empty; comdlg32 is only in the module allowlist). The dialog never appears, so
-   Save As fails silently. Same for File > Open.
+   through `comdlg32!GetSaveFileNameW`; File > Open uses `GetOpenFileNameW`. There
+   were ZERO handlers for either (comdlg32 was only in the module allowlist). The
+   dialog never appeared, so Save As failed silently.
+   **Session 11: implemented (host-driven dialog) — see top section.**
 2. **Save (Ctrl+S, existing file) — broken by the desktop launch path, not by I/O.**
    `WriteFile` → `host.fs.writeFile` → `MemoryFileStore.write` is fully implemented and
    works. But `launchGuestWindow` never passes a file path as `commandLine`, so notepad
    opened from File Explorer starts "Untitled" — Ctrl+S then falls into the Save As
    dialog (layer 1).
-
-Fix options (user to pick):
-- **Quick (recommended)**: make `launchGuestWindow` accept a `commandLine`/file-path
-  arg; when File Explorer opens a `.txt`, pass the store path so notepad's Ctrl+S
-  writes back to the original file via `WriteFile`.
-- **Full**: implement minimal `GetOpenFileNameW`/`GetSaveFileNameW` stubs (host-driven
-  path provider) so notepad's dialogs work. Medium effort.
+   **User decision (session 11): the "quick Ctrl+S / pass file path" fix is REJECTED.**
+   Do not add a commandLine shortcut; the comdlg32 dialog is the intended path.
 
 ## explorer.exe — assessed, NOT recommended (decision pending)
 
@@ -171,6 +292,8 @@ Running the real `explorer.exe` (the user's "一劳永逸" idea) is not feasible
    `shell32.dll` (a few KB each) for the explorer UI. Fonts already copied.
 
 Option C (smallest step): standard user dirs + notepad Ctrl+S quick fix.
+**Session 11 note: Option C's Ctrl+S part is now moot (user chose the comdlg32 dialog
+fix); the "standard user dirs" part is still open and independent.**
 
 ## Quick Commands
 
@@ -200,6 +323,8 @@ BK_ARGS="" "C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe" 
 # --- disassemble a window (VA, not RVA) ---
 PYEXE=$(ls /c/Users/HUAWEI/.workbuddy/binaries/python/envs/*/Scripts/python.exe 2>/dev/null | head -1)
 "$PYEXE" scripts/disasm-win.py "C:/Windows/SysWOW64/cmd.exe" <va-hex> <len-hex>
+# notepad save routine (session 11):
+"$PYEXE" scripts/disasm-win.py "C:/Windows/SysWOW64/notepad.exe" 0x410c00 0x160
 ```
 
 Note: Git Bash mangles env-var backslashes (`'C:\Windows'` → `C:/Windows`); when

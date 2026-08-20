@@ -100,6 +100,9 @@ function buildExeFs(exePath: string, exeBytes: Uint8Array): FileSystemBridge {
       rec.ptr = Math.max(0, base + distance);
       return { newPointer: rec.ptr, error: ok0 };
     },
+    async setEndOfFile() {
+      return ok0;
+    },
     async getFileSize() {
       return exeBytes.length;
     },

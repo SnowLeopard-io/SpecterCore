@@ -1,5 +1,4 @@
 import type { DesktopAppInfo } from '@specter-core/contracts';
-import { NotepadApp } from './apps/NotepadApp';
 import { SystemInfoApp } from './apps/SystemInfoApp';
 import { MinesweeperApp } from './apps/MinesweeperApp';
 import { FileExplorerApp } from './apps/FileExplorerApp';
@@ -14,14 +13,6 @@ import type { AppDefinition } from './types';
  * and bind their windows in the P3 milestone.
  */
 export const DEFAULT_APPS: AppDefinition[] = [
-  {
-    appId: 'notepad',
-    name: 'Notepad',
-    icon: '📝',
-    description: 'Simple text editor',
-    group: 'Accessories',
-    render: (args) => <NotepadApp initialFile={args?.path} />,
-  },
   {
     appId: 'minesweeper',
     name: 'Minesweeper',
@@ -83,7 +74,7 @@ export const DEFAULT_APPS: AppDefinition[] = [
   },
   {
     appId: 'windows-notepad',
-    name: 'Notepad (Windows)',
+    name: 'Notepad',
     icon: '📝',
     description: 'Run the bundled Windows notepad.exe with its MUI resources',
     group: 'System',

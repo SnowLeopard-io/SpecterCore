@@ -40,6 +40,8 @@ export function appForFile(name: string): string | null {
   // .exe 运行优先：双击进入「运行确认」，可运行（JIT 容器）或转安装器。
   if (lower.endsWith('.exe')) return 'exe-runner';
   if (isImageFile(name)) return 'image-viewer';
-  if (isTextFile(name)) return 'notepad';
+  // Text files open in the REAL bundled Windows notepad.exe (windows-notepad,
+  // launched via DesktopController). The old TS-simulated NotepadApp is gone.
+  if (isTextFile(name)) return 'windows-notepad';
   return null;
 }

@@ -37,6 +37,7 @@ import { guestGdiBridgeProvider } from './gdi-bridge-registry';
 import { GuestWindowView } from './apps/RunExecutableApp';
 import { CmdGuestTerminal } from './apps/CmdGuestTerminal';
 import { CmdConsoleChannel } from './console-channel';
+import { FileDialogApp } from './apps/FileDialogApp';
 import { InstalledAppView } from './apps/InstalledAppView';
 import type { AppDefinition, UiController } from './types';
 
@@ -255,6 +256,59 @@ export class DesktopControllerImpl implements DesktopController {
     });
   }
 
+  /**
+   * Host-driven common file dialog provider (comdlg32 GetOpenFileNameW/A and
+   * GetSaveFileNameW/A). Opens a desktop window with the virtual-disk browser
+   * (FileDialogApp); resolves with the chosen Windows path, or null when the
+   * user cancels / closes the window. The guest process suspends on the
+   * comdlg32 trap while this awaits (same pattern as GetMessageW blocking).
+   */
+  private showFileDialog(
+    kind: 'open' | 'save',
+    opts: { title: string; initialDir: string; defaultName: string; filter: string },
+  ): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      let settled = false;
+      let handleId: string | null = null;
+      let disposeListener: (() => void) | null = null;
+      const done = (path: string | null): void => {
+        if (settled) return;
+        settled = true;
+        disposeListener?.();
+        resolve(path);
+      };
+      disposeListener = this.windowManager.onWindowClosed((id) => {
+        if (handleId && id === handleId) done(null);
+      });
+      void this.windowManager
+        .createWindow({
+          title: opts.title || (kind === 'open' ? 'Open' : 'Save As'),
+          width: 620,
+          height: 460,
+          resizable: true,
+          appId: 'file-dialog',
+          content: reactContent(
+            <FileDialogApp
+              kind={kind}
+              opts={opts}
+              onResult={(path) => {
+                done(path);
+                if (handleId) this.windowManager.closeWindow(handleId).catch(() => undefined);
+              }}
+            />,
+          ),
+        })
+        .then((handle) => {
+          handleId = handle.id;
+        })
+        .catch((err) => {
+          console.error('[desktop] file dialog failed to open:', err);
+          disposeListener();
+          done(null);
+        });
+    });
+  }
+
   async pickLocalFile(): Promise<LocalFileInfo | null> {
     if (typeof window === 'undefined' || typeof window.showOpenFilePicker !== 'function') return null;
     try {
@@ -430,6 +484,7 @@ export class DesktopControllerImpl implements DesktopController {
         },
         interactive: true,
         gdiBridge: (hwnd) => guestGdiBridgeProvider(hwnd),
+        fileDialog: async (kind, opts) => this.showFileDialog(kind, opts),
         onMessageWait: () => {
           const wins = runner.getWindows();
           for (const w of wins) {

@@ -71,7 +71,7 @@ describe('WindowManagerImpl', () => {
   it('bindApp associates appId with window', async () => {
     const manager = makeManager();
     const win = await manager.createWindow({ title: 'A' });
-    manager.bindApp('notepad', win.id);
+    manager.bindApp('windows-notepad', win.id);
     // binding is internal; closing the window should not throw
     await manager.closeWindow(win.id);
   });

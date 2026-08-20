@@ -226,6 +226,27 @@ export interface GuestProcessOptions {
    * 0x4317b4, see scripts/diag-trap.ts). Probes only run when provided.
    */
   probes?: Array<{ eip: number; fn: (rt: WasmRuntimeImpl) => void }>;
+  /**
+   * Host-driven common file dialog (comdlg32 GetOpenFileNameW/A and
+   * GetSaveFileNameW/A). When the guest opens an Open/Save dialog, the runner
+   * calls this instead of showing a dialog itself — the L6 shell renders a
+   * virtual-disk browser and returns the chosen path (Windows format, e.g.
+   * 'C:\\Users\\Guest\\Desktop\\notes.txt') or null when cancelled. When not
+   * provided the dialogs return 0 (FALSE, cancelled) like a no-op host.
+   */
+  fileDialog?: (kind: 'open' | 'save', opts: FileDialogOptions) => Promise<string | null>;
+}
+
+/** What comdlg32 told us about the dialog the guest is opening. */
+export interface FileDialogOptions {
+  /** Dialog title from OPENFILENAME.lpstrTitle ('' when NULL). */
+  title: string;
+  /** Initial directory from lpstrInitialDir ('' when NULL). */
+  initialDir: string;
+  /** Default file name from lpstrFile ('' when empty/Untitled). */
+  defaultName: string;
+  /** File-type filter string (the raw double-NUL-terminated lpstrFilter). */
+  filter: string;
 }
 
 export class GuestProcessRunner {
@@ -291,6 +312,15 @@ export class GuestProcessRunner {
   private onTextChanged?: (hwnd: number, text: string) => void;
   /** Host callback when GetMessageW blocks (see GuestProcessOptions.onMessageWait). */
   private onMessageWait?: () => void;
+  /** Host-driven file dialog (see GuestProcessOptions.fileDialog). */
+  private fileDialog?: (kind: 'open' | 'save', opts: FileDialogOptions) => Promise<string | null>;
+  /**
+   * Heap bump allocator installed by installStartupHandlers (see the heap
+   * section there). GUI-bridge handlers (SendMessageW EM_GETHANDLE) allocate
+   * scratch guest memory through it too — e.g. notepad's save flow asks the
+   * EDIT control for its text handle and then reads the buffer directly.
+   */
+  private guestHeapAlloc: ((size: number) => number) | null = null;
   /** True when MUI satellite resources were merged (real strings/menus). */
   private muiLoaded = false;
   /** Path of the .mui file that was merged (diagnostics). */
@@ -339,6 +369,7 @@ export class GuestProcessRunner {
     this.pendingInputResolve = null;
     this.onTextChanged = options.onTextChanged;
     this.onMessageWait = options.onMessageWait;
+    this.fileDialog = options.fileDialog;
     this.muiLoaded = false;
     this.muiSource = '';
     this.cwd = options.cwd ?? 'C:\\';
@@ -358,6 +389,7 @@ export class GuestProcessRunner {
     const stubs = [...mapped.stubs];
     let dynStubCursor = mapped.stubEnd;
     await this.installStartupHandlers(pe, mapped, stubs, () => dynStubCursor, (next) => { dynStubCursor = next; }, image);
+    this.installFileDialogs();
     const mode: 'x86' | 'x64' = pe.is64 ? 'x64' : 'x86';
     const jit = options.createEngine ? options.createEngine(mode) : this.jit;
 
@@ -383,7 +415,7 @@ export class GuestProcessRunner {
     // read hWndParent at rawArgs[8] — the default 8 slots were not enough.
     const dispatcher = new ApiTrapDispatcher(this.interceptor, this.runtime, stubs, 16, mode);
     this.installSehDispatch(dispatcher, jit, mode);
-    this.installGuiBridge(dispatcher, jit, mode);
+    this.installGuiBridge(dispatcher, jit, mode, options);
     const trapHandler: TrapHandler = {
       handle: async (vector, rt) => {
         if (vector === SEH_SENTINEL_VECTOR) {
@@ -808,6 +840,139 @@ export class GuestProcessRunner {
     this.interceptor.hook('user32.dll', 'LoadIconA', pseudoUiHandle);
 
     // ------------------------------------------------------------------
+    // ucrtbase wide/narrow string functions. notepad's save path converts the
+    // EDIT text with WideCharToMultiByte and walks the result with wcsnlen /
+    // wcscpy; returning 0 for a length made it abort the save. (The stubs are
+    // cdecl: caller cleans up, argCount 0 in X86_API_ARG_COUNT.)
+    // ------------------------------------------------------------------
+    const strReadW = (a: number): string => {
+      if (!a) return '';
+      const bytes = this.runtime.readBytes(a >>> 0, 4096);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = '';
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const strReadA = (a: number): string => {
+      if (!a) return '';
+      const bytes = this.runtime.readBytes(a >>> 0, 4096);
+      let end = 0;
+      while (end < bytes.byteLength && bytes[end] !== 0) end += 1;
+      return new TextDecoder('latin1').decode(bytes.subarray(0, end));
+    };
+    const writeStrW = (a: number, s: string): void => {
+      const w = new Uint8Array((s.length + 1) * 2);
+      for (let i = 0; i < s.length; i++) {
+        w[i * 2] = s.charCodeAt(i) & 0xff;
+        w[i * 2 + 1] = (s.charCodeAt(i) >> 8) & 0xff;
+      }
+      this.runtime.writeBytes(a >>> 0, w);
+    };
+    const writeStrA = (a: number, s: string): void => {
+      const bytes = new TextEncoder().encode(s);
+      const out = new Uint8Array(bytes.byteLength + 1);
+      out.set(bytes);
+      this.runtime.writeBytes(a >>> 0, out);
+    };
+    this.interceptor.hook('ucrtbase.dll', 'wcsnlen', (ctx) => {
+      const s = strReadW(ctx.rawArgs[0] ?? 0);
+      const max = ctx.rawArgs[1] ?? 0;
+      return { returnValue: Math.min(s.length, max >>> 0), errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'wcslen', (ctx) => ({
+      returnValue: strReadW(ctx.rawArgs[0] ?? 0).length,
+      errorCode: E.NO_ERROR,
+    }));
+    this.interceptor.hook('ucrtbase.dll', 'strlen', (ctx) => ({
+      returnValue: strReadA(ctx.rawArgs[0] ?? 0).length,
+      errorCode: E.NO_ERROR,
+    }));
+    this.interceptor.hook('ucrtbase.dll', 'wcscpy', (ctx) => {
+      const dst = ctx.rawArgs[0] ?? 0;
+      const src = strReadW(ctx.rawArgs[1] ?? 0);
+      if (dst) writeStrW(dst, src);
+      return { returnValue: dst, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'wcsncpy', (ctx) => {
+      const dst = ctx.rawArgs[0] ?? 0;
+      const src = strReadW(ctx.rawArgs[1] ?? 0);
+      const n = ctx.rawArgs[2] ?? 0;
+      if (dst) writeStrW(dst, src.slice(0, Math.max(0, n)));
+      return { returnValue: dst, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'strcpy', (ctx) => {
+      const dst = ctx.rawArgs[0] ?? 0;
+      const src = strReadA(ctx.rawArgs[1] ?? 0);
+      if (dst) writeStrA(dst, src);
+      return { returnValue: dst, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'strncpy', (ctx) => {
+      const dst = ctx.rawArgs[0] ?? 0;
+      const src = strReadA(ctx.rawArgs[1] ?? 0);
+      const n = ctx.rawArgs[2] ?? 0;
+      if (dst) writeStrA(dst, src.slice(0, Math.max(0, n)));
+      return { returnValue: dst, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'wcschr', (ctx) => {
+      const s = strReadW(ctx.rawArgs[0] ?? 0);
+      const ch = ctx.rawArgs[1] ?? 0;
+      const idx = s.indexOf(String.fromCharCode(ch & 0xffff));
+      if (idx < 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      return { returnValue: (ctx.rawArgs[0] ?? 0) + idx * 2, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'wcsrchr', (ctx) => {
+      const s = strReadW(ctx.rawArgs[0] ?? 0);
+      const ch = ctx.rawArgs[1] ?? 0;
+      const idx = s.lastIndexOf(String.fromCharCode(ch & 0xffff));
+      if (idx < 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      return { returnValue: (ctx.rawArgs[0] ?? 0) + idx * 2, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'strchr', (ctx) => {
+      const s = strReadA(ctx.rawArgs[0] ?? 0);
+      const ch = ctx.rawArgs[1] ?? 0;
+      const idx = s.indexOf(String.fromCharCode(ch & 0xff));
+      if (idx < 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      return { returnValue: (ctx.rawArgs[0] ?? 0) + idx, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'strrchr', (ctx) => {
+      const s = strReadA(ctx.rawArgs[0] ?? 0);
+      const ch = ctx.rawArgs[1] ?? 0;
+      const idx = s.lastIndexOf(String.fromCharCode(ch & 0xff));
+      if (idx < 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      return { returnValue: (ctx.rawArgs[0] ?? 0) + idx, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'wcsncmp', (ctx) => {
+      const a = strReadW(ctx.rawArgs[0] ?? 0);
+      const b = strReadW(ctx.rawArgs[1] ?? 0);
+      const n = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const aa = a.slice(0, n);
+      const bb = b.slice(0, n);
+      return { returnValue: aa < bb ? -1 : aa > bb ? 1 : 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'wcscmp', (ctx) => {
+      const a = strReadW(ctx.rawArgs[0] ?? 0);
+      const b = strReadW(ctx.rawArgs[1] ?? 0);
+      return { returnValue: a < b ? -1 : a > b ? 1 : 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'strncmp', (ctx) => {
+      const a = strReadA(ctx.rawArgs[0] ?? 0);
+      const b = strReadA(ctx.rawArgs[1] ?? 0);
+      const n = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const aa = a.slice(0, n);
+      const bb = b.slice(0, n);
+      return { returnValue: aa < bb ? -1 : aa > bb ? 1 : 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('ucrtbase.dll', 'strcmp', (ctx) => {
+      const a = strReadA(ctx.rawArgs[0] ?? 0);
+      const b = strReadA(ctx.rawArgs[1] ?? 0);
+      return { returnValue: a < b ? -1 : a > b ? 1 : 0, errorCode: E.NO_ERROR };
+    });
+
+    // ------------------------------------------------------------------
     // GUI layer: class registration / window creation / message loop are
     // installed by installGuiBridge() (called from run() after the SEH
     // machinery, which owns the nested-executor helpers it needs).
@@ -1049,10 +1214,78 @@ export class GuestProcessRunner {
     this.interceptor.hook('kernel32.dll', 'CreateFileW', (ctx, host) => {
       const path = readWStr(ctx.rawArgs[0] ?? 0);
       if (!path) return { returnValue: 0xffffffff, errorCode: E.ERROR_FILE_NOT_FOUND };
-      return host.fs
-        .createFile(path, ctx.rawArgs[1] ?? 0, ctx.rawArgs[2] ?? 0, ctx.rawArgs[4] ?? 0, ctx.rawArgs[5] ?? 0)
-        .then((r) => (r.error === E.NO_ERROR ? { returnValue: r.handle, errorCode: E.NO_ERROR } : { returnValue: 0xffffffff, errorCode: r.error }));
+      return host.fs.createFile(path, ctx.rawArgs[1] ?? 0, ctx.rawArgs[2] ?? 0, ctx.rawArgs[4] ?? 0, ctx.rawArgs[5] ?? 0).then((r) => {
+        if (r.error === E.NO_ERROR) {
+          // A successful CreateFileW leaves GetLastError() = 0 (real Windows:
+          // OPEN_ALWAYS on an existing file would set ERROR_ALREADY_EXISTS,
+          // but notepad's save flow only tests "== 0 → ok"). The interceptor
+          // only records NON-zero errorCodes, so a stale error from an earlier
+          // failed call (e.g. GetFileAttributesW) survives here and notepad
+          // would abort the save. Clear it explicitly.
+          this.interceptor.setLastError(ctx.pid, 0);
+          return { returnValue: r.handle, errorCode: E.NO_ERROR };
+        }
+        return { returnValue: 0xffffffff, errorCode: r.error };
+      });
     });
+
+    // DeleteFileW/A — notepad's Save As DELETES the target file before
+    // writing the new contents. Without a handler the interceptor returns 0
+    // with ERROR_CALL_NOT_IMPLEMENTED, which notepad formats as "This function
+    // is not supported on this system." and aborts the save. (design doc 3.1.7)
+    this.interceptor.hook('kernel32.dll', 'DeleteFileW', (ctx, host) => {
+      const path = readWStr(ctx.rawArgs[0] ?? 0);
+      if (!path) return { returnValue: 0, errorCode: E.ERROR_FILE_NOT_FOUND };
+      return host.fs.deleteFile(path).then((err) => {
+        if (err === E.NO_ERROR) {
+          this.interceptor.setLastError(ctx.pid, 0);
+          return { returnValue: 1, errorCode: E.NO_ERROR };
+        }
+        return { returnValue: 0, errorCode: err };
+      });
+    });
+    this.interceptor.hook('kernel32.dll', 'DeleteFileA', (ctx, host) => {
+      const path = readCStr(ctx.rawArgs[0] ?? 0);
+      if (!path) return { returnValue: 0, errorCode: E.ERROR_FILE_NOT_FOUND };
+      return host.fs.deleteFile(path).then((err) => {
+        if (err === E.NO_ERROR) {
+          this.interceptor.setLastError(ctx.pid, 0);
+          return { returnValue: 1, errorCode: E.NO_ERROR };
+        }
+        return { returnValue: 0, errorCode: err };
+      });
+    });
+
+    // PathFileExistsW/A (shlwapi) — BOOL existence probe. notepad checks the
+    // target before Save As (to show the "replace?" prompt / delete old file).
+    // The default handler returns 0 = "does not exist" with an error, which
+    // makes overwrite flows behave as if the file were never there.
+    const pathExists =
+      (readPath: (ctx: ApiCallContext) => string) =>
+      async (ctx: ApiCallContext, host: ApiHost): Promise<ApiResult> => {
+        const path = readPath(ctx);
+        if (!path) return { returnValue: 0, errorCode: E.NO_ERROR };
+        const res = await host.fs.getFileAttributes(path);
+        return { returnValue: res.error === E.NO_ERROR ? 1 : 0, errorCode: E.NO_ERROR };
+      };
+    this.interceptor.hook('shlwapi.dll', 'PathFileExistsW', pathExists((ctx) => readWStr(ctx.rawArgs[0] ?? 0)));
+    this.interceptor.hook('shlwapi.dll', 'PathFileExistsA', pathExists((ctx) => readCStr(ctx.rawArgs[0] ?? 0)));
+    // api-ms-win-core-shlwapi-legacy-l1-1-0.dll normalizes to shlwapi.dll via
+    // normalizeApiSetModule, so the hooks above are sufficient; keep aliases
+    // on kernel32 for guests that import it through the core api-set path.
+    this.interceptor.hook('kernel32.dll', 'PathFileExistsW', pathExists((ctx) => readWStr(ctx.rawArgs[0] ?? 0)));
+    this.interceptor.hook('kernel32.dll', 'PathFileExistsA', pathExists((ctx) => readCStr(ctx.rawArgs[0] ?? 0)));
+
+    // SetEndOfFile(hFile) — truncate/extend the file to the current pointer.
+    // notepad's save routine calls it right after WriteFile; without a
+    // handler it returns ERROR_CALL_NOT_IMPLEMENTED and rewrites of an
+    // existing (longer) file keep the stale tail beyond the new content.
+    this.interceptor.hook('kernel32.dll', 'SetEndOfFile', (ctx, host) =>
+      host.fs.setEndOfFile(ctx.rawArgs[0] ?? 0).then((err) => {
+        if (err === E.NO_ERROR) return { returnValue: 1, errorCode: E.NO_ERROR };
+        return { returnValue: 0, errorCode: err };
+      }),
+    );
 
     // Truthful VirtualQuery. The default handler claims the whole 4GB is one
     // committed region (RegionSize=0xFFFFFFFF), which makes region-walking
@@ -1103,6 +1336,7 @@ export class GuestProcessRunner {
       this.runtime.writeInt32(user - 4, blockSize);
       return user;
     };
+    this.guestHeapAlloc = bumpAlloc;
 
     // SEH dispatch scratch (see installSehDispatch): an executable sentinel
     // stub (`int 0x2d` stops the nested handler run with EAX = disposition),
@@ -1447,6 +1681,18 @@ export class GuestProcessRunner {
       return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('kernel32.dll', 'LocalFree', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    // LocalLock/LocalUnlock: notepad's save flow locks the EM_GETHANDLE text
+    // handle and reads the buffer directly. Fixed (LMEM_FIXED) memory locks to
+    // itself, so LocalLock returns the handle unchanged; unlock reports 0
+    // (lock count reached 0) with NO_ERROR like a fixed block.
+    this.interceptor.hook('kernel32.dll', 'LocalLock', (ctx) => ({
+      returnValue: ctx.rawArgs[0] ?? 0,
+      errorCode: E.NO_ERROR,
+    }));
+    this.interceptor.hook('kernel32.dll', 'LocalUnlock', () => ({
+      returnValue: 0,
+      errorCode: E.NO_ERROR,
+    }));
     // LocalSize: notepad reads the allocated size back right after LocalAlloc
     // (`mov esi,eax; shr esi,1; je fail`) — an unimplemented 0 aborts startup
     // with STATUS_STACK_BUFFER_OVERRUN. Same [user-4] size header as HeapSize.
@@ -2497,6 +2743,167 @@ export class GuestProcessRunner {
   }
 
   /**
+   * comdlg32 common file dialogs (GetOpenFileNameW/A, GetSaveFileNameW/A).
+   * notepad delay-loads these through .didat; without handlers the interceptor
+   * returns 0 and the dialog "never appears" (Save As fails silently). When a
+   * host fileDialog provider is wired in (GuestProcessOptions.fileDialog), the
+   * dialog delegates to it — the L6 shell renders a virtual-disk browser and
+   * returns the chosen Windows path, which we write back into the guest's
+   * OPENFILENAME structure (lpstrFile buffer + nFileOffset/nFileExtension)
+   * exactly like a real comdlg32 would. With no provider, dialogs cancel.
+   */
+  private installFileDialogs(): void {
+    const runtime = this.runtime;
+    const rd32 = (a: number): number => {
+      const b = runtime.readBytes(a >>> 0, 4);
+      return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+    };
+    const wr16 = (a: number, v: number): void => {
+      const b = new Uint8Array(2);
+      new DataView(b.buffer).setUint16(0, v & 0xffff, true);
+      runtime.writeBytes(a >>> 0, b);
+    };
+    // Read a UTF-16 string until the FIRST NUL; the lpstrFilter string is
+    // double-NUL-terminated ("Text Files\0*.txt\0All Files\0*.*\0\0"), so the
+    // caller reads the full block separately when it needs the tail.
+    const readW = (a: number, maxBytes: number): string => {
+      if (!a) return '';
+      const bytes = runtime.readBytes(a >>> 0, maxBytes);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = '';
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const writeW = (a: number, maxBytes: number, s: string): void => {
+      const bytes = new Uint8Array(Math.min(maxBytes, (s.length + 1) * 2));
+      const view = new DataView(bytes.buffer);
+      for (let i = 0; i < s.length && i * 2 + 1 < bytes.byteLength; i++) {
+        view.setUint16(i * 2, s.charCodeAt(i), true);
+      }
+      runtime.writeBytes(a >>> 0, bytes);
+    };
+    // Read the raw double-NUL-terminated filter block (up to nMaxCustFilter
+    // bytes is a lie — comdlg32 caps at 4096 chars; use a sane bound).
+    const readFilterBlock = (a: number): string => {
+      if (!a) return '';
+      const bytes = runtime.readBytes(a >>> 0, 8192);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = '';
+      let nulCount = 0;
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) {
+          nulCount += 1;
+          if (nulCount >= 2) break;
+        }
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+
+    // OPENFILENAME (32-bit layout, x86): struct offsets below.
+    // 0x00 lStructSize, 0x04 hwndOwner, 0x08 hInstance, 0x0c lpstrFilter,
+    // 0x10 lpstrCustomFilter, 0x14 nMaxCustFilter, 0x18 nFilterIndex,
+    // 0x1c lpstrFile, 0x20 nMaxFile, 0x24 lpstrFileTitle, 0x28 nMaxFileTitle,
+    // 0x2c lpstrInitialDir, 0x30 lpstrTitle, 0x34 Flags, 0x38 nFileOffset,
+    // 0x3a nFileExtension, 0x3c lpstrDefExt, ... (Vista+ tail ignored).
+    const dialogHandler =
+      (kind: 'open' | 'save', wide: boolean) =>
+      async (ctx: ApiCallContext): Promise<ApiResult> => {
+        const ofn = ctx.rawArgs[0] ?? 0;
+        if (!ofn) return { returnValue: 0, errorCode: E.NO_ERROR };
+        const lpstrFile = rd32(ofn + 0x1c) >>> 0;
+        const nMaxFile = rd32(ofn + 0x20) >>> 0;
+        if (!lpstrFile || nMaxFile === 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+        // Pre-fill: what comdlg32 shows as the default file name comes from
+        // lpstrFile's CURRENT contents (notepad puts "Untitled" there before
+        // Save As; an existing file's path for Save).
+        const current = wide ? readW(lpstrFile, Math.min(nMaxFile * 2, 32768)) : readCStrRaw(lpstrFile, nMaxFile);
+        const initialDir = wide ? readW(rd32(ofn + 0x2c) >>> 0, 4096) : readCStrRaw(rd32(ofn + 0x2c) >>> 0, 4096);
+        const title = wide ? readW(rd32(ofn + 0x30) >>> 0, 1024) : readCStrRaw(rd32(ofn + 0x30) >>> 0, 1024);
+        const filter = wide ? readFilterBlock(rd32(ofn + 0x0c) >>> 0) : readFilterBlockA(rd32(ofn + 0x0c) >>> 0);
+        if (!this.fileDialog) {
+          // No host provider: cancel the dialog (FALSE), like a no-op comdlg32.
+          return { returnValue: 0, errorCode: E.NO_ERROR };
+        }
+        let path: string | null;
+        try {
+          path = await this.fileDialog(kind, {
+            title,
+            initialDir,
+            defaultName: current,
+            filter,
+          });
+        } catch (err) {
+          console.error('[comdlg32] fileDialog provider threw:', err);
+          return { returnValue: 0, errorCode: E.NO_ERROR };
+        }
+        if (!path) return { returnValue: 0, errorCode: E.NO_ERROR }; // cancelled
+        // Windows path -> char count check against the guest buffer.
+        const maxChars = Math.max(1, Math.floor((nMaxFile - 1) / (wide ? 2 : 1)));
+        if (path.length > maxChars) {
+          console.error(`[comdlg32] path too long for lpstrFile (${path.length} > ${maxChars})`);
+          return { returnValue: 0, errorCode: E.ERROR_FILENAME_EXCED_RANGE };
+        }
+        if (wide) {
+          writeW(lpstrFile, nMaxFile, path);
+        } else {
+          const bytes = new TextEncoder().encode(path);
+          const out = new Uint8Array(Math.min(nMaxFile, bytes.byteLength + 1));
+          out.set(bytes.subarray(0, Math.max(0, out.byteLength - 1)));
+          runtime.writeBytes(lpstrFile >>> 0, out);
+        }
+        // nFileOffset (char offset of the file name in the full path) and
+        // nFileExtension (char offset of the dot) — both 16-bit WORDs.
+        const lastSep = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+        const nameStart = lastSep >= 0 ? lastSep + 1 : 0;
+        const dot = path.lastIndexOf('.');
+        const extStart = dot > nameStart ? dot : path.length;
+        wr16(ofn + 0x38, nameStart);
+        wr16(ofn + 0x3a, extStart);
+        return { returnValue: 1, errorCode: E.NO_ERROR };
+      };
+    // ANSI (narrow) string readers for the A variants (code page is assumed
+    // to be latin1 — ASCII-compatible, which is all these guests use).
+    const readCStrRaw = (a: number, maxBytes: number): string => {
+      if (!a) return '';
+      const bytes = runtime.readBytes(a >>> 0, Math.min(maxBytes, 4096));
+      let end = 0;
+      while (end < bytes.byteLength && bytes[end] !== 0) end += 1;
+      return new TextDecoder('latin1').decode(bytes.subarray(0, end));
+    };
+    const readFilterBlockA = (a: number): string => {
+      if (!a) return '';
+      const bytes = runtime.readBytes(a >>> 0, 8192);
+      let end = 0;
+      let nulCount = 0;
+      while (end < bytes.byteLength) {
+        if (bytes[end] === 0) {
+          nulCount += 1;
+          if (nulCount >= 2) break;
+        }
+        end += 1;
+      }
+      return new TextDecoder('latin1').decode(bytes.subarray(0, end));
+    };
+
+    this.interceptor.hook('comdlg32.dll', 'GetOpenFileNameW', dialogHandler('open', true));
+    this.interceptor.hook('comdlg32.dll', 'GetOpenFileNameA', dialogHandler('open', false));
+    this.interceptor.hook('comdlg32.dll', 'GetSaveFileNameW', dialogHandler('save', true));
+    this.interceptor.hook('comdlg32.dll', 'GetSaveFileNameA', dialogHandler('save', false));
+    // CommDlgExtendedError is only read after a failed/cancelled dialog;
+    // ERROR_CANCELLED (1223) is the honest answer for a user cancel.
+    this.interceptor.hook('comdlg32.dll', 'CommDlgExtendedError', () => ({
+      returnValue: E.ERROR_CANCELLED,
+      errorCode: E.NO_ERROR,
+    }));
+  }
+
+  /**
    * GUI bridge — layer 1 of the graphics bridge: turns the "fake handle"
    * message loop (GetMessageW always returning 0 = WM_QUIT) into a REAL one
    * that delivers messages to the guest's own window procedure.
@@ -2517,7 +2924,7 @@ export class GuestProcessRunner {
    * sane zero defaults. x64 mode keeps the minimal fake-handle behaviour (the
    * sentinel-stop infrastructure is only wired up for x86 so far).
    */
-  private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64'): void {
+  private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64', options: GuestProcessOptions = {}): void {
     const runtime = this.runtime;
     // Bounds-checked 32-bit guest read (never grows the linear memory).
     const peek = (a: number): number => {
@@ -2728,6 +3135,25 @@ export class GuestProcessRunner {
           }
           case 0x00b6: // EM_GETLINECOUNT
             return { returnValue: rec.text === '' ? 1 : rec.text.split('\n').length, errorCode: E.NO_ERROR };
+          case 0x00bd: { // EM_GETHANDLE: notepad's Save As asks the EDIT
+            // control for its text handle, then reads the buffer directly
+            // (GetWindowTextW path is NOT used). Allocate a guest buffer with
+            // the UTF-16 text + NUL and return its address as the "handle".
+            const s = rec.text;
+            const size = Math.max(2, (s.length + 1) * 2);
+            const p = this.guestHeapAlloc ? this.guestHeapAlloc(size) : 0;
+            if (p) {
+              const w = new Uint8Array(size);
+              for (let i = 0; i < s.length; i++) {
+                w[i * 2] = s.charCodeAt(i) & 0xff;
+                w[i * 2 + 1] = (s.charCodeAt(i) >> 8) & 0xff;
+              }
+              runtime.writeBytes(p, w);
+              console.log('[GDI-walk] EM_GETHANDLE hwnd=0x%s -> 0x%s len=%d', hwnd.toString(16), p.toString(16), s.length);
+              return { returnValue: p, errorCode: E.NO_ERROR };
+            }
+            return { returnValue: 0, errorCode: E.ERROR_NOT_ENOUGH_MEMORY };
+          }
           default:
             return { returnValue: 0, errorCode: E.NO_ERROR };
         }
@@ -3209,7 +3635,18 @@ export class GuestProcessRunner {
             }
           },
         },
-        { maxSteps: 500_000 },
+        {
+          maxSteps: 500_000,
+          // Probes must also fire inside the WndProc nested executor — the
+          // guest save routine (WM_COMMAND → 0x410c00) runs there, not on the
+          // main executor loop.
+          onStep: options.probes?.length
+            ? (eip: number, rt: WasmRuntimeImpl) => {
+                for (const p of options.probes ?? []) if (p.eip === eip) p.fn(rt);
+                options.onStep?.(eip, rt);
+              }
+            : options.onStep,
+        },
       );
       await nested.run(wndProc);
       const result = runtime.getReg('eax') >>> 0;

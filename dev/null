@@ -1,58 +1,2793 @@
-const BUILTIN_WIN_FILES = [
-  { url: "/win/notepad.exe", storePath: "Windows/SysWOW64/notepad.exe" },
-  { url: "/win/en-US/notepad.exe.mui", storePath: "Windows/SysWOW64/en-US/notepad.exe.mui" },
-  { url: "/win/zh-CN/notepad.exe.mui", storePath: "Windows/SysWOW64/zh-CN/notepad.exe.mui" },
-  // Real cmd.exe (+ MUI) so the desktop "Command Prompt" app runs the actual
-  // guest binary instead of a JS reimplementation (see launchGuestConsole).
-  { url: "/win/cmd.exe", storePath: "Windows/SysWOW64/cmd.exe" },
-  { url: "/win/en-US/cmd.exe.mui", storePath: "Windows/SysWOW64/en-US/cmd.exe.mui" },
-  { url: "/win/zh-CN/cmd.exe.mui", storePath: "Windows/SysWOW64/zh-CN/cmd.exe.mui" },
-  // Real files copied from the host C: drive so the virtual disk (and the
-  // file explorer / notepad open dialog) has genuine content by default.
-  { url: "/win/win.ini", storePath: "Windows/win.ini" },
-  { url: "/win/hosts", storePath: "Windows/System32/drivers/etc/hosts" },
-  { url: "/win/readme.txt", storePath: "Users/Public/Documents/readme.txt" },
-  // A handful of real Windows system fonts (small subset; copied from the
-  // host at build time) so guest apps that load fonts via AddFontResource/
-  // GDI have real glyph data instead of broken placeholder TTF stubs.
-  { url: "/win/Fonts/arial.ttf", storePath: "Windows/Fonts/arial.ttf" },
-  { url: "/win/Fonts/arialbd.ttf", storePath: "Windows/Fonts/arialbd.ttf" },
-  { url: "/win/Fonts/tahoma.ttf", storePath: "Windows/Fonts/tahoma.ttf" },
-  { url: "/win/Fonts/consola.ttf", storePath: "Windows/Fonts/consola.ttf" }
-];
-async function ensureBuiltinWinFiles(fs) {
-  for (const f of BUILTIN_WIN_FILES) {
-    let existing = null;
-    try {
-      existing = await fs.stat(f.storePath);
-    } catch {
+import { WinError as E } from "@specter-core/contracts";
+import { STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE } from "../api/handlers";
+import { ApiTrapDispatcher } from "../jit/trap-dispatcher";
+import { Executor } from "../jit/executor";
+import { mapPeImage, X86_API_ARG_COUNT } from "../pe/mapper";
+const EXCEPTION_CONTINUE_EXECUTION = 0;
+const EXCEPTION_EXECUTE_HANDLER = 2;
+const EXCEPTION_UNWINDING = 2;
+const EXCEPTION_UNWINDING_FOR_EXIT = 4;
+const SEH_SENTINEL_VECTOR = 45;
+const EXCEPTION_TRANSFERRED = -2;
+const X86_CONTEXT_SIZE = 716;
+const DEFAULT_STACK_TOP = 134217728;
+function computeOverlayStart(raw) {
+  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  if (view.getUint16(0, true) !== 23117) return 0;
+  const eLfanew = view.getUint32(60, true);
+  const coff = eLfanew + 4;
+  const numSections = view.getUint16(coff + 2, true);
+  const sizeOfOpt = view.getUint16(coff + 16, true);
+  const sectionTable = coff + 20 + sizeOfOpt;
+  let end = 0;
+  for (let i = 0; i < numSections; i++) {
+    const s = sectionTable + i * 40;
+    const rawSize = view.getUint32(s + 16, true);
+    const rawOffset = view.getUint32(s + 20, true);
+    end = Math.max(end, rawOffset + rawSize);
+  }
+  return end;
+}
+class GuestProcessRunner {
+  constructor(runtime, jit, loader, interceptor) {
+    this.runtime = runtime;
+    this.jit = jit;
+    this.loader = loader;
+    this.interceptor = interceptor;
+    this.installConsoleWriteFile();
+  }
+  stdout = [];
+  stderr = [];
+  exitCode = 0;
+  exitRequested = false;
+  onOutput;
+  modulePath = "";
+  /** MUI satellite-resource reader (see GuestProcessOptions.readFile). */
+  readFile;
+  /** SEH scratch guest addresses (allocated per run, see installStartupHandlers). */
+  sehSentinelAddr = 0;
+  sehExcAddr = 0;
+  sehCtxAddr = 0;
+  /** Accepting record of the phase-2 transfer (sentinel fallback target). */
+  sehPending = 0;
+  /** Nested RaiseException dispatch recursion guard. */
+  sehDepth = 0;
+  /** Set by the RtlUnwind handler when it transfers control (unwind target). */
+  sehTransfer = null;
+  /** Optional per-hwnd GDI bridge provider (see GuestProcessOptions.gdiBridge). */
+  gdiBridgeProvider;
+  /** DC handle -> owning bridge, for the pixel GDI path (L6 image bridge). */
+  gdiBridgeByHdc = /* @__PURE__ */ new Map();
+  /**
+   * GUI bridge state (see installGuiBridge): class atom -> window procedure
+   * address, fake HWND -> { window procedure, parent } record, and the
+   * synthetic message queue that drives the guest's GetMessageW loop.
+   */
+  classWndProcs = /* @__PURE__ */ new Map();
+  windowRecords = /* @__PURE__ */ new Map();
+  /** LoadMenuW handle -> parsed RT_MENU sections (Layer 3 menu bar). */
+  menuByHandle = /* @__PURE__ */ new Map();
+  /** Class atom -> menu parsed from WNDCLASSEXW.lpszMenuName (RT_MENU). */
+  classMenus = /* @__PURE__ */ new Map();
+  /** RT_MENU (type 4) resources by numeric id, from the exe/MUI table. */
+  menuResourceTable = /* @__PURE__ */ new Map();
+  guiMessageQueue = [];
+  /** GDI draw operations captured by the Layer 2 bridge. */
+  paintCommands = [];
+  /** Pseudo object handles minted by GDI handlers (DC / font / brush / pen). */
+  gdiObjSeq = 12288;
+  /** Interactive mode flag (see GuestProcessOptions.interactive). */
+  interactive = false;
+  /** Set by PostQuitMessage; GetMessageW returns 0 (WM_QUIT) once set. */
+  quitRequested = false;
+  /** Resolver for the GetMessageW block in interactive mode. */
+  pendingMessageResolve = null;
+  /**
+   * Console input buffer (UTF-16 code units as a JS string). Fed by the host
+   * via postInput (e.g. a terminal line + CRLF). ReadConsoleW/ReadConsoleA
+   * drain it; in interactive mode an empty buffer blocks the read until the
+   * host posts more input (mirrors the GetMessageW suspend/resume pattern).
+   */
+  stdinBuffer = "";
+  /** Resolver for a blocked ReadConsoleW/A in interactive mode. */
+  pendingInputResolve = null;
+  /** Host callback for EDIT text changes (see GuestProcessOptions.onTextChanged). */
+  onTextChanged;
+  /** Host callback when GetMessageW blocks (see GuestProcessOptions.onMessageWait). */
+  onMessageWait;
+  /** Host-driven file dialog (see GuestProcessOptions.fileDialog). */
+  fileDialog;
+  /** True when MUI satellite resources were merged (real strings/menus). */
+  muiLoaded = false;
+  /** Path of the .mui file that was merged (diagnostics). */
+  muiSource = "";
+  /** Current working directory (Get/SetCurrentDirectory), per run. */
+  cwd = "C:\\";
+  /** Command line reported by GetCommandLineW/A (see GuestProcessOptions). */
+  commandLine = "";
+  /** Wide environment block pointer (GetEnvironmentStringsW). */
+  wideEnvBlock = 0;
+  /** Narrow environment block pointer (GetEnvironmentStringsA). */
+  narrowEnvBlock = 0;
+  async run(image, options = {}) {
+    this.stdout.length = 0;
+    this.stderr.length = 0;
+    this.exitCode = 0;
+    this.exitRequested = false;
+    this.onOutput = options.onOutput;
+    this.modulePath = options.modulePath ?? "";
+    this.readFile = options.readFile;
+    this.sehPending = 0;
+    this.sehDepth = 0;
+    this.sehTransfer = null;
+    this.classWndProcs.clear();
+    this.windowRecords.clear();
+    this.guiMessageQueue.length = 0;
+    this.paintCommands = [];
+    this.gdiObjSeq = 12288;
+    this.gdiBridgeByHdc.clear();
+    this.gdiBridgeProvider = options.gdiBridge;
+    this.interactive = options.interactive ?? false;
+    this.quitRequested = false;
+    this.pendingMessageResolve = null;
+    this.stdinBuffer = "";
+    this.pendingInputResolve = null;
+    this.onTextChanged = options.onTextChanged;
+    this.onMessageWait = options.onMessageWait;
+    this.fileDialog = options.fileDialog;
+    this.muiLoaded = false;
+    this.muiSource = "";
+    this.cwd = options.cwd ?? "C:\\";
+    this.commandLine = options.commandLine ?? "";
+    this.runtime.resetCpu();
+    const pe = await this.loader.load(image);
+    const mapped = mapPeImage(this.runtime, image, pe);
+    for (const p of options.patches ?? []) {
+      this.runtime.writeBytes(p.va, new Uint8Array(p.bytes));
     }
-    if (existing && existing.kind === "file" && existing.size > 0) continue;
-    const res = await fetch(f.url);
-    if (!res.ok) {
-      console.warn(`[specter-core] builtin fetch failed ${f.url}: ${res.status}`);
-      continue;
+    const stubs = [...mapped.stubs];
+    let dynStubCursor = mapped.stubEnd;
+    await this.installStartupHandlers(pe, mapped, stubs, () => dynStubCursor, (next) => {
+      dynStubCursor = next;
+    }, image);
+    this.installFileDialogs();
+    const mode = pe.is64 ? "x64" : "x86";
+    const jit = options.createEngine ? options.createEngine(mode) : this.jit;
+    const stackTop = options.stackTop ?? DEFAULT_STACK_TOP;
+    const width = mode === "x64" ? 8 : 4;
+    const stackHeadroom = 524288;
+    this.runtime.ensure(stackTop + stackHeadroom);
+    this.runtime.writeInt32(stackTop - 4, 0);
+    if (mode === "x64") this.runtime.writeInt32(stackTop - 8, 0);
+    this.runtime.setReg(mode === "x64" ? "rsp" : "esp", stackTop - width);
+    const dispatcher = new ApiTrapDispatcher(this.interceptor, this.runtime, stubs, 16, mode);
+    this.installSehDispatch(dispatcher, jit, mode);
+    this.installGuiBridge(dispatcher, jit, mode);
+    const trapHandler = {
+      handle: async (vector, rt) => {
+        if (vector === SEH_SENTINEL_VECTOR) {
+          this.handleSehSentinel(rt);
+          return;
+        }
+        await dispatcher.handle(vector);
+        const last = dispatcher.lastCalled;
+        if (last && last.proc.toLowerCase() === "exitprocess") {
+          this.exitCode = rt.getReg("eax") & 4294967295;
+          this.exitRequested = true;
+          rt.setEip(0);
+        }
+      }
+    };
+    const executor = new Executor(this.runtime, jit, trapHandler, {
+      maxSteps: options.maxSteps,
+      onStep: options.probes?.length ? (eip, rt) => {
+        for (const p of options.probes ?? []) if (p.eip === eip) p.fn(rt);
+        options.onStep?.(eip, rt);
+      } : options.onStep
+    });
+    const result = await executor.run(mapped.entryPoint);
+    const guestResult = {
+      status: this.exitRequested ? "exit" : result.status,
+      exitCode: this.exitRequested ? this.exitCode : 0,
+      cleanExit: this.exitRequested,
+      eip: result.eip,
+      error: result.error,
+      stubs: mapped.stubs,
+      output: new Uint8Array(this.stdout),
+      stderrOutput: new Uint8Array(this.stderr),
+      windows: [...this.windowRecords.entries()].map(([hwnd, r]) => ({
+        hwnd,
+        className: r.className,
+        wndProc: r.wndProc,
+        parent: r.parent,
+        text: r.text,
+        menu: r.menu
+      })),
+      paintCommands: [...this.paintCommands],
+      muiLoaded: this.muiLoaded,
+      muiSource: this.muiSource
+    };
+    if (guestResult.status === "fault") options.onFault?.(this.runtime, guestResult);
+    return guestResult;
+  }
+  /**
+   * Startup-critical kernel32 functions every real exe needs before it can do
+   * anything useful. Installed per-run because they need the loaded image:
+   *  - GetModuleHandleW/A(NULL) -> the exe's image base (CRT fetches its own
+   *    module handle first thing; returning 0 aborts startup silently);
+   *  - GetProcAddress -> resolves the exe's own export table;
+   *  - LoadLibraryW/A -> pseudo-loads the exe itself so GetProcAddress works
+   *    against the returned handle (no real system DLLs exist yet).
+   */
+  async installStartupHandlers(pe, mapped, stubs, dynCursor, setDynCursor, image) {
+    const base = mapped.baseAddress;
+    const exports = /* @__PURE__ */ new Map();
+    const byOrdinal = /* @__PURE__ */ new Map();
+    for (const e of pe.exports) {
+      exports.set(e.name.toLowerCase(), e.address);
+      byOrdinal.set(e.ordinal, e.address);
     }
-    const data = new Uint8Array(await res.arrayBuffer());
-    const dirs = f.storePath.split("/").slice(0, -1);
-    let cur = "";
-    for (const d of dirs) {
-      cur = cur ? `${cur}/${d}` : d;
-      try {
-        await fs.createDirectory(cur);
-      } catch {
+    const readCStr = (address) => {
+      if (!address) return "";
+      const bytes = this.runtime.readBytes(address, 4096);
+      let end = 0;
+      while (end < bytes.byteLength && bytes[end] !== 0) end += 1;
+      return new TextDecoder("latin1").decode(bytes.subarray(0, end));
+    };
+    const readWStr = (address) => {
+      if (!address) return "";
+      const bytes = this.runtime.readBytes(address, 8192);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = "";
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const resourceTable = /* @__PURE__ */ new Map();
+    const namedResources = /* @__PURE__ */ new Map();
+    {
+      const view = new DataView(image.buffer, image.byteOffset, image.byteLength);
+      const u16 = (o) => o + 2 <= image.byteLength ? view.getUint16(o, true) : 0;
+      const u32 = (o) => o + 4 <= image.byteLength ? view.getUint32(o, true) : 0;
+      const eLfanew = u32(60);
+      const coff = eLfanew + 4;
+      const numSections = u16(coff + 2);
+      const optSize = u16(coff + 16);
+      const optMagic = u16(eLfanew + 24);
+      const dataDir = eLfanew + 24 + (optMagic === 523 ? 112 : 96);
+      const resRva = u32(dataDir + 16);
+      const secTable = coff + 20 + optSize;
+      let resRaw = 0;
+      for (let i = 0; i < numSections; i++) {
+        const s = secTable + i * 40;
+        if (u32(s + 12) === resRva) {
+          resRaw = u32(s + 20);
+          break;
+        }
+      }
+      if (resRaw) {
+        const r2o = (rva) => resRaw + (rva - resRva);
+        const inBounds = (o, n) => o >= 0 && o + n <= image.byteLength;
+        const walk = (rva, depth, typeId, nameId) => {
+          const off = r2o(rva);
+          if (!inBounds(off, 16)) return;
+          const named = u16(off + 12);
+          const ids = u16(off + 14);
+          for (let k = 0; k < named + ids; k++) {
+            const e = off + 16 + k * 8;
+            if (!inBounds(e, 8)) break;
+            const name = u32(e);
+            const data = u32(e + 4);
+            if (depth === 0) {
+              walk(resRva + (data & 2147483647), 1, name & 65535, 0);
+            } else if (depth === 1) {
+              walk(resRva + (data & 2147483647), 2, typeId, name & 65535);
+            } else {
+              const de = r2o(resRva + data);
+              if (inBounds(de, 8)) {
+                const key = (typeId & 65535) << 16 | nameId & 65535;
+                if (!resourceTable.has(key)) {
+                  resourceTable.set(key, { size: u32(de + 4), address: base + u32(de) });
+                }
+              }
+            }
+          }
+        };
+        walk(resRva, 0, 0, 0);
       }
     }
-    const file = await fs.openFile(f.storePath, "write");
-    try {
-      await file.write(0, data);
-    } finally {
-      await file.close();
+    let lastResourceKey = 0;
+    this.interceptor.hook("kernel32.dll", "FindResourceW", (ctx) => {
+      const name = ctx.rawArgs[1] ?? 0;
+      const type = ctx.rawArgs[2] ?? 0;
+      if (type > 65535 || (name & 2147483648) !== 0) return { returnValue: 0, errorCode: E.ERROR_FILE_NOT_FOUND };
+      const key = (type & 65535) << 16 | name & 65535;
+      if (!resourceTable.has(key)) return { returnValue: 0, errorCode: E.ERROR_FILE_NOT_FOUND };
+      lastResourceKey = key;
+      return { returnValue: key, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "SizeofResource", (ctx) => {
+      const key = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const entry = resourceTable.get(key);
+      return entry ? { returnValue: entry.size, errorCode: E.NO_ERROR } : { returnValue: 0, errorCode: E.ERROR_FILE_NOT_FOUND };
+    });
+    this.interceptor.hook("kernel32.dll", "LoadResource", () => ({ returnValue: 2, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "LockResource", () => {
+      const entry = resourceTable.get(lastResourceKey);
+      return entry ? { returnValue: entry.address, errorCode: E.NO_ERROR } : { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    const readWChar = (addr) => {
+      const b = this.runtime.readBytes(addr, 2);
+      return b.byteLength >= 2 ? new DataView(b.buffer, b.byteOffset, 2).getUint16(0, true) : 0;
+    };
+    this.interceptor.hook("user32.dll", "LoadStringW", (ctx) => {
+      const id = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const buf = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const cch = (ctx.rawArgs[3] ?? 0) >>> 0;
+      if (!buf || !cch) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const block = resourceTable.get(6 << 16 | (id >> 4) + 1);
+      if (block) {
+        let off = block.address;
+        const slot = id & 15;
+        for (let i = 0; i < 16; i++) {
+          const b = this.runtime.readBytes(off, 1);
+          const len = b.byteLength >= 1 ? b[0] : 0;
+          if (i === slot) {
+            const n2 = Math.min(len, cch);
+            const w2 = new Uint8Array(n2 * 2);
+            for (let j = 0; j < n2; j++) {
+              const c = readWChar(off + 1 + j * 2);
+              w2[j * 2] = c & 255;
+              w2[j * 2 + 1] = c >> 8 & 255;
+            }
+            this.runtime.writeBytes(buf, w2);
+            this.runtime.writeInt32(buf + n2 * 2, 0);
+            return { returnValue: n2, errorCode: E.NO_ERROR };
+          }
+          off += 1 + len * 2;
+        }
+      }
+      const placeholder = `S${id}`;
+      const n = Math.min(placeholder.length, cch - 1);
+      const w = new Uint8Array(n * 2 + 2);
+      for (let j = 0; j < n; j++) {
+        const c = placeholder.charCodeAt(j);
+        w[j * 2] = c & 255;
+        w[j * 2 + 1] = c >> 8 & 255;
+      }
+      this.runtime.writeBytes(buf, w);
+      return { returnValue: n, errorCode: E.NO_ERROR };
+    });
+    const rd16 = (a) => {
+      const b = this.runtime.readBytes(a >>> 0, 2);
+      return b.byteLength >= 2 ? new DataView(b.buffer, b.byteOffset, 2).getUint16(0, true) : 0;
+    };
+    const readMsgTable = (addr, size, msgId) => {
+      const nb = this.runtime.readInt32(addr);
+      for (let b = 0; b < nb; b++) {
+        const bo = addr + 4 + b * 12;
+        const low = this.runtime.readInt32(bo) >>> 0;
+        const high = this.runtime.readInt32(bo + 4) >>> 0;
+        const off = this.runtime.readInt32(bo + 8) >>> 0;
+        if (msgId < low || msgId > high) continue;
+        let eo = addr + off;
+        const idx = msgId - low;
+        for (let i = 0; i < idx; i++) {
+          const len2 = rd16(eo);
+          if (len2 < 4) return null;
+          eo = eo + len2 + 3 & ~3;
+        }
+        const len = rd16(eo);
+        if (len < 4) return null;
+        const flags = rd16(eo + 2);
+        const tlen = len - 4;
+        if (flags & 1) {
+          let s2 = "";
+          for (let i = 0; i + 1 < tlen; i += 2) {
+            const c = rd16(eo + 4 + i);
+            if (c === 0) break;
+            s2 += String.fromCharCode(c);
+          }
+          return s2;
+        }
+        let s = "";
+        for (let i = 0; i < tlen; i++) {
+          const c = rd16(eo + 4 + i) & 255;
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      }
+      return null;
+    };
+    const lookupMsgTable = (msgId) => {
+      for (const [key, entry] of resourceTable) {
+        if (key >>> 16 !== 11) continue;
+        const t = readMsgTable(entry.address, entry.size, msgId);
+        if (t !== null) return t;
+      }
+      return null;
+    };
+    const SYSTEM_MESSAGE_TEXT = {
+      2: "The system cannot find the file specified.",
+      3: "The system cannot find the path specified.",
+      5: "Access is denied.",
+      6: "The handle is invalid.",
+      8: "Not enough storage is available to process this command.",
+      87: "The parameter is incorrect.",
+      120: "This function is not supported on this system.",
+      123: "The filename, directory name, or volume label syntax is incorrect.",
+      267: "The directory name is invalid.",
+      317: "The system cannot find message text for message number 0x%1 in the message file for %2."
+    };
+    this.interceptor.hook("kernel32.dll", "FormatMessageW", (ctx) => {
+      const flags = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const hModule = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const msgId = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const bufPtr = (ctx.rawArgs[4] ?? 0) >>> 0;
+      const nSize = (ctx.rawArgs[5] ?? 0) >>> 0;
+      const allocBuf = (flags & 256) !== 0;
+      const fromModule = (flags & 2048) !== 0;
+      const fromSystem = (flags & 4096) !== 0;
+      let text = null;
+      if (fromModule && hModule === 0) text = lookupMsgTable(msgId);
+      if (text === null && fromSystem) text = SYSTEM_MESSAGE_TEXT[msgId] ?? null;
+      if (text === null) return { returnValue: 0, errorCode: 317 };
+      let argsPtr = (ctx.rawArgs[6] ?? 0) >>> 0;
+      const argArray = (flags & 8192) !== 0;
+      if (argsPtr && !(flags & 512) && !argArray) {
+        argsPtr = this.runtime.readInt32(argsPtr) >>> 0;
+      }
+      const readArgW = (i) => {
+        if (!argsPtr) return "";
+        const p = this.runtime.readInt32(argsPtr + i * 4) >>> 0;
+        if (!p) return "";
+        let s = "";
+        for (let j = 0; j < 512; j++) {
+          const c = rd16(p + j * 2);
+          if (c === 0) break;
+          s += String.fromCharCode(c);
+        }
+        return s;
+      };
+      if (argsPtr && !(flags & 512)) {
+        text = text.replace(/%([1-9])/g, (_m, d) => readArgW(Number(d) - 1));
+      }
+      const chars = text.length;
+      const outAddr = allocBuf ? bumpAlloc(chars * 2 + 8) : bufPtr;
+      if (allocBuf && bufPtr) this.runtime.writeInt32(bufPtr, outAddr);
+      const cap = allocBuf ? chars + 1 : Math.max(0, nSize);
+      const n = Math.min(chars, cap);
+      const w = new Uint8Array(n * 2 + 2);
+      for (let i = 0; i < n; i++) {
+        const c = text.charCodeAt(i);
+        w[i * 2] = c & 255;
+        w[i * 2 + 1] = c >> 8 & 255;
+      }
+      this.runtime.writeBytes(outAddr, w);
+      return { returnValue: n, errorCode: E.NO_ERROR };
+    });
+    const loadResBytes = (ctx, type) => {
+      const name = ctx.rawArgs[1] ?? 0;
+      let entry;
+      if (name >>> 16 === 0) {
+        const key = (type & 65535) << 16 | name & 65535;
+        entry = resourceTable.get(key);
+        if (entry) lastResourceKey = key;
+      } else {
+        const s = readWStr(name).toLowerCase();
+        if (s) entry = namedResources.get(`${type}:${s}`);
+      }
+      if (entry) return { returnValue: entry.address, errorCode: E.NO_ERROR };
+      return { returnValue: ++resHandleSeq, errorCode: E.NO_ERROR };
+    };
+    let resHandleSeq = 8192;
+    this.interceptor.hook("user32.dll", "LoadMenuW", (ctx) => {
+      const res = loadResBytes(ctx, 4);
+      if (res.returnValue) this.menuByHandle.set(res.returnValue, this.parseMenuResource(res.returnValue));
+      return res;
+    });
+    this.interceptor.hook("user32.dll", "LoadMenuA", (ctx) => loadResBytes(ctx, 4));
+    this.interceptor.hook("user32.dll", "LoadAcceleratorsW", (ctx) => loadResBytes(ctx, 9));
+    this.interceptor.hook("user32.dll", "LoadAcceleratorsA", (ctx) => loadResBytes(ctx, 9));
+    let uiHandleSeq = 4096;
+    const pseudoUiHandle = () => ({ returnValue: ++uiHandleSeq, errorCode: E.NO_ERROR });
+    this.interceptor.hook("user32.dll", "LoadCursorW", pseudoUiHandle);
+    this.interceptor.hook("user32.dll", "LoadCursorA", pseudoUiHandle);
+    this.interceptor.hook("user32.dll", "LoadIconW", pseudoUiHandle);
+    this.interceptor.hook("user32.dll", "LoadIconA", pseudoUiHandle);
+    let mutexSeq = 131072;
+    const createMutex = () => ({ returnValue: ++mutexSeq, errorCode: E.NO_ERROR });
+    this.interceptor.hook("kernel32.dll", "CreateMutexExW", createMutex);
+    this.interceptor.hook("kernel32.dll", "CreateMutexW", createMutex);
+    this.interceptor.hook("kernel32.dll", "CreateMutexA", createMutex);
+    this.interceptor.hook("kernel32.dll", "OpenMutexW", createMutex);
+    this.interceptor.hook("kernel32.dll", "OpenMutexA", createMutex);
+    this.interceptor.hook("kernel32.dll", "ReleaseMutex", () => this.ok1());
+    this.interceptor.hook("kernel32.dll", "OpenSemaphoreW", () => ({
+      returnValue: 0,
+      errorCode: E.ERROR_FILE_NOT_FOUND
+    }));
+    this.interceptor.hook("kernel32.dll", "OpenSemaphoreA", () => ({
+      returnValue: 0,
+      errorCode: E.ERROR_FILE_NOT_FOUND
+    }));
+    this.interceptor.hook("kernel32.dll", "CreateSemaphoreExW", createMutex);
+    this.interceptor.hook("kernel32.dll", "GetLastError", (ctx) => ({
+      returnValue: this.interceptor.getLastError(ctx.pid),
+      errorCode: E.NO_ERROR
+    }));
+    this.interceptor.hook("kernel32.dll", "SetLastError", (ctx) => {
+      this.interceptor.setLastError(ctx.pid, ctx.rawArgs[0] ?? 0);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    const moduleHandle = (ctx) => {
+      const name = ctx.rawArgs[0] ?? 0;
+      if (name === 0) return { returnValue: base, errorCode: E.NO_ERROR };
+      const s = readWStr(name).toLowerCase();
+      if (s && /^(kernel32|kernelbase|ntdll|ucrtbase|user32|gdi32|advapi32|shell32|comdlg32|ole32|comctl32|shlwapi|msvcrt|version|winmm|oleaut32|setupapi|api-ms-win-)/.test(s)) {
+        return { returnValue: 1879048192, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("kernel32.dll", "GetModuleHandleW", moduleHandle);
+    this.interceptor.hook("kernel32.dll", "GetModuleHandleA", moduleHandle);
+    const allocDynamicStub = (procName, moduleName) => {
+      let module = "kernel32.dll";
+      for (const key of this.interceptor.listHooks()) {
+        const bang = key.indexOf("!");
+        if (bang > 0 && key.slice(bang + 1).toLowerCase() === procName.toLowerCase()) {
+          module = key.slice(0, bang);
+          break;
+        }
+      }
+      const argCount = (moduleName ? X86_API_ARG_COUNT[`${moduleName.toLowerCase()}!${procName.toLowerCase()}`] : void 0) ?? X86_API_ARG_COUNT[procName.toLowerCase()] ?? 0;
+      const index = stubs.length;
+      const stubAddress = dynCursor();
+      const stubLen = argCount === 0 ? 8 : 10;
+      const stub = new Uint8Array(stubLen);
+      stub[0] = 184;
+      stub[1] = index & 255;
+      stub[2] = index >> 8 & 255;
+      stub[3] = index >> 16 & 255;
+      stub[4] = index >> 24 & 255;
+      stub[5] = 205;
+      stub[6] = 46;
+      if (argCount > 0) {
+        const popBytes = argCount * 4;
+        stub[7] = 194;
+        stub[8] = popBytes & 255;
+        stub[9] = popBytes >> 8 & 255;
+      } else {
+        stub[7] = 195;
+      }
+      this.runtime.writeBytes(stubAddress, stub);
+      stubs.push({ index, module, proc: procName, stubAddress, iatAddress: 0 });
+      setDynCursor(stubAddress + stubLen);
+      return stubAddress;
+    };
+    this.interceptor.hook("kernel32.dll", "GetProcAddress", (ctx) => {
+      const mod = ctx.rawArgs[0] ?? 0;
+      const name = ctx.rawArgs[1] ?? 0;
+      if (name === 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      if ((name & 2147483648) !== 0) {
+        const address = byOrdinal.get(name & 65535);
+        return address === void 0 ? { returnValue: 0, errorCode: E.NO_ERROR } : { returnValue: base + address, errorCode: E.NO_ERROR };
+      }
+      const procName = readCStr(name).toLowerCase();
+      if (!procName) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const own = exports.get(procName);
+      if (own !== void 0) return { returnValue: base + own, errorCode: E.NO_ERROR };
+      if (mod !== 0 && mod !== base) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const stub = allocDynamicStub(procName);
+      return { returnValue: stub, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "ResolveDelayLoadedAPI", (ctx) => {
+      const parentBase = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const desc = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const thunk = (ctx.rawArgs[4] ?? 0) >>> 0;
+      const rd32 = (a) => a ? this.runtime.readInt32(a) >>> 0 : 0;
+      const dllRva = rd32(desc + 4);
+      const iatRva = rd32(desc + 12);
+      const intRva = rd32(desc + 16);
+      if (!parentBase || !dllRva || !intRva || !thunk || !iatRva) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const dllName = readCStr(parentBase + dllRva).toLowerCase();
+      const idx = (thunk - (parentBase + iatRva)) / 4;
+      const intThunk = parentBase + intRva + idx * 4;
+      const nameVal = rd32(intThunk);
+      let procName;
+      if (nameVal & 2147483648) {
+        procName = `#${nameVal & 65535}`;
+      } else {
+        procName = readCStr(parentBase + nameVal + 2);
+      }
+      if (!procName) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const stub = allocDynamicStub(procName, dllName);
+      if (!stub) return { returnValue: 0, errorCode: E.NO_ERROR };
+      this.runtime.writeInt32(thunk, stub);
+      if (dllName) this.runtime.writeInt32(thunk + 4, 0);
+      return { returnValue: stub, errorCode: E.NO_ERROR };
+    });
+    const pseudoLoad = () => ({ returnValue: base, errorCode: E.NO_ERROR });
+    this.interceptor.hook("kernel32.dll", "LoadLibraryW", pseudoLoad);
+    this.interceptor.hook("kernel32.dll", "LoadLibraryA", pseudoLoad);
+    const crtExit = (ctx) => {
+      this.exitCode = (ctx.rawArgs[0] ?? 0) & 4294967295;
+      this.exitRequested = true;
+      this.runtime.setEip(0);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    for (const name of ["_exit", "_Exit", "exit", "_o_exit", "_o__exit"]) {
+      this.interceptor.hook("ucrtbase.dll", name, crtExit);
     }
-    console.warn(`[specter-core] provisioned ${f.storePath} (${data.byteLength} bytes)`);
+    if (this.modulePath) {
+      const pathW = this.modulePath.replace(/\//g, "\\") + "\0";
+      const pathA = pathW;
+      this.interceptor.hook("kernel32.dll", "GetModuleFileNameW", (ctx) => {
+        const buf = ctx.rawArgs[1] ?? 0;
+        const cap = ctx.rawArgs[2] ?? 0;
+        if (!buf || !cap) return { returnValue: 0, errorCode: E.NO_ERROR };
+        const bytes = new TextEncoder().encode(pathW);
+        const n = Math.min(cap, pathW.length - 1);
+        const w = new Uint8Array(n * 2);
+        for (let i = 0; i < n; i++) w[i * 2] = bytes[i] ?? 0;
+        this.runtime.writeBytes(buf, w);
+        return { returnValue: n, errorCode: E.NO_ERROR };
+      });
+      this.interceptor.hook("kernel32.dll", "GetModuleFileNameA", (ctx) => {
+        const buf = ctx.rawArgs[1] ?? 0;
+        const cap = ctx.rawArgs[2] ?? 0;
+        if (!buf || !cap) return { returnValue: 0, errorCode: E.NO_ERROR };
+        const bytes = new TextEncoder().encode(pathA);
+        const n = Math.min(cap, pathA.length);
+        this.runtime.writeBytes(buf, bytes.subarray(0, n));
+        return { returnValue: n, errorCode: E.NO_ERROR };
+      });
+    }
+    this.interceptor.hook("kernel32.dll", "SetFilePointer", (ctx, host) => {
+      const handle = ctx.rawArgs[0] ?? 0;
+      const dist = (ctx.rawArgs[1] ?? 0) | 0;
+      const method = ctx.rawArgs[3] ?? 0;
+      return host.fs.setFilePointer(handle, dist, method).then((r) => r.error === E.NO_ERROR ? { returnValue: r.newPointer, errorCode: E.NO_ERROR } : { returnValue: 4294967295, errorCode: r.error });
+    });
+    this.interceptor.hook("kernel32.dll", "CreateFileW", (ctx, host) => {
+      const path = readWStr(ctx.rawArgs[0] ?? 0);
+      if (!path) return { returnValue: 4294967295, errorCode: E.ERROR_FILE_NOT_FOUND };
+      return host.fs.createFile(path, ctx.rawArgs[1] ?? 0, ctx.rawArgs[2] ?? 0, ctx.rawArgs[4] ?? 0, ctx.rawArgs[5] ?? 0).then((r) => r.error === E.NO_ERROR ? { returnValue: r.handle, errorCode: E.NO_ERROR } : { returnValue: 4294967295, errorCode: r.error });
+    });
+    const memSize = this.runtime.memory.buffer.byteLength;
+    this.interceptor.hook("kernel32.dll", "VirtualQuery", (ctx) => {
+      const address = ctx.rawArgs[0] ?? 0;
+      const out = ctx.rawArgs[1] ?? 0;
+      const len = ctx.rawArgs[2] ?? 0;
+      if (!address || !out || address >= memSize) return { returnValue: 0, errorCode: E.ERROR_INVALID_PARAMETER };
+      const baseAddress = address & ~4095;
+      const regionSize = memSize - baseAddress;
+      const w = new Uint8Array(28);
+      const view = new DataView(w.buffer);
+      view.setUint32(0, baseAddress, true);
+      view.setUint32(4, baseAddress, true);
+      view.setUint32(8, 4, true);
+      view.setUint32(12, regionSize, true);
+      view.setUint32(16, 4096, true);
+      view.setUint32(20, 4, true);
+      view.setUint32(24, 131072, true);
+      const n = Math.min(28, len);
+      this.runtime.writeBytes(out, w.subarray(0, n));
+      return { returnValue: n, errorCode: E.NO_ERROR };
+    });
+    const heapBase = this.runtime.memory.buffer.byteLength + 65535 & ~65535;
+    let heapCursor = heapBase;
+    const heapHandle = heapBase;
+    const bumpAlloc = (size) => {
+      const blockSize = Math.max(8, size + 8 + 7 & ~7);
+      heapCursor = heapCursor + 7 & ~7;
+      const user = heapCursor;
+      heapCursor += blockSize;
+      this.runtime.ensure(heapCursor + 4096);
+      this.runtime.writeInt32(user - 4, blockSize);
+      return user;
+    };
+    this.sehSentinelAddr = bumpAlloc(8);
+    this.sehExcAddr = bumpAlloc(128);
+    this.sehCtxAddr = bumpAlloc(X86_CONTEXT_SIZE);
+    this.runtime.writeBytes(this.sehSentinelAddr, new Uint8Array([205, SEH_SENTINEL_VECTOR]));
+    const cmdLine = this.commandLine;
+    const envEntries = [
+      ["=C:", "C:\\"],
+      ["SystemRoot", "C:\\Windows"],
+      ["COMSPEC", "C:\\Windows\\System32\\cmd.exe"],
+      ["PATH", "C:\\Windows\\SysWOW64;C:\\Windows\\System32;C:\\Windows"],
+      ["TEMP", "C:\\Users\\Guest\\AppData\\Local\\Temp"],
+      ["TMP", "C:\\Users\\Guest\\AppData\\Local\\Temp"],
+      ["USERPROFILE", "C:\\Users\\Guest"],
+      ["HOMEDRIVE", "C:"],
+      ["HOMEPATH", "\\Users\\Guest"],
+      ["PROMPT", "$P$G"],
+      ["PATHEXT", ".COM;.EXE;.BAT;.CMD"],
+      ["OS", "Windows_NT"],
+      ["NUMBER_OF_PROCESSORS", "1"],
+      ["PROCESSOR_ARCHITECTURE", "x86"]
+    ];
+    const cmdLineW = bumpAlloc((cmdLine.length + 1) * 2);
+    {
+      const w = new Uint8Array((cmdLine.length + 1) * 2);
+      for (let i = 0; i < cmdLine.length; i++) {
+        w[i * 2] = cmdLine.charCodeAt(i) & 255;
+        w[i * 2 + 1] = cmdLine.charCodeAt(i) >> 8 & 255;
+      }
+      this.runtime.writeBytes(cmdLineW, w);
+    }
+    const cmdLineA = bumpAlloc(cmdLine.length + 1);
+    {
+      const w = new Uint8Array(cmdLine.length + 1);
+      for (let i = 0; i < cmdLine.length; i++) w[i] = cmdLine.charCodeAt(i) & 255;
+      this.runtime.writeBytes(cmdLineA, w);
+    }
+    this.interceptor.hook("kernel32.dll", "GetCommandLineW", () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "GetCommandLineA", () => ({ returnValue: cmdLineA, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("ucrtbase.dll", "_o__get_wide_winmain_command_line", () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("ucrtbase.dll", "_get_wide_winmain_command_line", () => ({ returnValue: cmdLineW, errorCode: E.NO_ERROR }));
+    const argvParts = this.commandLine.trim().split(/\s+/).filter(Boolean);
+    const argvSlot = bumpAlloc((argvParts.length + 1) * 4);
+    const argvStrings = [];
+    for (const part of argvParts) {
+      const p = bumpAlloc(part.length + 1);
+      const w = new Uint8Array(part.length + 1);
+      for (let i = 0; i < part.length; i++) w[i] = part.charCodeAt(i) & 255;
+      this.runtime.writeBytes(p, w);
+      argvStrings.push(p);
+    }
+    for (let i = 0; i < argvStrings.length; i++) {
+      this.runtime.writeInt32(argvSlot + i * 4, argvStrings[i]);
+    }
+    this.runtime.writeInt32(argvSlot + argvStrings.length * 4, 0);
+    const argvWSlot = bumpAlloc((argvParts.length + 1) * 4);
+    const argvWStrings = [];
+    for (const part of argvParts) {
+      const p = bumpAlloc((part.length + 1) * 2);
+      const w = new Uint8Array((part.length + 1) * 2);
+      for (let i = 0; i < part.length; i++) {
+        w[i * 2] = part.charCodeAt(i) & 255;
+        w[i * 2 + 1] = part.charCodeAt(i) >> 8 & 255;
+      }
+      this.runtime.writeBytes(p, w);
+      argvWStrings.push(p);
+    }
+    for (let i = 0; i < argvWStrings.length; i++) {
+      this.runtime.writeInt32(argvWSlot + i * 4, argvWStrings[i]);
+    }
+    this.runtime.writeInt32(argvWSlot + argvWStrings.length * 4, 0);
+    const envSlot = bumpAlloc((envEntries.length + 1) * 4);
+    {
+      let i = 0;
+      for (const [k, v] of envEntries) {
+        const s = `${k}=${v}`;
+        const p = bumpAlloc(s.length + 1);
+        const w = new Uint8Array(s.length + 1);
+        for (let j = 0; j < s.length; j++) w[j] = s.charCodeAt(j) & 255;
+        this.runtime.writeBytes(p, w);
+        this.runtime.writeInt32(envSlot + i * 4, p);
+        i++;
+      }
+      this.runtime.writeInt32(envSlot + i * 4, 0);
+    }
+    {
+      let total = 0;
+      for (const [k, v] of envEntries) total += k.length + 1 + v.length + 1;
+      const buf = bumpAlloc((total + 1) * 2);
+      const w = new Uint8Array((total + 1) * 2);
+      let off = 0;
+      for (const [k, v] of envEntries) {
+        const s = `${k}=${v}`;
+        for (let i = 0; i < s.length; i++) {
+          w[off * 2] = s.charCodeAt(i) & 255;
+          w[off * 2 + 1] = s.charCodeAt(i) >> 8 & 255;
+          off++;
+        }
+        off++;
+      }
+      off++;
+      this.runtime.writeBytes(buf, w);
+      this.wideEnvBlock = buf;
+    }
+    {
+      let total = 0;
+      for (const [k, v] of envEntries) total += k.length + 1 + v.length + 1;
+      const buf = bumpAlloc(total + 1);
+      const w = new Uint8Array(total + 1);
+      let off = 0;
+      for (const [k, v] of envEntries) {
+        const s = `${k}=${v}`;
+        for (let i = 0; i < s.length; i++) w[off++] = s.charCodeAt(i) & 255;
+        off++;
+      }
+      w[off] = 0;
+      this.runtime.writeBytes(buf, w);
+      this.narrowEnvBlock = buf;
+    }
+    this.interceptor.hook("kernel32.dll", "GetEnvironmentStringsW", () => ({ returnValue: this.wideEnvBlock, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "GetEnvironmentStringsA", () => ({ returnValue: this.narrowEnvBlock, errorCode: E.NO_ERROR }));
+    for (const name of ["_o___p___argv", "___p___argv", "__p___argv", "_o___p___argc", "___p___argc", "__p___argc", "_o___p___wargv", "___p___wargv", "__p___wargv", "_o___p___wargc", "___p___wargc", "__p___wargc"]) {
+      this.interceptor.hook("ucrtbase.dll", name, () => ({
+        returnValue: name.toLowerCase().endsWith("argc") ? argvParts.length : name.includes("wargv") ? argvWSlot : argvSlot,
+        errorCode: E.NO_ERROR
+      }));
+    }
+    for (const name of ["_o__get_initial_narrow_environment", "_get_initial_narrow_environment", "_o__get_initial_wide_environment", "_get_initial_wide_environment", "_o__environ", "___environ"]) {
+      this.interceptor.hook("ucrtbase.dll", name, () => ({ returnValue: envSlot, errorCode: E.NO_ERROR }));
+    }
+    const readW = (a) => {
+      if (!a) return "";
+      const bytes = this.runtime.readBytes(a, 2048);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = "";
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const writeW = (a, s, maxChars) => {
+      const n = Math.min(s.length, Math.max(0, maxChars - 1));
+      const w = new Uint8Array(n * 2 + 2);
+      for (let i = 0; i < n; i++) {
+        w[i * 2] = s.charCodeAt(i) & 255;
+        w[i * 2 + 1] = s.charCodeAt(i) >> 8 & 255;
+      }
+      this.runtime.writeBytes(a, w);
+      return n;
+    };
+    const readA = (a) => {
+      if (!a) return "";
+      const bytes = this.runtime.readBytes(a, 4096);
+      let s = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        if (bytes[i] === 0) break;
+        s += String.fromCharCode(bytes[i]);
+      }
+      return s;
+    };
+    const writeA = (a, s, maxChars) => {
+      const n = Math.min(s.length, Math.max(0, maxChars - 1));
+      const w = new Uint8Array(n + 1);
+      for (let i = 0; i < n; i++) w[i] = s.charCodeAt(i) & 255;
+      this.runtime.writeBytes(a, w);
+      return n;
+    };
+    const envVar = (name) => {
+      for (const [k, v] of envEntries) if (k === name) return v;
+      return void 0;
+    };
+    this.interceptor.hook("kernel32.dll", "GetEnvironmentVariableW", (ctx) => {
+      const name = readW(ctx.rawArgs[0] ?? 0);
+      const val = envVar(name);
+      if (val === void 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) return { returnValue: writeW(buf, val, ctx.rawArgs[2] ?? 0), errorCode: E.NO_ERROR };
+      return { returnValue: val.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "GetEnvironmentVariableA", (ctx) => {
+      const name = readA(ctx.rawArgs[0] ?? 0);
+      const val = envVar(name);
+      if (val === void 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) return { returnValue: writeA(buf, val, ctx.rawArgs[2] ?? 0), errorCode: E.NO_ERROR };
+      return { returnValue: val.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "GetCurrentDirectoryW", (ctx) => {
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) return { returnValue: writeW(buf, this.cwd, ctx.rawArgs[0] ?? 0), errorCode: E.NO_ERROR };
+      return { returnValue: this.cwd.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "GetCurrentDirectoryA", (ctx) => {
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) {
+        const w = new Uint8Array(this.cwd.length + 1);
+        for (let i = 0; i < this.cwd.length; i++) w[i] = this.cwd.charCodeAt(i) & 255;
+        this.runtime.writeBytes(buf, w);
+      }
+      return { returnValue: this.cwd.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "GetFullPathNameW", (ctx) => {
+      const input = readW(ctx.rawArgs[0] ?? 0);
+      const cap = ctx.rawArgs[1] ?? 0;
+      const buf = ctx.rawArgs[2] ?? 0;
+      const filePart = ctx.rawArgs[3] ?? 0;
+      let absolute;
+      if (/^[A-Za-z]:[\\/]/.test(input)) {
+        absolute = input;
+      } else if (input.startsWith("\\") || input.startsWith("/")) {
+        const rest = input.replace(/^[\\/]+/, "");
+        const drive = this.cwd.match(/^[A-Za-z]:/) ? this.cwd.slice(0, 2) : "C:";
+        absolute = rest ? `${drive}\\${rest}` : `${drive}\\`;
+      } else {
+        absolute = `${this.cwd.replace(/[\\/]$/, "")}\\${input}`;
+      }
+      if (!buf || !cap) return { returnValue: absolute.length, errorCode: E.NO_ERROR };
+      if (absolute.length >= cap) {
+        writeW(buf, absolute, cap);
+        return { returnValue: absolute.length + 1, errorCode: E.NO_ERROR };
+      }
+      writeW(buf, absolute, cap);
+      if (filePart) {
+        const slash = Math.max(absolute.lastIndexOf("\\"), absolute.lastIndexOf("/"));
+        this.runtime.writeInt32(filePart, buf + Math.max(0, slash + 1) * 2 >>> 0);
+      }
+      return { returnValue: absolute.length, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "SetCurrentDirectoryW", (ctx) => {
+      const p = readW(ctx.rawArgs[0] ?? 0);
+      this.cwd = p || this.cwd;
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "SetCurrentDirectoryA", (ctx) => {
+      const p = ctx.rawArgs[0] ?? 0;
+      if (p) {
+        const bytes = this.runtime.readBytes(p, 2048);
+        let s = "";
+        for (const b of bytes) {
+          if (b === 0) break;
+          s += String.fromCharCode(b);
+        }
+        this.cwd = s || this.cwd;
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    const tlsSlotCount = 128;
+    const tlsArray = bumpAlloc(tlsSlotCount * 4);
+    this.runtime.writeInt32(44, tlsArray);
+    this.interceptor.hook("kernel32.dll", "TlsGetValue", (ctx) => {
+      const slot = (ctx.rawArgs[0] ?? 0) >>> 0;
+      return {
+        returnValue: slot < tlsSlotCount ? this.runtime.readInt32(tlsArray + slot * 4) : 0,
+        errorCode: E.NO_ERROR
+      };
+    });
+    this.interceptor.hook("kernel32.dll", "TlsSetValue", (ctx) => {
+      const slot = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const value = (ctx.rawArgs[1] ?? 0) >>> 0;
+      if (slot < tlsSlotCount) this.runtime.writeInt32(tlsArray + slot * 4, value);
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "GetProcessHeap", () => ({ returnValue: heapHandle, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "GetProcessHeapEx", () => ({ returnValue: heapHandle, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "HeapCreate", () => ({ returnValue: heapHandle, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "HeapDestroy", () => this.ok1());
+    this.interceptor.hook("kernel32.dll", "HeapAlloc", (ctx) => {
+      const size = ctx.rawArgs[2] ?? 0;
+      return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "HeapReAlloc", (ctx) => {
+      const old = ctx.rawArgs[2] ?? 0;
+      const size = ctx.rawArgs[3] ?? 0;
+      if (!old) return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
+      const oldSize = Math.max(0, this.runtime.readInt32(old - 4) & ~7);
+      const next = bumpAlloc(size);
+      const n = Math.min(oldSize, size);
+      if (n > 0) this.runtime.writeBytes(next, this.runtime.readBytes(old, n));
+      return { returnValue: next, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "HeapFree", () => this.ok1());
+    this.interceptor.hook("kernel32.dll", "HeapSize", (ctx) => {
+      const p = ctx.rawArgs[2] ?? 0;
+      return { returnValue: p ? Math.max(0, this.runtime.readInt32(p - 4) & ~7) : 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "LocalAlloc", (ctx) => {
+      const size = ctx.rawArgs[1] ?? 0;
+      return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "LocalFree", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "LocalSize", (ctx) => {
+      const p = ctx.rawArgs[0] ?? 0;
+      return { returnValue: p ? Math.max(0, this.runtime.readInt32(p - 4) & ~7) : 0, errorCode: E.NO_ERROR };
+    });
+    const ucrtAlloc = (ctx) => ({
+      returnValue: bumpAlloc(ctx.rawArgs[0] ?? 0),
+      errorCode: E.NO_ERROR
+    });
+    const ucrtRealloc = (ctx) => {
+      const old = ctx.rawArgs[0] ?? 0;
+      const size = ctx.rawArgs[1] ?? 0;
+      if (!old) return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
+      const oldSize = Math.max(0, this.runtime.readInt32(old - 4) & ~7);
+      const next = bumpAlloc(size);
+      const n = Math.min(oldSize, size);
+      if (n > 0) this.runtime.writeBytes(next, this.runtime.readBytes(old, n));
+      return { returnValue: next, errorCode: E.NO_ERROR };
+    };
+    const ucrtCalloc = (ctx) => {
+      const n = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const size = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const total = n * size;
+      const p = bumpAlloc(total);
+      if (total > 0) this.runtime.writeBytes(p, new Uint8Array(total));
+      return { returnValue: p, errorCode: E.NO_ERROR };
+    };
+    for (const name of ["malloc", "_o_malloc", "_malloc_base"]) {
+      this.interceptor.hook("ucrtbase.dll", name, ucrtAlloc);
+    }
+    for (const name of ["calloc", "_o_calloc", "_calloc_base"]) {
+      this.interceptor.hook("ucrtbase.dll", name, ucrtCalloc);
+    }
+    for (const name of ["realloc", "_o_realloc", "_realloc_base"]) {
+      this.interceptor.hook("ucrtbase.dll", name, ucrtRealloc);
+    }
+    for (const name of ["free", "_o_free", "_free_base", "_o__free_base"]) {
+      this.interceptor.hook("ucrtbase.dll", name, () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    }
+    this.interceptor.hook("ole32.dll", "CoTaskMemAlloc", ucrtAlloc);
+    this.interceptor.hook("ole32.dll", "CoTaskMemRealloc", ucrtRealloc);
+    this.interceptor.hook("ole32.dll", "CoTaskMemFree", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    let guidCounter = 270544960;
+    this.interceptor.hook("ole32.dll", "CoCreateGuid", (ctx) => {
+      const p = ctx.rawArgs[0] ?? 0;
+      if (!p) return { returnValue: 2147942487, errorCode: E.NO_ERROR };
+      guidCounter = guidCounter + 2654435769 | 0;
+      const t = Date.now() & 4294967295;
+      this.runtime.writeInt32(p, guidCounter);
+      this.runtime.writeInt32(p + 4, t);
+      const b = new Uint8Array(8);
+      for (let i = 0; i < 8; i++) b[i] = (guidCounter >>> i * 4 ^ t >> i * 3) & 255;
+      this.runtime.writeBytes(p + 8, b);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("ole32.dll", "CoCreateInstance", () => ({
+      returnValue: 2147746132,
+      // REGDB_E_CLASSNOTREG
+      errorCode: E.NO_ERROR
+    }));
+    this.interceptor.hook("kernel32.dll", "LocalReAlloc", (ctx) => {
+      const old = ctx.rawArgs[0] ?? 0;
+      const size = ctx.rawArgs[1] ?? 0;
+      if (!old) return { returnValue: bumpAlloc(size), errorCode: E.NO_ERROR };
+      const oldSize = Math.max(0, this.runtime.readInt32(old - 4) & ~7);
+      const next = bumpAlloc(size);
+      const n = Math.min(oldSize, size);
+      if (n > 0) this.runtime.writeBytes(next, this.runtime.readBytes(old, n));
+      return { returnValue: next, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "VirtualAlloc", (ctx) => {
+      const size = ctx.rawArgs[1] ?? 0;
+      const type = ctx.rawArgs[2] ?? 0;
+      if (!size || (type & 4096) === 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      if ((heapCursor & 65535) !== 0) heapCursor = heapCursor + 65535 & ~65535;
+      const user = bumpAlloc(size);
+      return { returnValue: user, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "VirtualFree", () => this.ok1());
+    this.interceptor.hook("kernel32.dll", "VirtualProtect", () => this.ok1());
+    this.interceptor.hook("kernel32.dll", "Sleep", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    const createStringReference = (ctx) => {
+      const source = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const len = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const headerPtr = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const out = (ctx.rawArgs[3] ?? 0) >>> 0;
+      if (!out) return { returnValue: 2147942487, errorCode: E.NO_ERROR };
+      const p = bumpAlloc(len * 2 + 8);
+      this.runtime.writeInt32(p, len);
+      this.runtime.writeInt32(p + 4, 0);
+      if (source && len) {
+        this.runtime.writeBytes(p + 8, this.runtime.readBytes(source, len * 2));
+      }
+      this.runtime.writeInt32(out, p + 8);
+      void headerPtr;
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    const createString = (ctx) => {
+      const source = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const len = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const out = (ctx.rawArgs[2] ?? 0) >>> 0;
+      if (!out) return { returnValue: 2147942487, errorCode: E.NO_ERROR };
+      const p = bumpAlloc(len * 2 + 8);
+      this.runtime.writeInt32(p, len);
+      this.runtime.writeInt32(p + 4, 0);
+      if (source && len) {
+        this.runtime.writeBytes(p + 8, this.runtime.readBytes(source, len * 2));
+      }
+      this.runtime.writeInt32(out, p + 8);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    const getStringRawBuffer = (ctx) => {
+      const h = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const lenOut = (ctx.rawArgs[1] ?? 0) >>> 0;
+      if (lenOut) this.runtime.writeInt32(lenOut, h ? this.runtime.readInt32(h - 8) : 0);
+      return { returnValue: h, errorCode: E.NO_ERROR };
+    };
+    const failHr = () => ({ returnValue: 2147500033, errorCode: E.NO_ERROR });
+    this.interceptor.hook("kernel32.dll", "WindowsCreateStringReference", createStringReference);
+    this.interceptor.hook("kernel32.dll", "WindowsCreateString", createString);
+    this.interceptor.hook("kernel32.dll", "WindowsDeleteString", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("kernel32.dll", "WindowsGetStringRawBuffer", getStringRawBuffer);
+    const pmpFactoryAddr = (() => {
+      const vt = bumpAlloc(64);
+      const factory = bumpAlloc(16);
+      const slotName = (i) => i === 0 ? "pmp_qi" : i === 2 ? "pmp_release" : i === 12 ? "pmp_checkaccess" : i === 14 ? "pmp_isprotected" : "pmp_vtbl_stub";
+      for (let i = 0; i < 16; i++) {
+        const stub = allocDynamicStub(slotName(i));
+        this.runtime.writeInt32(vt + i * 4, stub);
+      }
+      this.runtime.writeInt32(factory, vt);
+      return factory;
+    })();
+    this.interceptor.hook("kernel32.dll", "RoGetActivationFactory", (ctx) => {
+      const classId = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const out = (ctx.rawArgs[2] ?? 0) >>> 0;
+      let name = "";
+      if (classId) {
+        const len = this.runtime.readInt32(classId - 8);
+        if (len >= 0 && len <= 256) {
+          const b = this.runtime.readBytes(classId, len * 2);
+          for (let i = 0; i + 1 < b.byteLength; i += 2) {
+            const c = b[i] | b[i + 1] << 8;
+            if (c === 0) break;
+            name += String.fromCharCode(c);
+          }
+        }
+      }
+      if (name === "Windows.Security.EnterpriseData.ProtectionPolicyManager") {
+        if (out) this.runtime.writeInt32(out, pmpFactoryAddr);
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: 2147500033, errorCode: E.NO_ERROR };
+    });
+    const pmpOk = () => ({ returnValue: 0, errorCode: E.NO_ERROR });
+    this.interceptor.hook("kernel32.dll", "pmp_vtbl_stub", pmpOk);
+    this.interceptor.hook("kernel32.dll", "pmp_qi", (ctx) => {
+      const out = ctx.rawArgs[2] ?? 0;
+      const self = ctx.rawArgs[0] ?? 0;
+      if (out) this.runtime.writeInt32(out, self);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "pmp_checkaccess", pmpOk);
+    this.interceptor.hook("kernel32.dll", "pmp_release", pmpOk);
+    this.interceptor.hook("kernel32.dll", "pmp_isprotected", (ctx) => {
+      const out = ctx.rawArgs[1] ?? 0;
+      if (out) this.runtime.writeInt32(out, 0);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "RoGetMatchingRestrictedErrorInfo", failHr);
+    this.interceptor.hook("kernel32.dll", "SetRestrictedErrorInfo", failHr);
+    this.interceptor.hook("kernel32.dll", "SHGetKnownFolderPath", failHr);
+    this.interceptor.hook("shell32.dll", "SHGetKnownFolderPath", failHr);
+    this.interceptor.hook("kernel32.dll", "GetVersion", () => ({
+      returnValue: 2147483658,
+      // NT, major 10, minor 0 (0x80000000 = NT)
+      errorCode: E.NO_ERROR
+    }));
+    this.interceptor.hook("kernel32.dll", "GetVersionExW", (ctx) => {
+      const out = ctx.rawArgs[0] ?? 0;
+      if (!out) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const w = new Uint8Array(284);
+      const view = new DataView(w.buffer);
+      view.setUint32(0, 284, true);
+      view.setUint32(4, 10, true);
+      view.setUint32(8, 0, true);
+      view.setUint32(12, 19045, true);
+      view.setUint32(16, 2, true);
+      this.runtime.writeBytes(out, w);
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "GetVersionExA", (ctx) => {
+      const out = ctx.rawArgs[0] ?? 0;
+      if (!out) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const w = new Uint8Array(148);
+      const view = new DataView(w.buffer);
+      view.setUint32(0, 148, true);
+      view.setUint32(4, 10, true);
+      view.setUint32(8, 0, true);
+      view.setUint32(12, 19045, true);
+      view.setUint32(16, 2, true);
+      this.runtime.writeBytes(out, w);
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "VerSetConditionMask", (ctx) => {
+      const maskLow = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const maskHigh = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const typeBit = ctx.rawArgs[2] ?? 0;
+      const condition = (ctx.rawArgs[3] ?? 0) & 255;
+      if (typeBit >= 32) {
+        const p = typeBit - 32;
+        return { returnValue: maskLow, returnValueHigh: maskHigh & ~(255 << p) | condition << p, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: maskLow & ~(255 << typeBit) | condition << typeBit, returnValueHigh: maskHigh, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("kernel32.dll", "VerifyVersionInfoW", (ctx) => {
+      const lpvi = ctx.rawArgs[0] ?? 0;
+      const typeMask = ctx.rawArgs[1] ?? 0;
+      if (!lpvi || !typeMask) return { returnValue: 0, errorCode: E.ERROR_INVALID_PARAMETER };
+      const req = {
+        major: this.runtime.readInt32(lpvi + 4),
+        minor: this.runtime.readInt32(lpvi + 8),
+        build: this.runtime.readInt32(lpvi + 12),
+        platform: this.runtime.readInt32(lpvi + 16),
+        spMajor: this.runtime.readInt32(lpvi + 276),
+        spMinor: this.runtime.readInt32(lpvi + 278)
+      };
+      const ours = { major: 10, minor: 0, build: 19045, platform: 2, spMajor: 0, spMinor: 0 };
+      const order = [
+        ["major", 2],
+        ["minor", 1],
+        ["build", 4],
+        ["platform", 8],
+        ["spMajor", 32],
+        ["spMinor", 16]
+      ];
+      for (const [key, bit] of order) {
+        if ((typeMask & bit) === 0) continue;
+        if (ours[key] > req[key]) return { returnValue: 1, errorCode: E.NO_ERROR };
+        if (ours[key] < req[key]) return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    await this.mergeMuiResources(resourceTable, namedResources, bumpAlloc);
+    this.menuResourceTable.clear();
+    for (const [key, entry] of resourceTable) {
+      if (key >>> 16 === 4) this.menuResourceTable.set(key & 65535, entry);
+    }
+  }
+  /**
+   * Loads MUI satellite resources for modulePath and merges their resource
+   * entries into `resourceTable` (guest-address space). Windows 10+ keeps an
+   * app's localizable resources (RT_STRING type 6, RT_MENU type 4,
+   * RT_ACCELERATOR type 9) in `<exeDir>\<lang>\<module>.mui` — notepad.exe has
+   * no strings of its own and LoadStringW fails (startup abort) without them.
+   *
+   * Each MUI resource block is copied into the guest bump heap so the address
+   * handed to LoadStringW/LoadMenuW points at real bytes the guest can read.
+   * Numeric resource ids only (MUI files use numeric ids; string names would
+   * need guest string parsing).
+   */
+  async mergeMuiResources(resourceTable, namedResources, bumpAlloc) {
+    if (!this.modulePath || !this.readFile) return;
+    const dir = this.modulePath.replace(/[\\/][^\\/]*$/, "");
+    const base = this.modulePath.replace(/^.*[\\/]/, "").replace(/\.mui$/i, "");
+    const candidates = [
+      `${dir}/en-US/${base}.mui`,
+      `${dir}/zh-CN/${base}.mui`,
+      `${dir}/zh-Hans/${base}.mui`,
+      `C:/Windows/System32/en-US/${base}.mui`,
+      `C:/Windows/System32/zh-CN/${base}.mui`,
+      `C:/Windows/System32/zh-Hans/${base}.mui`
+    ];
+    let mui = null;
+    let muiPath = "";
+    for (const p of candidates) {
+      try {
+        mui = await this.readFile(p);
+      } catch {
+        mui = null;
+      }
+      if (mui && mui.byteLength > 0) {
+        muiPath = p;
+        break;
+      }
+    }
+    if (!mui || mui.byteLength === 0) {
+      console.warn(`[specter-core] MUI: no satellite found for ${this.modulePath} (candidates: ${candidates.join(", ")})`);
+      return;
+    }
+    const view = new DataView(mui.buffer, mui.byteOffset, mui.byteLength);
+    const u16 = (o) => o + 2 <= mui.byteLength ? view.getUint16(o, true) : 0;
+    const u32 = (o) => o + 4 <= mui.byteLength ? view.getUint32(o, true) : 0;
+    if (u16(0) !== 23117) return;
+    const eLfanew = u32(60);
+    const coff = eLfanew + 4;
+    const numSections = u16(coff + 2);
+    const optSize = u16(coff + 16);
+    const optMagic = u16(eLfanew + 24);
+    const dataDir = eLfanew + 24 + (optMagic === 523 ? 112 : 96);
+    const resRva = u32(dataDir + 16);
+    if (!resRva) return;
+    const secTable = coff + 20 + optSize;
+    let resRaw = 0;
+    for (let i = 0; i < numSections; i++) {
+      const s = secTable + i * 40;
+      if (u32(s + 12) === resRva) {
+        resRaw = u32(s + 20);
+        break;
+      }
+    }
+    if (!resRaw) return;
+    const r2o = (rva) => resRaw + (rva - resRva);
+    const inBounds = (o, n) => o >= 0 && o + n <= mui.byteLength;
+    const entries = /* @__PURE__ */ new Map();
+    const namedEntries = /* @__PURE__ */ new Map();
+    const readNameStr = (off) => {
+      if (!inBounds(off, 2)) return "";
+      const len = u16(off);
+      if (!inBounds(off + 2, len * 2)) return "";
+      let s = "";
+      for (let i = 0; i < len; i++) s += String.fromCharCode(u16(off + 2 + i * 2));
+      return s;
+    };
+    const walk = (rva, depth, typeId, nameId, nameStr) => {
+      const off = r2o(rva);
+      if (!inBounds(off, 16)) return;
+      const named = u16(off + 12);
+      const ids = u16(off + 14);
+      for (let k = 0; k < named + ids; k++) {
+        const e = off + 16 + k * 8;
+        if (!inBounds(e, 8)) break;
+        const name = u32(e);
+        const data = u32(e + 4);
+        if (depth === 0) {
+          walk(resRva + (data & 2147483647), 1, name & 65535, 0, "");
+        } else if (depth === 1) {
+          if ((name & 2147483648) !== 0) {
+            const s = readNameStr(r2o(resRva + (name & 2147483647)));
+            walk(resRva + (data & 2147483647), 2, typeId, 0, s);
+          } else {
+            walk(resRva + (data & 2147483647), 2, typeId, name & 65535, "");
+          }
+        } else {
+          const de = r2o(resRva + data);
+          if (!inBounds(de, 8)) continue;
+          const dataRva = u32(de);
+          const size = u32(de + 4);
+          const doff = r2o(dataRva);
+          if (!inBounds(doff, size) || size === 0) continue;
+          if (nameStr) {
+            const key = `${typeId}:${nameStr.toLowerCase()}`;
+            if (!namedEntries.has(key)) namedEntries.set(key, mui.subarray(doff, doff + size));
+          } else {
+            const key = (typeId & 65535) << 16 | nameId & 65535;
+            if (!entries.has(key)) entries.set(key, mui.subarray(doff, doff + size));
+          }
+        }
+      }
+    };
+    walk(resRva, 0, 0, 0, "");
+    let merged = 0;
+    for (const [key, data] of entries) {
+      const type = key >>> 16;
+      if (type !== 6 && type !== 4 && type !== 9 && type !== 11) continue;
+      const addr = bumpAlloc(data.byteLength);
+      this.runtime.writeBytes(addr, data);
+      resourceTable.set(key, { size: data.byteLength, address: addr });
+      merged += 1;
+    }
+    for (const [key, data] of namedEntries) {
+      const type = Number.parseInt(key, 10);
+      if (type !== 4 && type !== 9) continue;
+      const addr = bumpAlloc(data.byteLength);
+      this.runtime.writeBytes(addr, data);
+      namedResources.set(key, { size: data.byteLength, address: addr });
+      merged += 1;
+    }
+    if (merged > 0) {
+      this.muiLoaded = true;
+      this.muiSource = muiPath;
+      console.error(`[specter-core] merged ${merged} MUI resources (${muiPath})`);
+    } else {
+      console.warn(`[specter-core] MUI: found ${muiPath} but merged 0 resources`);
+    }
+  }
+  /**
+   * SEH exception dispatch for RaiseException (x86 only; x64 SEH needs the
+   * .pdata unwind metadata and is out of scope — those images keep the legacy
+   * "return 0" behaviour).
+   *
+   * The decoder maps fs:[0] to guest address 0 (segment prefixes are ignored),
+   * so the SEH chain head lives at guest address 0 and each record is
+   * `{ Next @R+0, Handler @R+4 }` pushed by the frame's prologue. We emulate
+   * the two-phase Windows protocol:
+   *   1. walk the chain, calling each handler with (ExceptionRecord,
+   *      EstablisherFrame, ContextRecord, DispatcherContext);
+   *   2. on EXCEPTION_EXECUTE_HANDLER, call the intermediate frames again with
+   *      cUnwinding set (cleanup/finally), then transfer control into the
+   *      accepting handler — it rebuilds its frame below the record and the
+   *      frame's own epilogue eventually `ret`s to the real caller, continuing
+   *      the guest program without ever returning through RaiseException.
+   *
+   * Handlers are guest code that may call APIs, so each search/unwind call
+   * runs inside a NESTED executor whose trap handler forwards API traps and
+   * treats the sentinel vector as "handler returned; EAX = disposition".
+   * Registers are restored after every call except the final transfer.
+   */
+  installSehDispatch(dispatcher, jit, mode) {
+    if (mode === "x64" || this.sehSentinelAddr === 0) return;
+    const runtime = this.runtime;
+    const sentinel = this.sehSentinelAddr;
+    const excAddr = this.sehExcAddr;
+    const ctxAddr = this.sehCtxAddr;
+    const dbg = (...parts) => {
+      if (globalThis.__bk_seh_debug) console.error("[seh]", ...parts);
+    };
+    const peek = (a) => {
+      if (a < 0 || a + 4 > runtime.memory.buffer.byteLength) return 0;
+      return new DataView(runtime.memory.buffer).getInt32(a, true) >>> 0;
+    };
+    const snapshot = () => ({
+      regs: ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"].map((r) => [r, runtime.getReg64(r)]),
+      eflags: runtime.getEflags(),
+      eip: runtime.getEip()
+    });
+    const restore = (s) => {
+      for (const [r, v] of s.regs) runtime.setReg64(r, v);
+      runtime.setEflags(s.eflags);
+      runtime.setEip(s.eip);
+    };
+    const buildExcRecord = (code, flags, nargs, argPtr, address) => {
+      const w = new Uint8Array(128);
+      const view = new DataView(w.buffer);
+      view.setUint32(0, code, true);
+      view.setUint32(4, flags, true);
+      view.setUint32(8, 0, true);
+      view.setUint32(12, address, true);
+      view.setUint32(16, nargs, true);
+      for (let i = 0; i < 15; i++) view.setUint32(20 + i * 4, i < nargs ? peek(argPtr + i * 4) : 0, true);
+      runtime.writeBytes(excAddr, w);
+    };
+    const buildContext = (eip, esp, eflags) => {
+      const w = new Uint8Array(X86_CONTEXT_SIZE);
+      const view = new DataView(w.buffer);
+      view.setUint32(0, 65543, true);
+      view.setUint32(156, runtime.getReg("edi") >>> 0, true);
+      view.setUint32(160, runtime.getReg("esi") >>> 0, true);
+      view.setUint32(164, runtime.getReg("ebx") >>> 0, true);
+      view.setUint32(168, runtime.getReg("edx") >>> 0, true);
+      view.setUint32(172, runtime.getReg("ecx") >>> 0, true);
+      view.setUint32(176, runtime.getReg("eax") >>> 0, true);
+      view.setUint32(180, runtime.getReg("ebp") >>> 0, true);
+      view.setUint32(184, eip, true);
+      view.setUint32(192, eflags, true);
+      view.setUint32(196, esp, true);
+      runtime.writeBytes(ctxAddr, w);
+    };
+    const copyExcRecord = (ptr) => {
+      const w = new Uint8Array(128);
+      const view = new DataView(w.buffer);
+      for (let i = 0; i < 128; i += 4) view.setUint32(i, peek(ptr + i), true);
+      runtime.writeBytes(excAddr, w);
+    };
+    const callHandler = async (handler, record, flags, excCode, nargs, argPtr, address, prebuilt = false) => {
+      const saved = snapshot();
+      const frame = runtime.getReg("esp") - 20 >>> 0;
+      if (!prebuilt) buildExcRecord(excCode, flags, nargs, argPtr, address);
+      runtime.writeInt32(frame + 0, sentinel);
+      runtime.writeInt32(frame + 4, excAddr);
+      runtime.writeInt32(frame + 8, record);
+      runtime.writeInt32(frame + 12, ctxAddr);
+      runtime.writeInt32(frame + 16, 0);
+      runtime.setReg("esp", frame);
+      runtime.setEip(handler);
+      let disposition = -1;
+      const nested = new Executor(
+        runtime,
+        jit,
+        {
+          handle: async (vector) => {
+            if (vector === SEH_SENTINEL_VECTOR) {
+              disposition = runtime.getReg("eax") >>> 0;
+              runtime.setEip(0);
+              return;
+            }
+            await dispatcher.handle(vector);
+            if (this.sehTransfer) {
+              runtime.setEip(0);
+              return;
+            }
+            const last = dispatcher.lastCalled;
+            if (last && last.proc.toLowerCase() === "exitprocess") {
+              this.exitCode = runtime.getReg("eax") & 4294967295;
+              this.exitRequested = true;
+              runtime.setEip(0);
+            }
+          }
+        },
+        { maxSteps: 5e5 }
+      );
+      await nested.run(handler);
+      const transfer = this.sehTransfer;
+      this.sehTransfer = null;
+      if (transfer) {
+        runtime.setEip(transfer.eip);
+        runtime.setReg("esp", transfer.esp);
+        return EXCEPTION_TRANSFERRED;
+      }
+      restore(saved);
+      return disposition;
+    };
+    this.interceptor.hook("kernel32.dll", "RaiseException", async (ctx) => {
+      const excCode = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const excFlags = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const nargs = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const argPtr = (ctx.rawArgs[3] ?? 0) >>> 0;
+      const curEip = runtime.getEip() >>> 0;
+      const address = curEip - 2 >>> 0;
+      const eflags = runtime.getEflags();
+      const esp = runtime.getReg("esp") >>> 0;
+      dbg(`RaiseException code=0x${excCode.toString(16)} flags=${excFlags} nargs=${nargs} argPtr=0x${argPtr.toString(16)} esp=0x${esp.toString(16)} head=0x${peek(0).toString(16)}`);
+      if (globalThis.__bk_seh_debug) {
+        const dump32 = (base, n) => {
+          const out = [];
+          for (let i = 0; i < n; i++) out.push(`0x${peek(base + i * 4).toString(16)}`);
+          return out.join(" ");
+        };
+        dbg(`  params@0x${argPtr.toString(16)}: ${dump32(argPtr, Math.min(nargs, 8))}`);
+        dbg(`  stack@0x${(esp - 16).toString(16)}: ${dump32(esp - 16, 20)}`);
+      }
+      if (this.sehDepth > 8) return { returnValue: 0, errorCode: E.NO_ERROR };
+      this.sehDepth += 1;
+      try {
+        let record = peek(0);
+        let accepting = 0;
+        for (let guard = 0; guard < 64 && record !== 0 && record !== 4294967295; guard++) {
+          const handler = peek(record + 4);
+          if (!handler) break;
+          dbg(`search record=0x${record.toString(16)} handler=0x${handler.toString(16)} next=0x${peek(record).toString(16)}`);
+          buildContext(curEip, esp, eflags);
+          const disp = await callHandler(handler, record, excFlags & 1, excCode, nargs, argPtr, address);
+          dbg(`  -> disposition=${disp}`);
+          if (this.exitRequested) {
+            runtime.setEip(0);
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
+          if (disp === EXCEPTION_TRANSFERRED) {
+            dbg("  -> transferred via RtlUnwind");
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
+          if (disp === EXCEPTION_EXECUTE_HANDLER) {
+            accepting = record;
+            break;
+          }
+          if (disp === EXCEPTION_CONTINUE_EXECUTION) {
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
+          record = peek(record);
+        }
+        if (accepting === 0) {
+          dbg("unhandled (no accepting handler)");
+          return { returnValue: 0, errorCode: E.NO_ERROR };
+        }
+        dbg(`accepting record=0x${accepting.toString(16)}`);
+        let u = peek(0);
+        for (let guard = 0; guard < 64 && u !== 0 && u !== 4294967295 && u !== accepting; guard++) {
+          const uh = peek(u + 4);
+          dbg(`unwind record=0x${u.toString(16)} handler=0x${uh.toString(16)}`);
+          if (uh) {
+            await callHandler(uh, u, EXCEPTION_UNWINDING, excCode, nargs, argPtr, address);
+            if (this.exitRequested) {
+              runtime.setEip(0);
+              return { returnValue: 0, errorCode: E.NO_ERROR };
+            }
+          }
+          u = peek(u);
+        }
+        const ah = peek(accepting + 4);
+        const frame = accepting - 20 >>> 0;
+        dbg(`transfer accepting=0x${accepting.toString(16)} handler=0x${ah.toString(16)} frame=0x${frame.toString(16)}`);
+        buildExcRecord(excCode, EXCEPTION_UNWINDING, nargs, argPtr, address);
+        runtime.writeInt32(frame + 0, sentinel);
+        runtime.writeInt32(frame + 4, excAddr);
+        runtime.writeInt32(frame + 8, accepting);
+        runtime.writeInt32(frame + 12, ctxAddr);
+        runtime.writeInt32(frame + 16, 0);
+        runtime.setReg("esp", frame);
+        runtime.setEip(ah);
+        this.sehPending = accepting;
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      } finally {
+        this.sehDepth -= 1;
+      }
+    });
+    const rtlUnwindHandler = async (ctx) => {
+      const targetFrame = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const targetIp = (ctx.rawArgs[1] ?? 0) >>> 0;
+      const excRecPtr = (ctx.rawArgs[2] ?? 0) >>> 0;
+      const returnValue = (ctx.rawArgs[3] ?? 0) >>> 0;
+      dbg(`RtlUnwind frame=0x${targetFrame.toString(16)} target=0x${targetIp.toString(16)} exc=0x${excRecPtr.toString(16)} ret=0x${returnValue.toString(16)}`);
+      if (globalThis.__bk_seh_debug) {
+        const dump32 = (base, n) => {
+          const out = [];
+          for (let i = 0; i < n; i++) out.push(`0x${peek(base + i * 4).toString(16)}`);
+          return out.join(" ");
+        };
+        dbg(`  excRec@0x${excRecPtr.toString(16)}: ${dump32(excRecPtr, 8)}`);
+        dbg(`  stack@0x${(targetFrame - 16).toString(16)}: ${dump32(targetFrame - 16, 24)}`);
+      }
+      if (this.sehDepth > 12) return { returnValue: 0, errorCode: E.NO_ERROR };
+      let u = peek(0);
+      for (let guard = 0; guard < 64 && u !== 0 && u !== 4294967295 && u !== targetFrame; guard++) {
+        const uh = peek(u + 4);
+        dbg(`  unwind record=0x${u.toString(16)} handler=0x${uh.toString(16)}`);
+        if (uh) {
+          copyExcRecord(excRecPtr);
+          const disp = await callHandler(uh, u, EXCEPTION_UNWINDING | EXCEPTION_UNWINDING_FOR_EXIT, 0, 0, 0, 0, true);
+          void disp;
+          if (this.exitRequested) {
+            runtime.setEip(0);
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
+          if (this.sehTransfer) {
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
+        }
+        u = peek(u);
+      }
+      dbg(`  transfer to 0x${targetIp.toString(16)} esp=0x${targetFrame.toString(16)}`);
+      const transferEsp = targetFrame - 52 >>> 0;
+      this.sehTransfer = { eip: targetIp, esp: transferEsp };
+      runtime.setEip(targetIp);
+      runtime.setReg("esp", transferEsp);
+      return { returnValue, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("ntdll.dll", "RtlUnwind", rtlUnwindHandler);
+    this.interceptor.hook("kernel32.dll", "RtlUnwind", rtlUnwindHandler);
+    this.interceptor.hook("kernel32.dll", "ApiSetQueryApiSetPresence", (ctx, host) => {
+      const present = (ctx.rawArgs[1] ?? 0) >>> 0;
+      if (present) host.memory.write(present, new Uint8Array([1]));
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("ntdll.dll", "RtlCreateUnicodeStringFromAsciiz", (ctx, host) => {
+      const dst = Number(ctx.rawArgs[0] ?? 0) >>> 0;
+      const src = Number(ctx.rawArgs[1] ?? 0) >>> 0;
+      if (!dst || !src) return { returnValue: 3221225473, errorCode: E.NO_ERROR };
+      const bytes = host.memory.read(src, 65536) ?? new Uint8Array(0);
+      let n = 0;
+      while (n < bytes.length && bytes[n] !== 0) n++;
+      const wideBuf = 6291456;
+      const wide = new Uint8Array((n + 1) * 2);
+      for (let i = 0; i < n; i++) wide[i * 2] = bytes[i] ?? 0;
+      host.memory.write(wideBuf, wide);
+      const us = new Uint8Array(8);
+      const dv = new DataView(us.buffer);
+      dv.setUint16(0, n * 2, true);
+      dv.setUint16(2, (n + 1) * 2, true);
+      dv.setUint32(4, wideBuf, true);
+      host.memory.write(dst, us);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    const longjmpHandler = (ctx, _host) => {
+      const jmpBuf = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const value = (ctx.rawArgs[1] ?? 0) >>> 0;
+      if (!jmpBuf) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const dump = [];
+      for (let i = 0; i < 16; i++) {
+        dump.push(`[${i * 4}]=0x${(runtime.readInt32(jmpBuf + i * 4) >>> 0).toString(16)}`);
+      }
+      dbg(`longjmp buf=0x${jmpBuf.toString(16)} val=${value}: ${dump.join(" ")}`);
+      const ebp = runtime.readInt32(jmpBuf + 0);
+      const ebx = runtime.readInt32(jmpBuf + 4);
+      const edi = runtime.readInt32(jmpBuf + 8);
+      const esi = runtime.readInt32(jmpBuf + 12);
+      const esp = runtime.readInt32(jmpBuf + 16);
+      const eip = runtime.readInt32(jmpBuf + 20);
+      dbg(`longjmp buf=0x${jmpBuf.toString(16)} val=${value} -> eip=0x${(eip >>> 0).toString(16)} esp=0x${(esp >>> 0).toString(16)}`);
+      runtime.setReg("ebp", ebp);
+      runtime.setReg("ebx", ebx);
+      runtime.setReg("edi", edi);
+      runtime.setReg("esi", esi);
+      runtime.setReg("esp", esp);
+      runtime.setEip(eip);
+      const ret = value === 0 ? 1 : value;
+      runtime.setReg("eax", ret);
+      return { returnValue: ret, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("ucrtbase.dll", "longjmp", longjmpHandler);
+    this.interceptor.hook("ucrtbase.dll", "_longjmp", longjmpHandler);
+    this.interceptor.hook("msvcrt.dll", "longjmp", longjmpHandler);
+    const setjmp3Handler = (ctx, _host) => {
+      const env = (ctx.rawArgs[0] ?? 0) >>> 0;
+      if (!env) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const espAtTrap = runtime.getReg("esp") >>> 0;
+      const eip = runtime.readInt32(espAtTrap) >>> 0;
+      const ebp = runtime.getReg("ebp") >>> 0;
+      const ebx = runtime.getReg("ebx") >>> 0;
+      const edi = runtime.getReg("edi") >>> 0;
+      const esi = runtime.getReg("esi") >>> 0;
+      const esp = espAtTrap + 4 >>> 0;
+      runtime.writeInt32(env + 0, ebp);
+      runtime.writeInt32(env + 4, ebx);
+      runtime.writeInt32(env + 8, edi);
+      runtime.writeInt32(env + 12, esi);
+      runtime.writeInt32(env + 16, esp);
+      runtime.writeInt32(env + 20, eip);
+      dbg(
+        `setjmp3 env=0x${env.toString(16)} eip=0x${eip.toString(16)} esp=0x${esp.toString(16)} ebp=0x${ebp.toString(16)} ebx=0x${ebx.toString(16)} edi=0x${edi.toString(16)} esi=0x${esi.toString(16)}`
+      );
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("ucrtbase.dll", "_setjmp3", setjmp3Handler);
+    const runInitFn = async (fn) => {
+      const saved = snapshot();
+      const esp = runtime.getReg("esp") >>> 0;
+      const frame = esp - 4 >>> 0;
+      runtime.writeInt32(frame, sentinel);
+      runtime.setReg("esp", frame);
+      runtime.setEip(fn);
+      const nested = new Executor(
+        runtime,
+        jit,
+        {
+          handle: async (vector) => {
+            if (vector === SEH_SENTINEL_VECTOR) {
+              runtime.setEip(0);
+              return;
+            }
+            await dispatcher.handle(vector);
+            const last = dispatcher.lastCalled;
+            if (last && last.proc.toLowerCase() === "exitprocess") {
+              this.exitCode = runtime.getReg("eax") & 4294967295;
+              this.exitRequested = true;
+              runtime.setEip(0);
+            }
+          }
+        },
+        { maxSteps: 5e5 }
+      );
+      await nested.run(fn);
+      const ok = !this.exitRequested;
+      restore(saved);
+      return ok;
+    };
+    const inittermHandler = async (ctx) => {
+      const first = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const last = (ctx.rawArgs[1] ?? 0) >>> 0;
+      for (let p = first; p < last && p + 4 <= runtime.memory.buffer.byteLength; p += 4) {
+        const fn = peek(p);
+        if (!fn) continue;
+        if (!await runInitFn(fn)) break;
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("ucrtbase.dll", "_initterm", inittermHandler);
+    this.interceptor.hook("ucrtbase.dll", "_initterm_e", inittermHandler);
+  }
+  /**
+   * Sentinel (vector 0x2d) reached from the MAIN executor: a phase-2
+   * accepting handler returned instead of transferring to its except block.
+   * Mimic the frame epilogue — continue at the frame's saved return address
+   * (record + 12) with ESP just past it. With no pending record this ends the
+   * run (the nested handler stopped but its disposition was lost).
+   */
+  handleSehSentinel(rt) {
+    const rec = this.sehPending;
+    this.sehPending = 0;
+    if (rec) {
+      rt.setReg("esp", rec + 16);
+      rt.setEip(rt.readInt32(rec + 12) >>> 0);
+    } else {
+      rt.setEip(0);
+    }
+  }
+  /**
+   * comdlg32 common file dialogs (GetOpenFileNameW/A, GetSaveFileNameW/A).
+   * notepad delay-loads these through .didat; without handlers the interceptor
+   * returns 0 and the dialog "never appears" (Save As fails silently). When a
+   * host fileDialog provider is wired in (GuestProcessOptions.fileDialog), the
+   * dialog delegates to it — the L6 shell renders a virtual-disk browser and
+   * returns the chosen Windows path, which we write back into the guest's
+   * OPENFILENAME structure (lpstrFile buffer + nFileOffset/nFileExtension)
+   * exactly like a real comdlg32 would. With no provider, dialogs cancel.
+   */
+  installFileDialogs() {
+    const runtime = this.runtime;
+    const rd32 = (a) => {
+      const b = runtime.readBytes(a >>> 0, 4);
+      return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+    };
+    const wr32 = (a, v) => {
+      const b = new Uint8Array(4);
+      new DataView(b.buffer).setUint32(0, v >>> 0, true);
+      runtime.writeBytes(a >>> 0, b);
+    };
+    const wr16 = (a, v) => {
+      const b = new Uint8Array(2);
+      new DataView(b.buffer).setUint16(0, v & 65535, true);
+      runtime.writeBytes(a >>> 0, b);
+    };
+    const readW = (a, maxBytes) => {
+      if (!a) return "";
+      const bytes = runtime.readBytes(a >>> 0, maxBytes);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = "";
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const writeW = (a, maxBytes, s) => {
+      const bytes = new Uint8Array(Math.min(maxBytes, (s.length + 1) * 2));
+      const view = new DataView(bytes.buffer);
+      for (let i = 0; i < s.length && i * 2 + 1 < bytes.byteLength; i++) {
+        view.setUint16(i * 2, s.charCodeAt(i), true);
+      }
+      runtime.writeBytes(a >>> 0, bytes);
+    };
+    const readFilterBlock = (a) => {
+      if (!a) return "";
+      const bytes = runtime.readBytes(a >>> 0, 8192);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = "";
+      let nulCount = 0;
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) {
+          nulCount += 1;
+          if (nulCount >= 2) break;
+        }
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const dialogHandler = (kind, wide) => async (ctx) => {
+      const ofn = ctx.rawArgs[0] ?? 0;
+      if (!ofn) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const lpstrFile = rd32(ofn + 28) >>> 0;
+      const nMaxFile = rd32(ofn + 32) >>> 0;
+      if (!lpstrFile || nMaxFile === 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const current = wide ? readW(lpstrFile, Math.min(nMaxFile * 2, 32768)) : readCStrRaw(lpstrFile, nMaxFile);
+      const initialDir = wide ? readW(rd32(ofn + 44) >>> 0, 4096) : readCStrRaw(rd32(ofn + 44) >>> 0, 4096);
+      const title = wide ? readW(rd32(ofn + 48) >>> 0, 1024) : readCStrRaw(rd32(ofn + 48) >>> 0, 1024);
+      const filter = wide ? readFilterBlock(rd32(ofn + 12) >>> 0) : readFilterBlockA(rd32(ofn + 12) >>> 0);
+      if (!this.fileDialog) {
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      let path;
+      try {
+        path = await this.fileDialog(kind, {
+          title,
+          initialDir,
+          defaultName: current,
+          filter
+        });
+      } catch (err) {
+        console.error("[comdlg32] fileDialog provider threw:", err);
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      if (!path) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const maxChars = Math.max(1, Math.floor((nMaxFile - 1) / (wide ? 2 : 1)));
+      if (path.length > maxChars) {
+        console.error(`[comdlg32] path too long for lpstrFile (${path.length} > ${maxChars})`);
+        return { returnValue: 0, errorCode: E.ERROR_FILENAME_EXCED_RANGE };
+      }
+      if (wide) {
+        writeW(lpstrFile, nMaxFile, path);
+      } else {
+        const bytes = new TextEncoder().encode(path);
+        const out = new Uint8Array(Math.min(nMaxFile, bytes.byteLength + 1));
+        out.set(bytes.subarray(0, Math.max(0, out.byteLength - 1)));
+        runtime.writeBytes(lpstrFile >>> 0, out);
+      }
+      const lastSep = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+      const nameStart = lastSep >= 0 ? lastSep + 1 : 0;
+      const dot = path.lastIndexOf(".");
+      const extStart = dot > nameStart ? dot : path.length;
+      wr16(ofn + 56, nameStart);
+      wr16(ofn + 58, extStart);
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    };
+    const readCStrRaw = (a, maxBytes) => {
+      if (!a) return "";
+      const bytes = runtime.readBytes(a >>> 0, Math.min(maxBytes, 4096));
+      let end = 0;
+      while (end < bytes.byteLength && bytes[end] !== 0) end += 1;
+      return new TextDecoder("latin1").decode(bytes.subarray(0, end));
+    };
+    const readFilterBlockA = (a) => {
+      if (!a) return "";
+      const bytes = runtime.readBytes(a >>> 0, 8192);
+      let end = 0;
+      let nulCount = 0;
+      while (end < bytes.byteLength) {
+        if (bytes[end] === 0) {
+          nulCount += 1;
+          if (nulCount >= 2) break;
+        }
+        end += 1;
+      }
+      return new TextDecoder("latin1").decode(bytes.subarray(0, end));
+    };
+    this.interceptor.hook("comdlg32.dll", "GetOpenFileNameW", dialogHandler("open", true));
+    this.interceptor.hook("comdlg32.dll", "GetOpenFileNameA", dialogHandler("open", false));
+    this.interceptor.hook("comdlg32.dll", "GetSaveFileNameW", dialogHandler("save", true));
+    this.interceptor.hook("comdlg32.dll", "GetSaveFileNameA", dialogHandler("save", false));
+    this.interceptor.hook("comdlg32.dll", "CommDlgExtendedError", () => ({
+      returnValue: E.ERROR_CANCELLED,
+      errorCode: E.NO_ERROR
+    }));
+  }
+  /**
+   * GUI bridge — layer 1 of the graphics bridge: turns the "fake handle"
+   * message loop (GetMessageW always returning 0 = WM_QUIT) into a REAL one
+   * that delivers messages to the guest's own window procedure.
+   *
+   *  - RegisterClassExW/A: reads WNDCLASSEXW.lpfnWndProc (+8) and
+   *    lpszClassName (+40), mapping both atom -> wndProc and name -> atom.
+   *  - CreateWindowExW/A: resolves the class (atom or name), records
+   *    hwnd -> { wndProc, parent }, and enqueues a synthetic WM_CREATE so the
+   *    guest's message loop actually delivers it.
+   *  - GetMessageW/A: pops the synthetic queue — returns 1 with a filled MSG
+   *    while messages remain, 0 (= WM_QUIT) once it is empty.
+   *  - DispatchMessageW: reads MSG from guest memory and calls the guest
+   *    WndProc through a nested Executor (the same snapshot/restore + sentinel
+   *    machinery the SEH handlers use), passing hwnd/msg/wParam/lParam on the
+   *    stack (stdcall — the callee pops them).
+   *
+   * The remaining message-loop slots (TranslateAcceleratorW etc.) keep their
+   * sane zero defaults. x64 mode keeps the minimal fake-handle behaviour (the
+   * sentinel-stop infrastructure is only wired up for x86 so far).
+   */
+  installGuiBridge(dispatcher, jit, mode) {
+    const runtime = this.runtime;
+    const peek = (a) => {
+      if (a < 0 || a + 4 > runtime.memory.buffer.byteLength) return 0;
+      return new DataView(runtime.memory.buffer).getInt32(a, true) >>> 0;
+    };
+    const snapshot = () => ({
+      regs: ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"].map((r) => [r, runtime.getReg64(r)]),
+      eflags: runtime.getEflags(),
+      eip: runtime.getEip()
+    });
+    const restore = (s) => {
+      for (const [r, v] of s.regs) runtime.setReg64(r, v);
+      runtime.setEflags(s.eflags);
+      runtime.setEip(s.eip);
+    };
+    const readWStr = (address) => {
+      if (!address) return "";
+      const bytes = runtime.readBytes(address, 4096);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let s = "";
+      for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const classNames = /* @__PURE__ */ new Map();
+    let classAtom = 0;
+    let hwndSeq = 65536;
+    const registerClass = (ctx) => {
+      const atom = ++classAtom;
+      const lpWndClass = ctx.rawArgs[0] ?? 0;
+      if (lpWndClass) {
+        this.classWndProcs.set(atom, peek(lpWndClass + 8));
+        const name = readWStr(peek(lpWndClass + 40));
+        if (name) classNames.set(name.toLowerCase(), atom);
+        const menuName = peek(lpWndClass + 36);
+        if (menuName >>> 16 === 0) {
+          const entry = this.menuResourceTable.get(menuName & 65535);
+          if (entry) this.classMenus.set(atom, this.parseMenuResource(entry.address, entry.size));
+        }
+      }
+      return { returnValue: atom, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("user32.dll", "RegisterClassExW", registerClass);
+    this.interceptor.hook("user32.dll", "RegisterClassExA", registerClass);
+    const createWindow = (ctx) => {
+      const hwnd = ++hwndSeq;
+      const classNameArg = ctx.rawArgs[1] ?? 0;
+      let wndProc = 0;
+      let className = "";
+      let atom = 0;
+      if (classNameArg >>> 16 === 0) {
+        className = `#${classNameArg & 65535}`;
+        atom = classNameArg & 65535;
+        wndProc = this.classWndProcs.get(atom) ?? 0;
+      } else {
+        className = readWStr(classNameArg);
+        atom = className.toLowerCase() ? classNames.get(className.toLowerCase()) ?? 0 : 0;
+        if (atom) wndProc = this.classWndProcs.get(atom) ?? 0;
+      }
+      const menu = this.menuByHandle.get(ctx.rawArgs[9] ?? 0) ?? (atom ? this.classMenus.get(atom) ?? [] : []);
+      this.windowRecords.set(hwnd, {
+        wndProc,
+        parent: ctx.rawArgs[8] ?? 0,
+        className,
+        text: "",
+        menu
+      });
+      if (wndProc) {
+        this.guiMessageQueue.push({ hwnd, msg: 1, wParam: 0, lParam: 0 });
+        this.guiMessageQueue.push({ hwnd, msg: 15, wParam: 0, lParam: 0 });
+      }
+      return { returnValue: hwnd, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("user32.dll", "CreateWindowExW", createWindow);
+    this.interceptor.hook("user32.dll", "CreateWindowExA", createWindow);
+    this.interceptor.hook("user32.dll", "ShowWindow", () => this.ok1());
+    this.interceptor.hook("user32.dll", "UpdateWindow", () => this.ok1());
+    const writeMsg = (ctx, m) => {
+      const lpMsg = ctx.rawArgs[0] ?? 0;
+      if (lpMsg) {
+        runtime.writeInt32(lpMsg + 0, m.hwnd);
+        runtime.writeInt32(lpMsg + 4, m.msg);
+        runtime.writeInt32(lpMsg + 8, m.wParam);
+        runtime.writeInt32(lpMsg + 12, m.lParam);
+        runtime.writeInt32(lpMsg + 16, 0);
+        runtime.writeInt32(lpMsg + 20, 0);
+        runtime.writeInt32(lpMsg + 24, 0);
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    };
+    const getMessage = async (ctx) => {
+      const m = this.guiMessageQueue.shift();
+      if (m) {
+        console.log("[GDI-walk] GetMessageW \u2192 queue msg=0x" + m.msg.toString(16) + " hwnd=0x" + m.hwnd.toString(16));
+        return writeMsg(ctx, m);
+      }
+      if (this.quitRequested || !this.interactive) return { returnValue: 0, errorCode: E.NO_ERROR };
+      this.onMessageWait?.();
+      await new Promise((resolve) => {
+        this.pendingMessageResolve = resolve;
+      });
+      const m2 = this.guiMessageQueue.shift();
+      console.log("[GDI-walk] GetMessageW \u2190 blocked wait msg=" + (m2 ? "Y" : "N") + " msgVal=0x" + (m2 ? m2.msg.toString(16) : "0"));
+      if (!m2) return { returnValue: 0, errorCode: E.NO_ERROR };
+      return writeMsg(ctx, m2);
+    };
+    this.interceptor.hook("user32.dll", "GetMessageW", getMessage);
+    this.interceptor.hook("user32.dll", "GetMessageA", getMessage);
+    this.interceptor.hook("user32.dll", "TranslateAcceleratorW", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("user32.dll", "IsDialogMessageW", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("user32.dll", "TranslateMessage", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("user32.dll", "DefWindowProcW", async (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const msg = ctx.rawArgs[1] ?? 0;
+      console.log("[GDI-walk] DefWindowProcW hwnd=0x%s msg=0x%s wParam=%d lParam=%d", hwnd.toString(16), msg.toString(16), ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0);
+      if (msg === 15) {
+        const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
+        if (bridge) {
+          const hdc = await bridge.createDC("DISPLAY");
+          await safe(() => bridge.flush(hdc));
+          await safe(() => bridge.deleteDC(hdc));
+        }
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("user32.dll", "PostQuitMessage", () => {
+      this.guiMessageQueue.length = 0;
+      this.quitRequested = true;
+      if (this.pendingMessageResolve) {
+        const r = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        r();
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    const sendMessage = (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const msg = ctx.rawArgs[1] ?? 0;
+      const wParam = ctx.rawArgs[2] ?? 0;
+      const lParam = ctx.rawArgs[3] ?? 0;
+      const rec = this.windowRecords.get(hwnd);
+      if (rec && rec.className.toLowerCase() === "edit") {
+        switch (msg) {
+          case 12: {
+            rec.text = readWStr(lParam);
+            console.log('[GDI-walk] SendMessageW WM_SETTEXT hwnd=0x%s text="%s"', hwnd.toString(16), rec.text);
+            this.onTextChanged?.(hwnd, rec.text);
+            return { returnValue: 1, errorCode: E.NO_ERROR };
+          }
+          case 13: {
+            const s = rec.text;
+            const n = Math.min(s.length, Math.max(0, wParam - 1));
+            const w = new Uint8Array(n * 2 + 2);
+            for (let i = 0; i < n; i++) {
+              w[i * 2] = s.charCodeAt(i) & 255;
+              w[i * 2 + 1] = s.charCodeAt(i) >> 8 & 255;
+            }
+            runtime.writeBytes(lParam, w);
+            return { returnValue: n, errorCode: E.NO_ERROR };
+          }
+          case 14:
+            return { returnValue: rec.text.length, errorCode: E.NO_ERROR };
+          case 184:
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          // skip save prompt
+          case 185:
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          case 177:
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          case 194: {
+            const rep = readWStr(lParam);
+            if (rec.text !== rep) {
+              rec.text = rep;
+              this.onTextChanged?.(hwnd, rec.text);
+            }
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+          }
+          case 182:
+            return { returnValue: rec.text === "" ? 1 : rec.text.split("\n").length, errorCode: E.NO_ERROR };
+          default:
+            return { returnValue: 0, errorCode: E.NO_ERROR };
+        }
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("user32.dll", "SendMessageW", sendMessage);
+    this.interceptor.hook("user32.dll", "SendMessageA", sendMessage);
+    this.interceptor.hook("user32.dll", "PostMessageW", (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const msg = ctx.rawArgs[1] ?? 0;
+      console.log("[GDI-walk] PostMessageW hwnd=0x%s msg=0x%s wParam=%d lParam=%d", hwnd.toString(16), msg.toString(16), ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0);
+      this.guiMessageQueue.push({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
+      if (this.pendingMessageResolve) {
+        const r = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        r();
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("user32.dll", "PostMessageA", (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const msg = ctx.rawArgs[1] ?? 0;
+      this.guiMessageQueue.push({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
+      if (this.pendingMessageResolve) {
+        const r = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        r();
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("user32.dll", "GetWindowLongW", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("user32.dll", "SetWindowLongW", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("user32.dll", "DestroyWindow", () => this.ok1());
+    this.interceptor.hook("user32.dll", "MoveWindow", (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const bRepaint = ctx.rawArgs[5] ?? 0;
+      console.log("[GDI-walk] MoveWindow hwnd=0x%s x=%d y=%d w=%d h=%d repaint=%d", hwnd.toString(16), ctx.rawArgs[1] ?? 0, ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0, ctx.rawArgs[4] ?? 0, bRepaint);
+      if (bRepaint) {
+        this.guiMessageQueue.push({ hwnd, msg: 15, wParam: 0, lParam: 0 });
+        if (this.pendingMessageResolve) {
+          const r = this.pendingMessageResolve;
+          this.pendingMessageResolve = null;
+          r();
+        }
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("comctl32.dll", "CreateStatusWindowW", () => ({ returnValue: ++hwndSeq, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("comctl32.dll", "CreateStatusWindowA", () => ({ returnValue: ++hwndSeq, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("user32.dll", "GetClientRect", (ctx) => {
+      const lprc = ctx.rawArgs[1] ?? 0;
+      if (lprc) {
+        runtime.writeInt32(lprc + 0, 0);
+        runtime.writeInt32(lprc + 4, 0);
+        runtime.writeInt32(lprc + 8, 800);
+        runtime.writeInt32(lprc + 12, 560);
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("user32.dll", "GetWindowRect", (ctx) => {
+      const lprc = ctx.rawArgs[1] ?? 0;
+      if (lprc) {
+        runtime.writeInt32(lprc + 0, 0);
+        runtime.writeInt32(lprc + 4, 0);
+        runtime.writeInt32(lprc + 8, 800);
+        runtime.writeInt32(lprc + 12, 600);
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    const nextGdiObj = () => ++this.gdiObjSeq;
+    const recordPaint = (cmd) => {
+      this.paintCommands.push(cmd);
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    };
+    const bridgeByHdc = this.gdiBridgeByHdc;
+    const bridgeFor = (hdc) => bridgeByHdc.get(hdc) ?? null;
+    const ok1 = () => ({ returnValue: 1, errorCode: E.NO_ERROR });
+    const colorFromBgr = (n) => ({ r: n & 255, g: n >>> 8 & 255, b: n >>> 16 & 255, a: 255 });
+    const BLACK = { r: 0, g: 0, b: 0, a: 255 };
+    const WHITE = { r: 255, g: 255, b: 255, a: 255 };
+    const brushColorByObj = /* @__PURE__ */ new Map();
+    const penColorByObj = /* @__PURE__ */ new Map();
+    const curBrushByHdc = /* @__PURE__ */ new Map();
+    const curPenByHdc = /* @__PURE__ */ new Map();
+    const penPosByHdc = /* @__PURE__ */ new Map();
+    const safe = async (fn) => {
+      try {
+        await fn();
+      } catch {
+      }
+    };
+    const readRect = (lprc) => lprc ? {
+      x: runtime.readInt32(lprc + 0),
+      y: runtime.readInt32(lprc + 4),
+      w: runtime.readInt32(lprc + 8) - runtime.readInt32(lprc + 0),
+      h: runtime.readInt32(lprc + 12) - runtime.readInt32(lprc + 4)
+    } : { x: 0, y: 0, w: 0, h: 0 };
+    const toRect = (r) => ({ x: r.x, y: r.y, width: r.w, height: r.h });
+    const readWStr16 = (address, cch) => {
+      const w = runtime.readBytes(address, Math.min(cch * 2, 4096));
+      const view = new DataView(w.buffer, w.byteOffset, w.byteLength);
+      let text = "";
+      for (let i = 0; i + 1 < w.byteLength && i / 2 < cch; i += 2) {
+        const c = view.getUint16(i, true);
+        if (c === 0) break;
+        text += String.fromCharCode(c);
+      }
+      return text;
+    };
+    this.interceptor.hook("gdi32.dll", "GetStockObject", (ctx) => {
+      const obj = nextGdiObj();
+      const n = ctx.rawArgs[0] ?? 0;
+      const c = n === 4 || n === 7 ? BLACK : WHITE;
+      if (n === 6 || n === 7) penColorByObj.set(obj, c);
+      else brushColorByObj.set(obj, c);
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "SelectObject", (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const obj = ctx.rawArgs[1] ?? 0;
+      if (brushColorByObj.has(obj)) curBrushByHdc.set(hdc, brushColorByObj.get(obj) ?? WHITE);
+      if (penColorByObj.has(obj)) curPenByHdc.set(hdc, penColorByObj.get(obj) ?? BLACK);
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "DeleteObject", () => this.ok1());
+    this.interceptor.hook("gdi32.dll", "CreateSolidBrush", (ctx) => {
+      const obj = nextGdiObj();
+      brushColorByObj.set(obj, colorFromBgr(ctx.rawArgs[0] ?? 0));
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "CreateHatchBrush", (ctx) => {
+      const obj = nextGdiObj();
+      brushColorByObj.set(obj, colorFromBgr(ctx.rawArgs[1] ?? 0));
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "CreatePen", (ctx) => {
+      const obj = nextGdiObj();
+      penColorByObj.set(obj, colorFromBgr(ctx.rawArgs[2] ?? 0));
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "CreateFontIndirectW", (ctx) => {
+      const lpLogFont = ctx.rawArgs[0] ?? 0;
+      if (lpLogFont) readWStr(lpLogFont + 28);
+      return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "CreateFontIndirectA", () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
+    this.interceptor.hook("user32.dll", "GetDC", async (ctx) => {
+      const bridge = this.gdiBridgeProvider?.(ctx.rawArgs[0] ?? 0) ?? null;
+      if (!bridge) return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
+      const hdc = await bridge.createDC("DISPLAY");
+      bridgeByHdc.set(hdc, bridge);
+      return { returnValue: hdc, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("user32.dll", "GetWindowDC", async (ctx) => {
+      const bridge = this.gdiBridgeProvider?.(ctx.rawArgs[0] ?? 0) ?? null;
+      if (!bridge) return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
+      const hdc = await bridge.createDC("DISPLAY");
+      bridgeByHdc.set(hdc, bridge);
+      return { returnValue: hdc, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("user32.dll", "ReleaseDC", async (ctx) => {
+      const hdc = ctx.rawArgs[1] ?? 0;
+      const bridge = bridgeFor(hdc);
+      if (!bridge) return ok1();
+      await safe(() => bridge.deleteDC(hdc));
+      bridgeByHdc.delete(hdc);
+      return ok1();
+    });
+    this.interceptor.hook("user32.dll", "BeginPaint", async (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const lpPaint = ctx.rawArgs[1] ?? 0;
+      const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
+      if (bridge) {
+        const hdc = await bridge.createDC("DISPLAY");
+        bridgeByHdc.set(hdc, bridge);
+        if (lpPaint) {
+          runtime.writeInt32(lpPaint + 0, hdc);
+          runtime.writeInt32(lpPaint + 4, 0);
+        }
+        console.log("[GDI-walk] BeginPaint hwnd=0x%s bridge=%s hdc=%d", hwnd.toString(16), "Y", hdc);
+        return { returnValue: hdc, errorCode: E.NO_ERROR };
+      }
+      if (lpPaint) {
+        runtime.writeInt32(lpPaint + 0, this.gdiObjSeq + 1);
+        runtime.writeInt32(lpPaint + 4, 0);
+      }
+      console.log("[GDI-walk] BeginPaint hwnd=0x%s bridge=N (fallback gdiObj=%d)", hwnd.toString(16), this.gdiObjSeq + 1);
+      return { returnValue: ++this.gdiObjSeq, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("user32.dll", "EndPaint", async (ctx) => {
+      const hdc = ctx.rawArgs[1] ? peek(ctx.rawArgs[1]) : 0;
+      const bridge = bridgeFor(hdc);
+      if (!bridge) return ok1();
+      console.log("[GDI-walk] EndPaint hdc=%d \u2192 flush", hdc);
+      await safe(() => bridge.flush(hdc));
+      bridgeByHdc.delete(hdc);
+      return ok1();
+    });
+    this.interceptor.hook("gdi32.dll", "TextOutW", async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = ctx.rawArgs[1] ?? 0;
+      const y = ctx.rawArgs[2] ?? 0;
+      const text = readWStr16(ctx.rawArgs[3] ?? 0, ctx.rawArgs[4] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        await safe(() => bridge.textOut(hdc, x, y, text));
+        return ok1();
+      }
+      return recordPaint({ op: "text", hdc, x, y, text });
+    });
+    this.interceptor.hook("gdi32.dll", "ExtTextOutW", async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = ctx.rawArgs[1] ?? 0;
+      const y = ctx.rawArgs[2] ?? 0;
+      const text = readWStr16(ctx.rawArgs[4] ?? 0, ctx.rawArgs[5] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        await safe(() => bridge.textOut(hdc, x, y, text));
+        return ok1();
+      }
+      return recordPaint({ op: "text", hdc, x, y, text });
+    });
+    this.interceptor.hook("gdi32.dll", "SetTextColor", async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.setTextColor(ctx.rawArgs[0] ?? 0, colorFromBgr(ctx.rawArgs[1] ?? 0)));
+      return { returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "SetBkColor", async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.setBkColor(ctx.rawArgs[0] ?? 0, colorFromBgr(ctx.rawArgs[1] ?? 0)));
+      return { returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "SetBkMode", async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.setBkMode(ctx.rawArgs[0] ?? 0, ctx.rawArgs[1] ?? 0));
+      return { returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "GetBkColor", () => ({ returnValue: 16777215, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "GetTextColor", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "GetTextAlign", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "SetTextAlign", (ctx) => ({ returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "SetMapMode", (ctx) => ({ returnValue: ctx.rawArgs[1] ?? 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "GetMapMode", () => ({ returnValue: 1, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "SetViewportOrgEx", () => this.ok1());
+    this.interceptor.hook("gdi32.dll", "SetWindowOrgEx", () => this.ok1());
+    this.interceptor.hook("gdi32.dll", "GetTextMetrics", (ctx) => {
+      const lptm = ctx.rawArgs[1] ?? 0;
+      if (lptm) {
+        runtime.writeInt32(lptm + 0, 16);
+        runtime.writeInt32(lptm + 4, 12);
+        runtime.writeInt32(lptm + 8, 4);
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "GetTextFaceW", (ctx) => {
+      const buf = ctx.rawArgs[1] ?? 0;
+      if (buf) {
+        runtime.writeBytes(buf, new Uint8Array([67, 0, 111, 0, 110, 0, 115, 0, 111, 0, 108, 0, 97, 0, 115, 0, 0, 0]));
+      }
+      return { returnValue: 8, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "GetDeviceCaps", () => ({ returnValue: 96, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "MoveToEx", (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = ctx.rawArgs[1] ?? 0;
+      const y = ctx.rawArgs[2] ?? 0;
+      penPosByHdc.set(hdc, { x, y });
+      const lppt = ctx.rawArgs[3] ?? 0;
+      if (lppt) {
+        runtime.writeInt32(lppt + 0, x);
+        runtime.writeInt32(lppt + 4, y);
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "LineTo", async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = ctx.rawArgs[1] ?? 0;
+      const y = ctx.rawArgs[2] ?? 0;
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const from = penPosByHdc.get(hdc) ?? { x: 0, y: 0 };
+        await safe(() => bridge.lineTo(hdc, from.x, from.y, x, y, curPenByHdc.get(hdc) ?? BLACK));
+        return ok1();
+      }
+      return recordPaint({ op: "line", hdc, x, y });
+    });
+    this.interceptor.hook("gdi32.dll", "FillRect", async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const rc = readRect(ctx.rawArgs[1] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const color = brushColorByObj.get(ctx.rawArgs[2] ?? 0) ?? curBrushByHdc.get(hdc) ?? WHITE;
+        await safe(() => bridge.fillRect(hdc, toRect(rc), color));
+        return ok1();
+      }
+      return recordPaint({ op: "fillrect", hdc, x: rc.x, y: rc.y, w: rc.w, h: rc.h });
+    });
+    this.interceptor.hook("gdi32.dll", "FrameRect", async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const rc = readRect(ctx.rawArgs[1] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const color = brushColorByObj.get(ctx.rawArgs[2] ?? 0) ?? curBrushByHdc.get(hdc) ?? WHITE;
+        await safe(() => bridge.frameRect(hdc, toRect(rc), color));
+        return ok1();
+      }
+      return recordPaint({ op: "rect", hdc, x: rc.x, y: rc.y, w: rc.w, h: rc.h });
+    });
+    this.interceptor.hook("gdi32.dll", "Rectangle", async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = Math.min(ctx.rawArgs[1] ?? 0, ctx.rawArgs[3] ?? 0);
+      const y = Math.min(ctx.rawArgs[2] ?? 0, ctx.rawArgs[4] ?? 0);
+      const w = Math.abs((ctx.rawArgs[3] ?? 0) - (ctx.rawArgs[1] ?? 0));
+      const h = Math.abs((ctx.rawArgs[4] ?? 0) - (ctx.rawArgs[2] ?? 0));
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        const rc = { x, y, w, h };
+        const R = toRect(rc);
+        await safe(async () => {
+          await bridge.fillRect(hdc, R, curBrushByHdc.get(hdc) ?? WHITE);
+          await bridge.frameRect(hdc, R, curPenByHdc.get(hdc) ?? BLACK);
+        });
+        return ok1();
+      }
+      return recordPaint({ op: "rect", hdc, x, y, w, h });
+    });
+    this.interceptor.hook("gdi32.dll", "PatBlt", async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        await safe(() => bridge.patBlt(hdc, toRect(rc), curBrushByHdc.get(hdc) ?? WHITE, ctx.rawArgs[5] ?? 0));
+        return ok1();
+      }
+      return ok1();
+    });
+    this.interceptor.hook("gdi32.dll", "BitBlt", async (ctx) => {
+      const dest = ctx.rawArgs[0] ?? 0;
+      const src = ctx.rawArgs[5] ?? 0;
+      const destBridge = bridgeFor(dest);
+      if (destBridge && bridgeFor(src) === destBridge) {
+        const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
+        await safe(
+          () => destBridge.bitBlt(
+            dest,
+            toRect(rc),
+            src,
+            toRect({ x: ctx.rawArgs[6] ?? 0, y: ctx.rawArgs[7] ?? 0, w: rc.w, h: rc.h }),
+            ctx.rawArgs[8] ?? 0
+          )
+        );
+      }
+      return ok1();
+    });
+    this.interceptor.hook("gdi32.dll", "StretchBlt", async (ctx) => {
+      const dest = ctx.rawArgs[0] ?? 0;
+      const src = ctx.rawArgs[5] ?? 0;
+      const destBridge = bridgeFor(dest);
+      if (destBridge && bridgeFor(src) === destBridge) {
+        const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
+        const srcRc = { x: ctx.rawArgs[6] ?? 0, y: ctx.rawArgs[7] ?? 0, w: ctx.rawArgs[8] ?? 0, h: ctx.rawArgs[9] ?? 0 };
+        await safe(() => destBridge.stretchBlt(dest, toRect(rc), src, toRect(srcRc), ctx.rawArgs[10] ?? 0));
+      }
+      return ok1();
+    });
+    this.interceptor.hook("gdi32.dll", "CreateCompatibleDC", async (ctx) => {
+      const src = ctx.rawArgs[0] ?? 0;
+      const bridge = bridgeFor(src);
+      if (bridge) {
+        const hdc = await bridge.createCompatibleDC(src);
+        bridgeByHdc.set(hdc, bridge);
+        return { returnValue: hdc, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "CreateCompatibleBitmap", () => ({ returnValue: nextGdiObj(), errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "SelectPalette", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "RealizePalette", () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook("gdi32.dll", "SaveDC", async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.saveDC(ctx.rawArgs[0] ?? 0));
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook("gdi32.dll", "RestoreDC", async (ctx) => {
+      const bridge = bridgeFor(ctx.rawArgs[0] ?? 0);
+      if (bridge) await safe(() => bridge.restoreDC(ctx.rawArgs[0] ?? 0, ctx.rawArgs[1] ?? 0));
+      return ok1();
+    });
+    const dispatchMessage = async (ctx) => {
+      const lpMsg = ctx.rawArgs[0] ?? 0;
+      if (!lpMsg) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const hwnd = peek(lpMsg);
+      const wndRec = this.windowRecords.get(hwnd);
+      const wndProc = wndRec?.wndProc ?? 0;
+      const sAddr = this.sehSentinelAddr;
+      console.log("[GDI-walk] DispatchMessageW hwnd=0x%s wndProc=0x%s sAddr=0x%s mode=%s", hwnd.toString(16), wndProc.toString(16), sAddr.toString(16), mode);
+      const message = peek(lpMsg + 4);
+      const wParam = peek(lpMsg + 8);
+      const lParam = peek(lpMsg + 12);
+      if (!wndProc) {
+        if (wndRec && wndRec.className.toLowerCase() === "edit" && message === 15) {
+          const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
+          if (bridge) {
+            const hdc = await bridge.createDC("DISPLAY");
+            await safe(() => bridge.flush(hdc));
+            await safe(() => bridge.deleteDC(hdc));
+          }
+        }
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      if (mode === "x64" || sAddr === 0) {
+        return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      const saved = snapshot();
+      const esp = runtime.getReg("esp") >>> 0;
+      const frame = esp - 20 >>> 0;
+      runtime.writeInt32(frame + 0, sAddr);
+      runtime.writeInt32(frame + 4, hwnd);
+      runtime.writeInt32(frame + 8, message);
+      runtime.writeInt32(frame + 12, wParam);
+      runtime.writeInt32(frame + 16, lParam);
+      runtime.setReg("esp", frame);
+      runtime.setEip(wndProc);
+      const nested = new Executor(
+        runtime,
+        jit,
+        {
+          handle: async (vector) => {
+            if (vector === SEH_SENTINEL_VECTOR) {
+              console.log("[GDI-walk] nested sentinel hit \u2192 WndProc returned");
+              runtime.setEip(0);
+              return;
+            }
+            console.log("[GDI-walk] nested trap vector=%d", vector);
+            await dispatcher.handle(vector);
+            const lastStub = dispatcher.lastCalled;
+            if (lastStub) {
+              console.log("[GDI-walk] nested trap \u2192 %s!%s idx=%d", lastStub.module, lastStub.proc, runtime.getReg("eax"));
+            } else {
+              console.log("[GDI-walk] nested trap \u2192 unknown stub (eax=%d)", runtime.getReg("eax"));
+            }
+          }
+        },
+        { maxSteps: 5e5 }
+      );
+      await nested.run(wndProc);
+      const result = runtime.getReg("eax") >>> 0;
+      restore(saved);
+      return { returnValue: result, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook("user32.dll", "DispatchMessageW", dispatchMessage);
+    this.interceptor.hook("user32.dll", "DispatchMessageA", dispatchMessage);
+  }
+  /** Small helper: BOOL TRUE with NO_ERROR. */
+  ok1() {
+    return { returnValue: 1, errorCode: E.NO_ERROR };
+  }
+  /**
+   * Parses an RT_MENU (type 4) resource into flat menu sections for the host
+   * to render. notepad's layout: MENUHEADER {version, size} (4 bytes), then
+   * records of WORD flags + string. MF_POPUP (0x10) items carry their title
+   * right after the 4-byte header; plain items put it after the flags word.
+   * There is no mtID field in this menu, and notepad's command ids are the
+   * sequential 1..n classic layout — assign them in order.
+   */
+  parseMenuResource(addr, size = 0) {
+    if (!addr) return [];
+    const mem = this.runtime.memory.buffer;
+    const peekW16 = (a) => a + 2 <= mem.byteLength ? new DataView(mem).getUint16(a, true) : 0;
+    const readW = (a) => {
+      if (!a) return "";
+      const view = new DataView(mem);
+      let s = "";
+      for (let i = 0; a + i + 1 < mem.byteLength && i < 512; i += 2) {
+        const c = view.getUint16(a + i, true);
+        if (c === 0) break;
+        s += String.fromCharCode(c);
+      }
+      return s;
+    };
+    const sections = [];
+    let cur = null;
+    let depth = 0;
+    const limit = size > 0 ? addr + size : mem.byteLength;
+    let off = addr + 4 + 3 & ~3;
+    for (let guard = 0; guard < 1024 && off + 2 <= limit; guard++) {
+      const flags = peekW16(off);
+      if (flags === 0) {
+        off += 2;
+        continue;
+      }
+      if ((flags & 128) !== 0) {
+        depth = Math.max(0, depth - 1);
+        off += 2;
+        continue;
+      }
+      if ((flags & 2048) !== 0) {
+        off += 2;
+        continue;
+      }
+      if ((flags & 16) !== 0) {
+        const title = readW(off + 2);
+        if (depth === 0) {
+          cur = { title, items: [] };
+          sections.push(cur);
+        } else if (cur) {
+          cur.items.push({ id: flags & 65535, label: title });
+        }
+        depth += 1;
+        off = off + 2 + (title.length + 1) * 2 + 3 & ~3;
+      } else {
+        const label = readW(off + 2);
+        if (cur && label) cur.items.push({ id: flags & 65535, label });
+        off = off + 2 + (label.length + 1) * 2 + 3 & ~3;
+      }
+    }
+    return sections;
+  }
+  /**
+   * Interactive API (see GuestProcessOptions.interactive): pushes a message
+   * into the guest's queue and wakes a GetMessageW that is blocked waiting.
+   */
+  postMessage(msg) {
+    this.guiMessageQueue.push(msg);
+    if (this.pendingMessageResolve) {
+      const r = this.pendingMessageResolve;
+      this.pendingMessageResolve = null;
+      r();
+    }
+  }
+  /** Replaces an EDIT control's text from the host side (input bridge). */
+  postText(hwnd, text) {
+    const rec = this.windowRecords.get(hwnd);
+    if (!rec) return;
+    rec.text = text;
+    this.onTextChanged?.(hwnd, text);
+  }
+  /** Live window tree — the interactive host reads it while the process runs. */
+  getWindows() {
+    return [...this.windowRecords.entries()].map(([hwnd, r]) => ({
+      hwnd,
+      className: r.className,
+      wndProc: r.wndProc,
+      parent: r.parent,
+      text: r.text,
+      menu: r.menu
+    }));
+  }
+  /**
+   * Routes WriteFile on the console pseudo-handles into the output buffers.
+   * Non-console handles fall through to the fs bridge (same path as the
+   * default handler).
+   */
+  installConsoleWriteFile() {
+    this.installConsoleRead();
+    const prevWriteFile = this.interceptor.getHandler("kernel32.dll", "WriteFile");
+    this.interceptor.hook("kernel32.dll", "WriteFile", (ctx, host) => {
+      const handle = (ctx.rawArgs[0] ?? 0) | 0;
+      const buffer = ctx.rawArgs[1] ?? 0;
+      const bytes = host.memory.read(buffer, ctx.rawArgs[2] ?? 0);
+      if (handle === STD_OUTPUT_HANDLE || handle === STD_ERROR_HANDLE || handle === STD_INPUT_HANDLE) {
+        if (handle !== STD_INPUT_HANDLE) {
+          this.capture(handle === STD_ERROR_HANDLE, bytes);
+        }
+        return { returnValue: bytes.byteLength, errorCode: E.NO_ERROR };
+      }
+      if (prevWriteFile) return prevWriteFile(ctx, host);
+      return host.fs.writeFile(handle, bytes).then(
+        (r) => r.error === E.NO_ERROR ? { returnValue: r.bytesWritten, errorCode: E.NO_ERROR } : { returnValue: 0, errorCode: r.error }
+      );
+    });
+    const installWriteConsole = (wide) => {
+      const name = wide ? "WriteConsoleW" : "WriteConsoleA";
+      this.interceptor.hook("kernel32.dll", name, (ctx, host) => {
+        const handle = (ctx.rawArgs[0] ?? 0) | 0;
+        const buffer = ctx.rawArgs[1] ?? 0;
+        const nChars = ctx.rawArgs[2] ?? 0;
+        const written = ctx.rawArgs[3] ?? 0;
+        if (handle === STD_INPUT_HANDLE) return { returnValue: 1, errorCode: E.NO_ERROR };
+        let out;
+        if (wide) {
+          const raw = host.memory.read(buffer, nChars * 2);
+          const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+          let s = "";
+          for (let i = 0; i + 1 < raw.byteLength; i += 2) {
+            const c = view.getUint16(i, true);
+            if (c === 0) break;
+            s += String.fromCharCode(c);
+          }
+          out = new TextEncoder().encode(s);
+        } else {
+          out = host.memory.read(buffer, nChars);
+        }
+        const stderr = handle === STD_ERROR_HANDLE;
+        this.capture(stderr, out);
+        if (written) {
+          const w = new Uint8Array(4);
+          new DataView(w.buffer).setUint32(0, nChars, true);
+          host.memory.write(written, w);
+        }
+        return { returnValue: 1, errorCode: E.NO_ERROR };
+      });
+    };
+    installWriteConsole(true);
+    installWriteConsole(false);
+  }
+  /**
+   * Console STD_INPUT reader (see installConsoleWriteFile for the writer).
+   * Adds a host-feedable stdin buffer plus ReadConsoleW/A and ReadFile on the
+   * STD_INPUT pseudo-handle. In interactive mode an empty buffer BLOCKS the
+   * read (await) until the host posts input via postInput — the same
+   * suspend/resume pattern used by GetMessageW, so the executor stays alive
+   * while cmd waits for the next command line. Non-interactive runs (e.g.
+   * `cmd /c dir`) get an immediate EOF (0 bytes) and never block.
+   */
+  installConsoleRead() {
+    const prevReadFile = this.interceptor.getHandler("kernel32.dll", "ReadFile");
+    this.interceptor.hook("kernel32.dll", "ReadFile", async (ctx, host) => {
+      const handle = (ctx.rawArgs[0] ?? 0) | 0;
+      if (handle === STD_INPUT_HANDLE) return this.consoleRead(ctx, host, false);
+      return prevReadFile ? prevReadFile(ctx, host) : { returnValue: 0, errorCode: E.ERROR_NOT_IMPLEMENTED };
+    });
+    this.interceptor.hook("kernel32.dll", "ReadConsoleW", (ctx, host) => this.consoleRead(ctx, host, true));
+    this.interceptor.hook("kernel32.dll", "ReadConsoleA", (ctx, host) => this.consoleRead(ctx, host, false));
+  }
+  /**
+   * Drains the host-fed stdin buffer. `wide` true = ReadConsoleW (UTF-16LE,
+   * `count` is CHARACTERS); false = ReadConsoleA / ReadFile(STD_INPUT) (bytes,
+   * `count` is BYTES, ASCII-only for v1). Blocks in interactive mode until at
+   * least one character is available.
+   */
+  async consoleRead(ctx, host, wide) {
+    const buffer = ctx.rawArgs[1] ?? 0;
+    const count = ctx.rawArgs[2] ?? 0;
+    const pCount = ctx.rawArgs[3] ?? 0;
+    if (this.stdinBuffer.length === 0 && this.interactive) {
+      await new Promise((resolve) => {
+        this.pendingInputResolve = resolve;
+      });
+    }
+    if (this.stdinBuffer.length === 0) {
+      if (pCount) {
+        const w = new Uint8Array(4);
+        new DataView(w.buffer).setUint32(0, 0, true);
+        host.memory.write(pCount, w);
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    }
+    const take = Math.min(count, this.stdinBuffer.length);
+    const chunk = this.stdinBuffer.slice(0, take);
+    this.stdinBuffer = this.stdinBuffer.slice(take);
+    if (wide) {
+      const bytes = new Uint8Array(take * 2);
+      const view = new DataView(bytes.buffer);
+      for (let i = 0; i < take; i++) view.setUint16(i * 2, chunk.charCodeAt(i), true);
+      host.memory.write(buffer, bytes);
+    } else {
+      const bytes = new Uint8Array(take);
+      for (let i = 0; i < take; i++) bytes[i] = chunk.charCodeAt(i) & 255;
+      host.memory.write(buffer, bytes);
+    }
+    if (pCount) {
+      const w = new Uint8Array(4);
+      new DataView(w.buffer).setUint32(0, take, true);
+      host.memory.write(pCount, w);
+    }
+    return { returnValue: 1, errorCode: E.NO_ERROR };
+  }
+  /** Host → guest console input. Appends `text` (caller supplies the line
+   * terminator, e.g. "dir\r\n") and wakes any ReadConsoleW/A blocked in
+   * interactive mode. */
+  postInput(text) {
+    this.stdinBuffer += text;
+    if (this.pendingInputResolve) {
+      const r = this.pendingInputResolve;
+      this.pendingInputResolve = null;
+      r();
+    }
+  }
+  capture(stderr, bytes) {
+    const sink = stderr ? this.stderr : this.stdout;
+    for (const b of bytes) sink.push(b);
+    this.onOutput?.(bytes, stderr);
   }
 }
 export {
-  BUILTIN_WIN_FILES,
-  ensureBuiltinWinFiles
+  DEFAULT_STACK_TOP,
+  GuestProcessRunner,
+  computeOverlayStart
 };

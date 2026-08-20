@@ -242,6 +242,21 @@ export class FileSystemBridgeImpl implements FileSystemBridge {
     return stat?.size ?? 0;
   }
 
+  async setEndOfFile(handle: number): Promise<WinError> {
+    const record = this.handles.get(handle);
+    if (!record) return E.ERROR_INVALID_HANDLE;
+    try {
+      const file = await this.store.openFile(record.path, 'readwrite');
+      await file.truncate(record.pointer);
+      await file.close();
+      return E.NO_ERROR;
+    } catch (err) {
+      const winErr = this.mapError(err);
+      this.report(record.path, winErr, 'SetEndOfFile');
+      return winErr;
+    }
+  }
+
   getFilePointer(handle: number): number {
     return this.handles.get(handle)?.pointer ?? -1;
   }
