@@ -1,8 +1,98 @@
-# specter-core Windows PE Emulator — Handover (2026-08-20, session 11)
+# specter-core Windows PE Emulator — Handover (2026-08-20, session 12)
 
 > Single source of truth for continuing the work. Read fully before touching anything.
 > All addresses are absolute VAs (image base 0x400000).
-> Session 10's full handover is preserved below unchanged.
+> Sessions 10 & 11 full handovers are preserved unchanged below.
+
+## Session 12 summary — notepad Save As ROOT-CAUSED & GREEN; file ops + direct .exe launch
+
+**Goal:** finish the comdlg32 save fix (session 11 was stuck at "WriteFile never
+called"), then add File Explorer right-click ops, move the disk-wipe button out,
+and make double-clicking an .exe launch it directly (no shell windows).
+
+**Status: all done, verified.** notepad Save As now writes the file through the
+REAL comdlg32 dialog (verifier PASS), the desktop + File Explorer have
+copy/paste/rename/delete right-click menus, Wipe Virtual Disk is out of the
+desktop menu (kept on DesktopController for a future Settings window), and
+double-clicking any .exe runs the real guest directly.
+
+## The big root cause (session 12) — LocalLock missing from X86_API_ARG_COUNT
+
+Session 11's frontier: after WideCharToMultiByte's length query, notepad jumped
+straight to SetEndOfFile — WriteFile was never called; the write helper
+`0x410a66` bailed because its 3rd arg (stack slot `[esp+0x18]`) was 0.
+
+**Root cause: `locallock`/`localunlock` were NOT in `X86_API_ARG_COUNT`** (only
+localalloc/localrealloc/localfree/localsize were). The save routine does
+`push ebx; call LocalLock`; with argCount 0 the trap stub generated `ret 0`
+instead of `ret 4`, leaking 4 bytes and shifting every later `[esp+X]` read by
++4. So `0x410d2a: mov [esp+0x18], eax` (the encoding value 0xfde9=65001) landed
+at `[esp+0x14]`, and `0x410d4a` read `[esp+0x18]` = 0 → 0x410a66 thought "nothing
+to write" → file saved empty. Adding `'locallock': 1, 'localunlock': 1` fixed it.
+
+How it was found: runtime probes (GuestProcessOptions.probes) at 0x410d41 /
+0x410d4a / 0x410d7e showed `[esp+0x14]=0xfde9` but `[esp+0x18]=0x0` — a 4-byte
+esp drift, pointing at a missing-argCount stub. **Enabling probes inside the
+DispatchMessageW nested Executor was required first** (the save routine runs in
+the WndProc nested executor, which previously had no onStep wiring).
+
+## Other fixes this session
+
+| Area | Change |
+|---|---|
+| `mapper.ts` | `'locallock': 1, 'localunlock': 1` (THE save fix); de-duplicated 7 duplicate X86_API_ARG_COUNT keys (TS1117 was being masked) |
+| `guest-process.ts` | dispatchMessage nested Executor now receives `options.probes`/`onStep` (probes fire inside WndProc); SetEndOfFile handler → `host.fs.setEndOfFile` |
+| `bridges/fs.ts` + `contracts/bridge/fs.ts` | NEW `FileSystemBridge.setEndOfFile(handle)` (truncate to current pointer via store `truncate`) |
+| `handlers.ts` | WideCharToMultiByte/MultiByteToWideChar NUL semantics: explicit cchWideChar/cbMultiByte counts do NOT append/return NUL (only NUL-scan mode +1) — without this notepad wrote a trailing NUL and saved 24 bytes instead of 23 |
+| `shared/shell/fs-ops.ts` (NEW) | `copyRecursive` / `deleteRecursive` / `moveRecursive` / `uniqueName` — recursive copy/move/delete over FileStore (store.move only handles files) |
+| `ui/ui-clipboard.ts` (NEW) | module-level copy/paste singleton shared by File Explorer and Desktop (subscribe/get/set) |
+| `ui/components/FileContextMenu.tsx` (NEW) | shared entry right-click menu: Open / Download / Run (exe) / Copy / Rename / Delete |
+| `FileExplorerApp.tsx` | right-click on row → FileContextMenu; right-click on blank → New Folder / Paste / Refresh; inline rename input; context menu is absolute-positioned inside `.sc-explorer` (NOT fixed — `.sc-desktop` is fixed+overflow:hidden and traps fixed menus, the classic "menu never appears" bug) |
+| `components/Desktop.tsx` | desktop icon right-click → FileContextMenu (Open/Download/Run/Copy/Rename/Delete) + inline rename; background menu Paste (clipboard non-empty) |
+| `components/ContextMenu.tsx` | Wipe Virtual Disk REMOVED (per user: move to a future Settings window); added Paste item (onPaste when clipboard set) |
+| `desktop-controller.tsx` | NEW `launchGuestExecutable(storePath)`: double-clicked .exe (open verb) runs the real guest directly — cmd.exe → `openCommandPrompt` terminal, notepad.exe → `launchGuestWindow` (fixed modulePath for MUI), others → hosted guest windows. No RunExecutableApp shell window |
+| `RunExecutableApp.tsx` | removed Security-Warning confirm layer (auto-runs when `initialFile` set), removed Install button + installing phase, removed the "Console/Windows + Guest Window (GUI bridge)" debug panel (user: "这个东西直接不要"); start-menu entry without a file still shows the picker |
+| `InstallerApp.tsx` | double-clicked .bkapp installs immediately (skips overview page) |
+
+## Verifier: scripts/notepad-dialog-check.ts (PASS, exit 0)
+
+Same harness as session 11 (real SysWOW64 notepad.exe + MemoryFileStore), now
+asserting `saved.txt` contains "dialog-check". Also: the guest never posts
+WM_QUIT, so `runner.run()` can hang after WM_CLOSE — the script now verifies
+saved.txt via a timer independent of run() returning, and prints the verdict
+with a SYNCHRONOUS `fs.writeSync(2, ...)` (process.exit truncates async stderr).
+
+```bash
+BS=$(ls -d node_modules/.pnpm/esbuild@*/node_modules/esbuild/bin/esbuild | head -1)
+"$BS" --bundle scripts/notepad-dialog-check.ts --outfile=node_modules/.cache/notepad-dialog-check.cjs \
+  --platform=node --format=cjs --target=es2020 --external:typescript
+timeout 30 "C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe" \
+  node_modules/.cache/notepad-dialog-check.cjs "C:/Windows/SysWOW64/notepad.exe"
+# expect: [diag] saved.txt="Typed by dialog-check\r\n" / check PASS / exit 0
+```
+
+## Verification loop (all green)
+
+- `tsc --noEmit` exit 0
+- `eslint .` exit 0
+- `vitest run` → 31 files / 253 tests ALL PASS (note: vitest finishes but the
+  process lingers; `timeout 120` returns 124 — that's the timeout, not a failure)
+
+## Still open / next
+
+- **Settings window** (user said "等会儿做一个设置窗口放进去"): host the
+  Wipe-Virtual-Disk action there. `DesktopController.wipeStorage()` is intact.
+- Desktop/FileExplorer copy is a shared clipboard but **cut (move) is not
+  implemented** — Copy+Paste always copies; user asked only for copy/paste.
+- Double-clicking a *console* .exe that is neither cmd.exe nor has top-level
+  windows will hang in the interactive message loop (same as before); a
+  console-detection + terminal fallback could come later.
+- The old `RunExecutableApp` shell is still registered for Start-Menu manual
+  runs (picker). Notepad's bundled path (`windows-notepad` app) is unchanged.
+
+---
+
+# Session 11 historical handover — preserved unchanged
 
 ## Session 11 summary — notepad Save As (Full comdlg32 dialog fix), IN PROGRESS
 

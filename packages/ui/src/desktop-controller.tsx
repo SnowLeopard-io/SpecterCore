@@ -185,6 +185,14 @@ export class DesktopControllerImpl implements DesktopController {
       await this.openCommandPrompt();
       return;
     }
+    // Double-clicked .exe (open verb with a path): launch the REAL guest
+    // process directly — no RunExecutableApp shell window in between.
+    // cmd.exe gets its interactive terminal; anything else is hosted as a
+    // guest window (notepad-style) with its own window manager entries.
+    if (app.appId === 'exe-runner' && args?.path) {
+      await this.launchGuestExecutable(args.path);
+      return;
+    }
     // 带参数（open 动词：用某文件/目录打开）时始终新建窗口 —— 记事本已开着
     // 再双击 txt 必须新开一个窗口加载文件，而不是聚焦旧窗口丢掉参数。
     if (!args) {
@@ -525,6 +533,35 @@ export class DesktopControllerImpl implements DesktopController {
       console.error(`[desktop] guest ${source.name} failed:`, err);
       await this.showGuestError(source.name, String(err));
     }
+  }
+
+  /**
+   * Double-clicked .exe → launch the real guest process directly (no
+   * RunExecutableApp shell window). cmd.exe gets its interactive terminal;
+   * notepad.exe and other GUI executables are hosted as real guest windows.
+   */
+  private async launchGuestExecutable(storePath: string): Promise<void> {
+    const base = storePath.split('/').filter(Boolean).pop() ?? '';
+    const lower = base.toLowerCase();
+    if (lower === 'cmd.exe') {
+      // Console program: open the real interactive Command Prompt terminal,
+      // cwd = the exe's folder.
+      const dir = storePath.split('/').filter(Boolean).slice(0, -1).join('/');
+      const winDir = `C:\\${dir.replace(/\//g, '\\')}`;
+      await this.openCommandPrompt(undefined, winDir);
+      return;
+    }
+    // GUI program: host its top-level windows on the desktop (notepad path).
+    // notepad's MUI satellites live under Windows/SysWOW64 on the disk, so
+    // its module path is fixed there; other exes report their real location.
+    await this.launchGuestWindow({
+      storePath,
+      modulePath:
+        lower === 'notepad.exe'
+          ? 'C:/Windows/SysWOW64/notepad.exe'
+          : `C:\\${storePath.replace(/\//g, '\\')}`,
+      name: base.replace(/\.exe$/i, ''),
+    });
   }
 
   /**

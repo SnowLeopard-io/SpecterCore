@@ -26,7 +26,7 @@ interface RunExecutableProps {
   modulePath?: string;
 }
 
-type Phase = 'confirm' | 'running' | 'installing' | 'cancelled' | 'error';
+type Phase = 'confirm' | 'running' | 'cancelled' | 'error';
 
 interface PeMeta {
   arch: string;
@@ -225,19 +225,14 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
   const [iconUrl, setIconUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState<Source | null>(null);
-  const [output, setOutput] = useState('');
   const [status, setStatus] = useState<string | null>(null);
-  const [guestResult, setGuestResult] = useState<GuestProcessResult | null>(null);
-  const [tab, setTab] = useState<'console' | 'windows'>('windows');
-  const [liveWindows, setLiveWindows] = useState<GuestProcessResult['windows']>([]);
-  const [editText, setEditText] = useState('');
-  const [interacting, setInteracting] = useState(false);
   const iconRef = useRef<string | null>(null);
-  const bodyRef = useRef<HTMLDivElement | null>(null);
   const runnerRef = useRef<GuestProcessRunner | null>(null);
-  const editHwndRef = useRef<number | null>(null);
   /** guest HWND -> L6 window id, so each guest top-level window is created once. */
   const guestWinIds = useRef<Map<number, string>>(new Map());
+  /** Double-clicked .exe runs immediately; the "confirm" phase is only for
+   * opening Run Executable from the Start Menu with no file argument. */
+  const autoRanRef = useRef(false);
 
   const ensureGuestWindows = useCallback(
     async (runner: GuestProcessRunner): Promise<void> => {
@@ -322,22 +317,11 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
     };
   }, []);
 
-  useEffect(() => {
-    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-  }, [output, status]);
-
   const run = useCallback(async (): Promise<void> => {
     if (!source) return;
     setPhase('running');
-    setOutput('');
     setStatus(null);
-    setGuestResult(null);
-    setLiveWindows([]);
-    setEditText('');
-    setInteracting(false);
-    setTab('windows');
     const image = source.image;
-    const decode = new TextDecoder();
 
     let runtime: WasmRuntimeImpl;
     try {
@@ -372,52 +356,50 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
             return null;
           }
         },
-        // Interactive: the message loop blocks at GetMessageW instead of
-        // exiting, so the window panel below is a live, typeable notepad.
         interactive: true,
         gdiBridge: (hwnd) => guestGdiBridgeProvider(hwnd),
         onMessageWait: () => {
-          const wins = runner.getWindows();
-          setLiveWindows(wins);
-          const edit = wins.find((w) => w.className.toLowerCase() === 'edit');
-          editHwndRef.current = edit ? edit.hwnd : null;
-          if (edit) setEditText(edit.text);
-          setInteracting(true);
           // Host each guest top-level window as a real desktop window.
           void ensureGuestWindows(runner);
         },
-        onTextChanged: (_hwnd, text) => setEditText(text),
-        onOutput: (bytes) => {
-          setOutput((prev) => prev + decode.decode(bytes).replace(/\r\n/g, '\n'));
+        onOutput: () => {
+          // Console bytes are not surfaced here; guests with a terminal
+          // (cmd) are launched through the Command Prompt app instead.
         },
       });
       runnerRef.current = null;
-      setInteracting(false);
-      setGuestResult(result);
       let text: string;
       switch (result.status) {
         case 'exit':
           text = result.cleanExit
-            ? `\n[process exited with code ${result.exitCode}]`
-            : `\n[process returned without calling ExitProcess — startup aborted (eip=0x${result.eip.toString(16)})]`;
-          if (result.muiLoaded) text += `\n[MUI] merged: ${result.muiSource}`;
-          else text += '\n[MUI] NOT loaded — fallback strings/menus in use';
+            ? `Process exited with code ${result.exitCode}.`
+            : `Process returned without calling ExitProcess — startup aborted (eip=0x${result.eip.toString(16)}).`;
+          if (result.muiLoaded) text += ` MUI merged: ${result.muiSource}.`;
+          else text += ' MUI not loaded — fallback strings/menus in use.';
           break;
         case 'fault':
-          text = `\n[fault] ${describeStop(runtime, result, image)}`;
+          text = `Fault: ${describeStop(runtime, result, image)}`;
           break;
         case 'trap':
-          text = `\n[trapped] eip = 0x${result.eip.toString(16)}`;
+          text = `Trapped (eip=0x${result.eip.toString(16)}).`;
           break;
         default:
-          text = `\n[step limit] eip = 0x${result.eip.toString(16)}`;
-          break;
+          text = `Step limit reached (eip=0x${result.eip.toString(16)}).`;
       }
       setStatus(text);
     } catch (err: unknown) {
-      setStatus(`\n[error] ${String(err)}`);
+      setStatus(`Error: ${String(err)}`);
     }
   }, [source, kernel, ensureGuestWindows, fs, modulePath]);
+
+  // Double-clicked .exe (initialFile set): run immediately, no security
+  // warning / confirm phase — the user already chose to open it.
+  useEffect(() => {
+    if (initialFile && source && phase === 'confirm' && !autoRanRef.current) {
+      autoRanRef.current = true;
+      void run();
+    }
+  }, [initialFile, source, phase, run]);
 
   const pickLocal = useCallback(async (): Promise<void> => {
     try {
@@ -431,11 +413,6 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
       setPhase('error');
     }
   }, [controller, applyImage]);
-
-  const install = (): void => {
-    setPhase('installing');
-    if (initialFile) void controller.launch('installer', { path: initialFile });
-  };
 
   return (
     <div className="sc-run">
@@ -471,9 +448,6 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
             <button className="sc-nt-btn" onClick={() => setPhase('cancelled')}>
               Cancel
             </button>
-            <button className="sc-nt-btn" onClick={install} disabled={!initialFile}>
-              Install
-            </button>
             <button className="sc-nt-btn primary" onClick={() => void run()} disabled={!source}>
               Run
             </button>
@@ -482,138 +456,11 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
       )}
 
       {phase === 'running' && (
-        <div className="sc-run-running">
-          <div className="sc-tabs">
-            <button className={tab === 'console' ? 'active' : ''} onClick={() => setTab('console')}>
-              Console
-            </button>
-            <button className={tab === 'windows' ? 'active' : ''} onClick={() => setTab('windows')}>
-              Windows{interacting ? ' (live)' : ''}
-            </button>
-          </div>
-
-          {tab === 'console' ? (
-            <div className="sc-console">
-              <div className="sc-console-head">
-                <span className="sc-console-dot" />
-                <span className="sc-console-title">{name}</span>
-              </div>
-              <div className="sc-console-body" ref={bodyRef}>
-                {output === '' && !status ? (
-                  <div className="sc-console-empty">running…</div>
-                ) : (
-                  <pre className="sc-console-pre">
-                    {output}
-                    {status}
-                  </pre>
-                )}
-              </div>
-            </div>
-          ) : interacting ? (
-            <div className="sc-run-stage">
-              <div className="sc-run-title">Guest window is open on the desktop</div>
-              <p className="sc-run-note center">
-                notepad runs as a real desktop window — type in its editor, use its menu,
-                or close it to exit the process.
-              </p>
-            </div>
-          ) : (
-            <div className="sc-guest">
-              <div className="sc-guest-head">
-                <span className="sc-console-dot" />
-                <span className="sc-console-title">Guest Window (GUI bridge)</span>
-              </div>
-              <div className="sc-guest-stage">
-                {(() => {
-                  const wins = liveWindows.length > 0 ? liveWindows : (guestResult?.windows ?? []);
-                  return wins
-                    .filter((w) => w.parent === 0)
-                    .map((w, idx) => {
-                      const edit = wins.find((c) => c.parent === w.hwnd && c.className.toLowerCase() === 'edit');
-                      return (
-                        <div className="sc-win" key={w.hwnd}>
-                          <div className="sc-win-title">
-                            <span className="sc-win-name">
-                              {w.className}
-                              {w.text ? ` — ${w.text}` : ''}
-                            </span>
-                            <span className="sc-win-id">0x{w.hwnd.toString(16)}</span>
-                            <button
-                              className="sc-win-close"
-                              title="Close window (WM_CLOSE)"
-                              onClick={() => {
-                                runnerRef.current?.postMessage({ hwnd: w.hwnd, msg: 0x0010 /* WM_CLOSE */, wParam: 0, lParam: 0 });
-                              }}
-                            >
-                              ✕
-                            </button>
-                          </div>
-                          <div className="sc-win-body">
-                            {idx === 0 &&
-                              (guestResult?.paintCommands ?? []).map((p, i) => (
-                                <span
-                                  key={i}
-                                  className={`sc-paint sc-paint-${p.op}`}
-                                  style={{ left: p.x, top: p.y, width: p.w, height: p.h }}
-                                >
-                                  {p.text}
-                                </span>
-                              ))}
-                            {edit ? (
-                              <div
-                                className="sc-win-edit"
-                                contentEditable={interacting}
-                                suppressContentEditableWarning
-                                onInput={(e) => {
-                                  const text = e.currentTarget.textContent ?? '';
-                                  const hwnd = editHwndRef.current;
-                                  if (hwnd) runnerRef.current?.postText(hwnd, text);
-                                  setEditText(text);
-                                }}
-                              >
-                                {editText}
-                                {!interacting && <span className="sc-win-caret" />}
-                              </div>
-                            ) : (
-                              idx === 0 &&
-                              (guestResult?.paintCommands.length ?? 0) === 0 && (
-                                <div className="sc-win-empty">no paint commands</div>
-                              )
-                            )}
-                          </div>
-                        </div>
-                      );
-                    });
-                })()}
-                {(() => {
-                  const wins = liveWindows.length > 0 ? liveWindows : (guestResult?.windows ?? []);
-                  return wins.filter((w) => w.parent === 0).length === 0 && (
-                    <div className="sc-win-empty">no top-level windows</div>
-                  );
-                })()}
-              </div>
-              <div className="sc-guest-list">
-                {(() => {
-                  const wins = liveWindows.length > 0 ? liveWindows : (guestResult?.windows ?? []);
-                  return wins.map((w) => (
-                    <div className="sc-guest-item" key={w.hwnd}>
-                      <span className="sc-guest-hwnd">0x{w.hwnd.toString(16)}</span>
-                      <span className="sc-guest-class">{w.className}</span>
-                      <span className="sc-guest-proc">wndProc=0x{w.wndProc.toString(16)}</span>
-                      <span className="sc-guest-text">"{w.text}"</span>
-                    </div>
-                  ));
-                })()}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {phase === 'installing' && (
         <div className="sc-run-stage">
-          <div className="sc-installer-spinner" />
-          <span className="sc-run-title">Opening installer for {name}…</span>
+          <div className="sc-run-title">{status ? 'Finished' : 'Running…'}</div>
+          <p className="sc-run-note center">
+            {status ?? 'Process is starting. Any guest windows appear on the desktop.'}
+          </p>
         </div>
       )}
 
