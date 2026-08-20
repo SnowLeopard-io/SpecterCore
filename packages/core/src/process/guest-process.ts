@@ -192,6 +192,13 @@ export interface GuestProcessOptions {
    */
   commandLine?: string;
   /**
+   * Initial working directory reported by GetCurrentDirectoryW/A (and used
+   * as the base for relative paths). Defaults to 'C:\\'. Setting it lets the
+   * desktop open cmd.exe already inside a folder without relying on cmd's
+   * `cd` builtin.
+   */
+  cwd?: string;
+  /**
    * Optional per-window GDI bridge provider. When it returns a bridge for a
    * guest hwnd, the guest's GDI calls (GetDC/BeginPaint/TextOutW/FillRect/
    * LineTo/... /EndPaint) are forwarded to that bridge and rendered to its
@@ -210,6 +217,15 @@ export interface GuestProcessOptions {
    * a fast-fail. Keep this list tiny and documented.
    */
   patches?: Array<{ va: number; bytes: number[] }>;
+  /**
+   * Runtime per-block probes, fired from onStep when the executor reaches a
+   * block starting at `eip`. The callback runs with live registers and memory
+   * and may patch guest state — used to work around JIT formatting bugs that
+   * a static `patches` entry cannot express (they need register values, e.g.
+   * cmd.exe's space-padding formatter at 0x42e327 / 64-bit formatter at
+   * 0x4317b4, see scripts/diag-trap.ts). Probes only run when provided.
+   */
+  probes?: Array<{ eip: number; fn: (rt: WasmRuntimeImpl) => void }>;
 }
 
 export class GuestProcessRunner {
@@ -325,7 +341,7 @@ export class GuestProcessRunner {
     this.onMessageWait = options.onMessageWait;
     this.muiLoaded = false;
     this.muiSource = '';
-    this.cwd = 'C:\\';
+    this.cwd = options.cwd ?? 'C:\\';
     this.commandLine = options.commandLine ?? '';
 
     this.runtime.resetCpu();
@@ -386,7 +402,12 @@ export class GuestProcessRunner {
 
     const executor = new Executor(this.runtime, jit, trapHandler, {
       maxSteps: options.maxSteps,
-      onStep: options.onStep,
+      onStep: options.probes?.length
+        ? (eip: number, rt: WasmRuntimeImpl) => {
+            for (const p of options.probes ?? []) if (p.eip === eip) p.fn(rt);
+            options.onStep?.(eip, rt);
+          }
+        : options.onStep,
     });
     const result = await executor.run(mapped.entryPoint);
 
@@ -696,7 +717,7 @@ export class GuestProcessRunner {
       let text: string | null = null;
       if (fromModule && hModule === 0) text = lookupMsgTable(msgId);
       if (text === null && fromSystem) text = SYSTEM_MESSAGE_TEXT[msgId] ?? null;
-      if (text === null) return { returnValue: 0, errorCode: 0x13d }; // ERROR_MR_MID_NOT_FOUND
+      if (text === null) return { returnValue: 0, errorCode: 0x13d as E }; // ERROR_MR_MID_NOT_FOUND
       // Minimal %N substitution from the Arguments parameter.
       //
       // The Arguments parameter is `va_list *`:
@@ -985,8 +1006,11 @@ export class GuestProcessRunner {
     // GetModuleFileNameW/A: report the module path so the guest can reopen its
     // own file (installers read their archive overlay from disk).
     if (this.modulePath) {
-      const pathW = this.modulePath + '\0';
-      const pathA = this.modulePath + '\0';
+      // Real Windows reports module paths with backslashes; guest binaries
+      // (esp. cmd.exe) split on the last '\' to find their own directory.
+      // Normalize forward slashes so that path parsing works correctly.
+      const pathW = (this.modulePath.replace(/\//g, '\\') + '\0');
+      const pathA = pathW;
       this.interceptor.hook('kernel32.dll', 'GetModuleFileNameW', (ctx) => {
         const buf = ctx.rawArgs[1] ?? 0;
         const cap = ctx.rawArgs[2] ?? 0;
@@ -1101,7 +1125,7 @@ export class GuestProcessRunner {
       ['=C:', 'C:\\'],
       ['SystemRoot', 'C:\\Windows'],
       ['COMSPEC', 'C:\\Windows\\System32\\cmd.exe'],
-      ['PATH', 'C:\\Windows\\System32;C:\\Windows'],
+      ['PATH', 'C:\\Windows\\SysWOW64;C:\\Windows\\System32;C:\\Windows'],
       ['TEMP', 'C:\\Users\\Guest\\AppData\\Local\\Temp'],
       ['TMP', 'C:\\Users\\Guest\\AppData\\Local\\Temp'],
       ['USERPROFILE', 'C:\\Users\\Guest'],
@@ -3311,18 +3335,14 @@ export class GuestProcessRunner {
       const bytes = host.memory.read(buffer, ctx.rawArgs[2] ?? 0);
       if (handle === STD_OUTPUT_HANDLE || handle === STD_ERROR_HANDLE || handle === STD_INPUT_HANDLE) {
         if (handle !== STD_INPUT_HANDLE) {
-          // A Unicode cmd.exe writes UTF-16LE to its console handle (WriteFile
-          // and WriteConsole are aliased on a console handle). Decode UTF-16,
-          // dropping trailing NUL padding, then re-encode as UTF-8 for capture.
-          const raw = host.memory.read(buffer, bytes.byteLength);
-          const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-          let s = '';
-          for (let i = 0; i + 1 < raw.byteLength; i += 2) {
-            const c = view.getUint16(i, true);
-            if (c === 0) break;
-            s += String.fromCharCode(c);
-          }
-          this.capture(handle === STD_ERROR_HANDLE, new TextEncoder().encode(s));
+          // Capture the raw bytes verbatim. cmd's `echo` and `dir` go through
+          // the CRT (printf/fprintf) which calls WriteFile(STD_OUTPUT, ...) with
+          // the line as the CRT encoded it (UTF-16LE for this Unicode cmd).
+          // We don't try to re-decode here — WriteConsoleW is the wide path
+          // (UTF-16) and WriteFile is the narrow/CRT path; mixing them strips
+          // bytes that don't fit a single encoding. The terminal TextDecoder
+          // (utf-8, lossy) renders the stream.
+          this.capture(handle === STD_ERROR_HANDLE, bytes);
         }
         return { returnValue: bytes.byteLength, errorCode: E.NO_ERROR };
       }

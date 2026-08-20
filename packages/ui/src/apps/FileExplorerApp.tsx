@@ -23,6 +23,12 @@ function basenameOf(path: string): string {
   return segs[segs.length - 1] ?? path;
 }
 
+/** Map a virtual-disk store path to a Windows path cmd.exe understands. */
+function toWindowsPath(storePath: string): string {
+  if (!storePath || storePath === '/') return 'C:\\';
+  return 'C:\\' + storePath.replace(/\//g, '\\');
+}
+
 function iconFor(entry: DirEntry): string {
   if (entry.kind === 'directory') return '📁';
   const lower = entry.name.toLowerCase();
@@ -245,6 +251,25 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
   const canBack = nav.index > 0;
   const canUp = path !== '';
 
+  const selectedEntry = entries.find((e) => e.name === selected) ?? null;
+  const selectedIsDir = selectedEntry?.kind === 'directory';
+  const selectedIsExe =
+    selectedEntry?.kind === 'file' && selectedEntry.name.toLowerCase().endsWith('.exe');
+
+  const openCmdHere = (): void => {
+    // Open cmd.exe with the current folder as its initial working directory.
+    void controller.openCommandPrompt(undefined, toWindowsPath(path));
+  };
+  const openCmdInSelected = (): void => {
+    if (!selectedEntry || selectedEntry.kind !== 'directory') return;
+    void controller.openCommandPrompt(undefined, toWindowsPath(joinPath(path, selectedEntry.name)));
+  };
+  const runSelectedExe = (): void => {
+    if (!selectedEntry || selectedEntry.kind !== 'file') return;
+    const full = joinPath(path, selectedEntry.name);
+    void controller.openCommandPrompt(`start "" "${toWindowsPath(full)}"`, toWindowsPath(path));
+  };
+
   // 拖入真实文件 → 导入当前目录并刷新。
   const onDrop = async (e: ReactDragEvent): Promise<void> => {
     e.preventDefault();
@@ -305,6 +330,27 @@ export function FileExplorerApp({ initialPath }: FileExplorerProps) {
           aria-label="Download"
         >
           ⬇
+        </button>
+        <button className="sc-explorer-btn" onClick={openCmdHere} aria-label="Open command prompt here" title="Open command prompt in this folder">
+          🖥
+        </button>
+        <button
+          className="sc-explorer-btn"
+          disabled={!selectedIsDir}
+          onClick={openCmdInSelected}
+          aria-label="Open command prompt in selected folder"
+          title="Open command prompt in selected folder"
+        >
+          📁🖥
+        </button>
+        <button
+          className="sc-explorer-btn"
+          disabled={!selectedIsExe}
+          onClick={runSelectedExe}
+          aria-label="Run executable"
+          title="Run selected executable in command prompt"
+        >
+          ▶
         </button>
         <div className="sc-explorer-address">
           <span className="sc-explorer-crumb" onClick={() => load('')}>

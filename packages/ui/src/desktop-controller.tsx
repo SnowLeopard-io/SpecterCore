@@ -42,6 +42,64 @@ import type { AppDefinition, UiController } from './types';
 
 const INSTALLED_PREFIX = 'installed:';
 
+/**
+ * Runtime formatting probes for the bundled cmd.exe (ported from
+ * scripts/diag-trap.ts, progress.md Bug18/Bug19). These JIT workarounds need
+ * live registers/memory, so they run per-block from onStep instead of being
+ * static `patches`. Without them cmd's dir formatters either skip padding or
+ * mis-place the digit-group separator; with them the listing spacing is sane.
+ */
+function cmdFormatProbes(): Array<{ eip: number; fn: (rt: WasmRuntimeImpl) => void }> {
+  const rd32 = (rt: WasmRuntimeImpl, a: number): number => {
+    const b = rt.readBytes(a >>> 0, 4);
+    return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+  };
+  return [
+    {
+      // Space-padding formatter entry (Bug19): when called from the time->size
+      // gap (ret 0x430e52, 4 spaces) or size->name gap (ret 0x405b52, 2 spaces),
+      // the savedLen at [ecx+8] is stale, so the padding comparison skips the
+      // fill. Recompute the actual string length and write the gap + NUL +
+      // updated savedLen directly.
+      eip: 0x42e327,
+      fn: (rt) => {
+        const ecx = rt.getReg('ecx') >>> 0;
+        const esp = rt.getReg('esp') >>> 0;
+        const retAddr = rd32(rt, esp) >>> 0;
+        if (retAddr === 0x430e52 || retAddr === 0x405b52) {
+          const bufPtr = rd32(rt, ecx + 0x10) >>> 0;
+          let actualLen = 0;
+          for (let i = 0; i < 300; i++) {
+            const ch = rd32(rt, bufPtr + i * 2) & 0xffff;
+            if (ch === 0) break;
+            actualLen++;
+          }
+          const numSpaces = retAddr === 0x430e52 ? 4 : 2;
+          const space = new Uint8Array(2);
+          new DataView(space.buffer).setUint16(0, 0x20, true);
+          for (let i = 0; i < numSpaces; i++) rt.writeBytes(bufPtr + (actualLen + i) * 2, space);
+          rt.writeBytes(bufPtr + (actualLen + numSpaces) * 2, new Uint8Array(2));
+          const len = new Uint8Array(4);
+          new DataView(len.buffer).setUint32(0, actualLen + numSpaces, true);
+          rt.writeBytes(ecx + 8, len);
+        }
+      },
+    },
+    {
+      // 64-bit number formatter (Bug18): force the digit-group separator length
+      // to 1 — the wcslen in this build returns a wrong value here and the JIT
+      // format loop mis-positions the separator otherwise.
+      eip: 0x4317b4,
+      fn: (rt) => {
+        const ebp = rt.getReg('ebp') >>> 0;
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, 1, true);
+        rt.writeBytes((ebp - 0xd8) >>> 0, b);
+      },
+    },
+  ];
+}
+
 function reactContent(node: ReactNode): WindowContent {
   return { kind: 'react', render: (_controller: UiController) => node };
 }
@@ -123,11 +181,7 @@ export class DesktopControllerImpl implements DesktopController {
       return;
     }
     if (app.appId === 'command-prompt') {
-      await this.launchGuestConsole({
-        storePath: 'Windows/SysWOW64/cmd.exe',
-        modulePath: 'C:/Windows/SysWOW64/cmd.exe',
-        name: 'Command Prompt',
-      });
+      await this.openCommandPrompt();
       return;
     }
     // 带参数（open 动词：用某文件/目录打开）时始终新建窗口 —— 记事本已开着
@@ -183,6 +237,22 @@ export class DesktopControllerImpl implements DesktopController {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Opens the real guest cmd.exe, optionally running an initial command first
+   * (e.g. `cd <dir>` to land in a folder, or launching an executable). The
+   * command is queued on stdin before the guest reads it, so it executes right
+   * after the banner. Used by the File Explorer ("open CMD here", "run").
+   */
+  async openCommandPrompt(initialCommand?: string, cwd?: string): Promise<void> {
+    await this.launchGuestConsole({
+      storePath: 'Windows/SysWOW64/cmd.exe',
+      modulePath: 'C:/Windows/SysWOW64/cmd.exe',
+      name: 'Command Prompt',
+      initialCommand,
+      cwd,
+    });
   }
 
   async pickLocalFile(): Promise<LocalFileInfo | null> {
@@ -409,7 +479,14 @@ export class DesktopControllerImpl implements DesktopController {
    * onOutput into a terminal <pre>, and keystrokes posted from the terminal
    * feed its stdin via postInput (see guest-process consoleRead).
    */
-  private async launchGuestConsole(source: { storePath: string; modulePath: string; name: string }): Promise<void> {
+  private async launchGuestConsole(source: {
+    storePath: string;
+    modulePath: string;
+    name: string;
+    initialCommand?: string;
+    /** Initial working directory (Windows path, e.g. 'C:\\Windows\\SysWOW64'). */
+    cwd?: string;
+  }): Promise<void> {
     const fs = this.getFileSystem();
     if (!fs) {
       await this.showGuestError(source.name, 'No virtual disk available');
@@ -458,6 +535,10 @@ export class DesktopControllerImpl implements DesktopController {
     const runner = new GuestProcessRunner(runtime, jit, loader, interceptor);
     const channel = new CmdConsoleChannel();
 
+    // Queue an initial command (e.g. `cd <dir>` or running an exe) before the
+    // guest starts reading its stdin, so it executes right after the banner.
+    if (source.initialCommand) runner.postInput(source.initialCommand + '\r\n');
+
     // Open the terminal window first so React can mount and attach to the
     // channel before we start the (possibly-blocking) run.
     const handle = await this.windowManager.createWindow({
@@ -484,8 +565,15 @@ export class DesktopControllerImpl implements DesktopController {
       const result = await runner.run(image, {
         createEngine: (mode) => new JitEngineImpl(runtime, mode),
         modulePath: source.modulePath,
-        commandLine: 'cmd.exe',
+        // NOTE: keep the command line EMPTY. A non-empty one (e.g. 'cmd.exe')
+        // makes this custom cmd.exe treat itself as invoked with arguments and
+        // silently skip command output (dir/echo produce nothing); with an
+        // empty command line it runs as a plain interactive shell (verified in
+        // scripts/cmd-cwd-check.ts with the real virtual disk).
+        commandLine: '',
         interactive: true,
+        cwd: source.cwd,
+        probes: cmdFormatProbes(),
         // Neutralize cmd.exe's __security_check_cookie (VA 0x41dea0): the
         // interactive input reader overflows the stack cookie slot by a few
         // bytes (a JIT string-instruction boundary quirk), which otherwise

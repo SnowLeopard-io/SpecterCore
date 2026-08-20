@@ -1,101 +1,149 @@
-import { jsx } from "react/jsx-runtime";
-import { NotepadApp } from "./apps/NotepadApp";
-import { SystemInfoApp } from "./apps/SystemInfoApp";
-import { MinesweeperApp } from "./apps/MinesweeperApp";
-import { FileExplorerApp } from "./apps/FileExplorerApp";
-import { InstallerApp } from "./apps/InstallerApp";
-import { ImageViewerApp } from "./apps/ImageViewerApp";
-import { RunExecutableApp } from "./apps/RunExecutableApp";
-const DEFAULT_APPS = [
-  {
-    appId: "notepad",
-    name: "Notepad",
-    icon: "\u{1F4DD}",
-    description: "Simple text editor",
-    group: "Accessories",
-    render: (args) => /* @__PURE__ */ jsx(NotepadApp, { initialFile: args?.path })
-  },
-  {
-    appId: "minesweeper",
-    name: "Minesweeper",
-    icon: "\u{1F4A3}",
-    description: "Classic minesweeper",
-    group: "Games",
-    render: () => /* @__PURE__ */ jsx(MinesweeperApp, {})
-  },
-  {
-    appId: "system-info",
-    name: "System Information",
-    icon: "\u{1F5A5}",
-    description: "Kernel, processes and disk status",
-    group: "System",
-    render: () => /* @__PURE__ */ jsx(SystemInfoApp, {})
-  },
-  {
-    appId: "file-explorer",
-    name: "File Explorer",
-    icon: "\u{1F4C2}",
-    description: "Browse the virtual disk",
-    group: "System",
-    render: (args) => /* @__PURE__ */ jsx(FileExplorerApp, { initialPath: args?.path })
-  },
-  {
-    appId: "command-prompt",
-    name: "Command Prompt",
-    icon: "\u{1F5A5}",
-    description: "Run the bundled Windows cmd.exe (real x86 PE) over the virtual disk",
-    group: "System",
-    // Launch is special-cased in DesktopController: it runs the bundled
-    // cmd.exe as a real guest process with a console terminal (stdin/stdout),
-    // replacing the old JS interpreter shell.
-    render: () => null
-  },
-  {
-    appId: "installer",
-    name: "Installer",
-    icon: "\u{1F4E6}",
-    description: "Install applications (.bkapp) onto the virtual disk",
-    group: "System",
-    render: (args) => /* @__PURE__ */ jsx(InstallerApp, { initialPackagePath: args?.path })
-  },
-  {
-    appId: "image-viewer",
-    name: "Photos",
-    icon: "\u{1F5BC}\uFE0F",
-    description: "View images from the virtual disk",
-    group: "Accessories",
-    render: (args) => /* @__PURE__ */ jsx(ImageViewerApp, { initialFile: args?.path })
-  },
-  {
-    appId: "exe-runner",
-    name: "Run Executable",
-    icon: "\u2699\uFE0F",
-    description: "Run a Windows executable from the virtual disk",
-    group: "System",
-    render: (args) => /* @__PURE__ */ jsx(RunExecutableApp, { initialFile: args?.path })
-  },
-  {
-    appId: "windows-notepad",
-    name: "Notepad (Windows)",
-    icon: "\u{1F4DD}",
-    description: "Run the bundled Windows notepad.exe with its MUI resources",
-    group: "System",
-    // Launch is special-cased in DesktopController: it runs the bundled
-    // notepad as a real guest window (no application-shell window).
-    render: () => null
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { MemoryFileStore } from "../packages/host/src/memory-store";
+import { FileSystemBridgeImpl } from "@specter-core/bridges";
+import {
+  ApiInterceptorImpl,
+  GuestProcessRunner,
+  JitEngineImpl,
+  PeLoaderImpl,
+  registerDefaultHandlers,
+  WasmRuntimeImpl
+} from "@specter-core/core";
+class LoggingInterceptor extends ApiInterceptorImpl {
+  rt;
+  constructor(host, rt) {
+    super(host);
+    this.rt = rt;
   }
-];
-function toDesktopApp(app) {
-  return {
-    appId: app.appId,
-    name: app.name,
-    icon: app.icon,
-    description: app.description,
-    group: app.group,
-    launch: () => Promise.resolve()
-  };
+  async dispatch(ctx) {
+    const result = await super.dispatch(ctx);
+    if (/FindFirstFile|FindNextFile|WriteConsole|ReadConsole|GetFileAttributes|listDir/i.test(ctx.proc)) {
+      const args = ctx.rawArgs.slice(0, 5).map((a) => `0x${(a >>> 0).toString(16)}`);
+      console.error(`[api] ${ctx.module}!${ctx.proc}(${args.join(", ")}) -> 0x${(result.returnValue >>> 0).toString(16)}`);
+    }
+    return result;
+  }
 }
-export {
-  DEFAULT_APPS,
-  toDesktopApp
-};
+async function seed(store, path, data) {
+  const f = await store.openFile(path, "create");
+  await f.write(0, data);
+  await f.close();
+}
+async function main() {
+  const file = resolve(process.argv[2] ?? "C:/Windows/SysWOW64/cmd.exe");
+  const cwd = process.argv[3] ?? "C:\\Windows";
+  const image = new Uint8Array(await readFile(file));
+  const modulePath = "C:/Windows/SysWOW64/cmd.exe";
+  const store = new MemoryFileStore("C", 2 * 1024 * 1024 * 1024);
+  await store.createDirectory("Windows");
+  await store.createDirectory("Windows/SysWOW64");
+  await store.createDirectory("Windows/SysWOW64/en-US");
+  await store.createDirectory("Windows/SysWOW64/zh-CN");
+  await seed(store, "Windows/SysWOW64/cmd.exe", image);
+  for (const lang of ["en-US", "zh-CN"]) {
+    if (process.env.BK_NO_MUI === "1") break;
+    try {
+      const mui = new Uint8Array(await readFile(`C:/Windows/System32/${lang}/cmd.exe.mui`));
+      await seed(store, `Windows/SysWOW64/${lang}/cmd.exe.mui`, mui);
+    } catch {
+    }
+  }
+  const runtime = new WasmRuntimeImpl();
+  const host = {
+    memory: {
+      read: (address, length) => runtime.readBytes(address, length),
+      write: (address, data) => runtime.writeBytes(address, data)
+    },
+    fs: new FileSystemBridgeImpl(store)
+  };
+  const interceptor = new LoggingInterceptor(host, runtime);
+  registerDefaultHandlers(interceptor);
+  const runner = new GuestProcessRunner(
+    runtime,
+    new JitEngineImpl(runtime),
+    new PeLoaderImpl(),
+    interceptor
+  );
+  const probes = [
+    {
+      eip: 4383527,
+      fn: (rt) => {
+        const rd32 = (a) => {
+          const b = rt.readBytes(a >>> 0, 4);
+          return b.byteLength < 4 ? 0 : new DataView(b.buffer, b.byteOffset, 4).getUint32(0, true);
+        };
+        const ecx = rt.getReg("ecx") >>> 0;
+        const esp = rt.getReg("esp") >>> 0;
+        const retAddr = rd32(esp) >>> 0;
+        if (retAddr === 4394578 || retAddr === 4217682) {
+          const bufPtr = rd32(ecx + 16) >>> 0;
+          let actualLen = 0;
+          for (let i = 0; i < 300; i++) {
+            const ch = rd32(bufPtr + i * 2) & 65535;
+            if (ch === 0) break;
+            actualLen++;
+          }
+          const numSpaces = retAddr === 4394578 ? 4 : 2;
+          const space = new Uint8Array(2);
+          new DataView(space.buffer).setUint16(0, 32, true);
+          for (let i = 0; i < numSpaces; i++) rt.writeBytes(bufPtr + (actualLen + i) * 2, space);
+          rt.writeBytes(bufPtr + (actualLen + numSpaces) * 2, new Uint8Array(2));
+          const len = new Uint8Array(4);
+          new DataView(len.buffer).setUint32(0, actualLen + numSpaces, true);
+          rt.writeBytes(ecx + 8, len);
+        }
+      }
+    },
+    {
+      eip: 4396980,
+      fn: (rt) => {
+        const ebp = rt.getReg("ebp") >>> 0;
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, 1, true);
+        rt.writeBytes(ebp - 216 >>> 0, b);
+      }
+    }
+  ];
+  setTimeout(() => runner.postInput("dir C:\\Windows\r\n"), 2e3);
+  setTimeout(() => runner.postInput("exit\r\n"), 4e3);
+  let out = "";
+  const result = await runner.run(image, {
+    createEngine: (mode) => new JitEngineImpl(runtime, mode),
+    modulePath,
+    commandLine: process.env.BK_ARGS ?? "",
+    interactive: true,
+    cwd,
+    patches: [{ va: 4316832, bytes: [195] }],
+    probes: process.env.BK_NO_PROBES === "1" ? void 0 : probes,
+    readFile: async (p) => {
+      const segs = p.split(/[\\/]/).filter(Boolean);
+      if (segs.length && /^[A-Za-z]:$/.test(segs[0])) segs.shift();
+      const sp = segs.join("/");
+      try {
+        const f = await store.openFile(sp, "read");
+        const size = await f.size();
+        const data = await f.read(0, size);
+        await f.close();
+        return data;
+      } catch {
+        return null;
+      }
+    },
+    onOutput: (bytes) => {
+      out += new TextDecoder("utf-8").decode(bytes);
+      process.stdout.write(Buffer.from(bytes));
+    }
+  });
+  console.error(`
+[diag] exitCode=${result.exitCode}`);
+  const lastSeg = cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
+  const printed = out.replace(/\0/g, "");
+  const ok = printed.includes(cwd) || printed.includes(cwd.replace(/\\/g, "/")) || printed.includes(lastSeg);
+  console.error(`[diag] cwd check (${cwd}) ${ok ? "PASS" : "FAIL"}`);
+  process.exit(ok ? 0 : 1);
+}
+main().catch((err) => {
+  console.error(err);
+  process.exit(2);
+});

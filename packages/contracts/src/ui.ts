@@ -111,6 +111,12 @@ export interface DesktopController {
    * 文本文件→记事本，.bkapp→安装器，其余类型返回 false（调用方可回退到预览）。
    */
   openFile(path: string): Promise<boolean>;
+  /**
+   * 打开真 cmd.exe 的交互式终端窗口；可指定初始工作目录（cwd，Windows 路径，
+   * 如 'C:\\Windows\\SysWOW64'）与初始命令（initialCommand，如启动某个 exe）。
+   * 文件资源管理器「在此处打开命令提示符 / 运行」按钮调用。
+   */
+  openCommandPrompt(initialCommand?: string, cwd?: string): Promise<void>;
   /** 已安装应用列表（注册表缓存，同步返回）。 */
   listInstalledApps(): InstalledApp[];
   /** 安装应用包：拷贝文件到 Program Files、写注册表、刷新开始菜单/桌面图标。 */
