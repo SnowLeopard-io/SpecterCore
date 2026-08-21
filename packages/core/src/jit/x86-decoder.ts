@@ -287,11 +287,11 @@ class DecoderState {
   /** XMM rm operand: either a mem spec (size used only for EA) or another XMM. */
   private xmmRmOperand(raw: RawXmmRm): Operand {
     if (raw.mem) return { kind: 'mem', base: raw.mem.base, index: raw.mem.index, scale: raw.mem.scale, disp: raw.mem.disp, size: 32 };
-    return { kind: 'xmm', reg: raw.rmReg };
+    return { kind: 'xmm', reg: raw.rmReg, size: 64 };
   }
 
   private xmmOperand(reg: number): Operand {
-    return { kind: 'xmm', reg };
+    return { kind: 'xmm', reg, size: 64 };
   }
 
   /** Decodes ModRM/SIB for XMM/MMX ops, keeping the raw reg/rm numbers. */
@@ -809,7 +809,7 @@ class DecoderState {
         // memory <-> ST(0) moves (FLD/FST/FSTP) are raw 8-byte copies through
         // an 8-slot register file. Arithmetic (FADD/FMUL/...) is unsupported.
         if (opcode === 0xdb) {
-          const b = this.code[this.pos];
+          const b = this.code[this.pos] ?? 0;
           // DB E0..E4 are the no-modrm 286/387 opcodes FNENI/FNDISI/FNCLEX/
           // FNINIT/FNSETPM — all no-ops on modern CPUs and for our FPU model.
           if (b >= 0xe0 && b <= 0xe4) {

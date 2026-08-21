@@ -147,8 +147,8 @@ export class WindowManagerImpl implements WindowManager {
     this.appBinding.set(appId, windowId);
   }
 
-  getAppWindowId(appId: string): string | undefined {
-    return this.appBinding.get(appId);
+  getAppWindowId(appId: string): string | null {
+    return this.appBinding.get(appId) ?? null;
   }
 
   get focusedWindow(): WindowHandle | null {

@@ -8,6 +8,10 @@ The project is currently at the **P1 milestone**: the PE loader, the x86 → WAS
 
 See the [architecture notes](docs/ARCHITECTURE.md) and the live [development/handover log](docs/PROGRESS.md) for the full spec.
 
+<br>
+
+![Windows](docs/Windows.png)
+
 ---
 
 ## Table of Contents

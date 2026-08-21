@@ -106,6 +106,7 @@ export interface MemOperand {
 export interface XmmOperand {
   kind: 'xmm';
   reg: number;
+  size: Size;
 }
 
 export interface ImmOperand {

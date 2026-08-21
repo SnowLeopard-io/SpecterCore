@@ -108,14 +108,7 @@ export class NullGdiBridge implements GdiBridge {
   ): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
-  async setDIBitsToDevice(
-    _dc: number,
-    _xDest: number,
-    _yDest: number,
-    _startScan: number,
-    _cLines: number,
-    _dib: DibSurface,
-  ): Promise<WinError> {
+  async setDIBitsToDevice(_dc: number, _xDest: number, _yDest: number, _dib: DibSurface): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
   async stretchBlt(
@@ -448,31 +441,26 @@ export class CanvasGdiBridge implements GdiBridge {
     return E.NO_ERROR;
   }
 
-  async setDIBitsToDevice(
-    dc: number,
-    xDest: number,
-    yDest: number,
-    startScan: number,
-    cLines: number,
-    dib: DibSurface,
-  ): Promise<WinError> {
+  async setDIBitsToDevice(dc: number, xDest: number, yDest: number, dib: DibSurface): Promise<WinError> {
     const { surface } = this.requireDc(dc);
-    const { width, height, bitCount, palette, bits } = dib;
+    const { width, height, bitCount, palette, bits, xSrc, ySrc, drawWidth, drawHeight, startScan, cLines } = dib;
     const stride = Math.floor((width * bitCount + 31) / 32) * 4;
-    const totalRows = Math.abs(height);
     const bottomUp = height > 0;
-    const rows = Math.max(0, Math.min(cLines, totalRows - startScan));
+    const rows = Math.max(0, Math.min(drawHeight, cLines));
     for (let r = 0; r < rows; r++) {
-      const dibRow = startScan + r;
-      const srcRow = bottomUp ? totalRows - 1 - dibRow : dibRow;
-      const rowBase = srcRow * stride;
-      for (let x = 0; x < width; x++) {
-        const color = readDibPixel(bits, rowBase, x, bitCount, palette);
+      // 输出行 r（自上而下）对应 DIB 扫描线：bottom-up 时 ySrc 是源矩形底边。
+      const scanLine = bottomUp ? ySrc + drawHeight - 1 - r : ySrc + r;
+      // lpvBits 第 k 行 = 扫描线 (startScan + k)。
+      const lpvRow = scanLine - startScan;
+      if (lpvRow < 0 || lpvRow >= cLines) continue;
+      const rowBase = lpvRow * stride;
+      for (let x = 0; x < drawWidth; x++) {
+        const color = readDibPixel(bits, rowBase, xSrc + x, bitCount, palette);
         if (!color) continue;
         surface.setPixel(xDest + x, yDest + r, color, ROP_INDEX_COPY);
       }
     }
-    this.notify(dc, { x: xDest, y: yDest, width, height: rows });
+    this.notify(dc, { x: xDest, y: yDest, width: drawWidth, height: rows });
     return E.NO_ERROR;
   }
 

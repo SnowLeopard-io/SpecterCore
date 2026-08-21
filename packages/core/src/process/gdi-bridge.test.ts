@@ -3,6 +3,7 @@ import type {
   ClipRegion,
   Color,
   DeviceCaps,
+  DibSurface,
   Dispose,
   FontSpec,
   GdiBridge,
@@ -275,6 +276,17 @@ class RecordingGdiBridge implements GdiBridge {
       horizontalResolution: 96,
       verticalResolution: 96,
     };
+  }
+  async setDIBitsToDevice(
+    dc: number,
+    x: number,
+    y: number,
+    dib: DibSurface,
+  ): Promise<WinError> {
+    this.calls.push(
+      `setDIBitsToDevice:${dc}:${x},${y}:${dib.drawWidth}x${dib.drawHeight}:${dib.bitCount}bpp`,
+    );
+    return E.NO_ERROR;
   }
   async flush(dc: number): Promise<void> {
     this.calls.push(`flush:${dc}`);

@@ -136,6 +136,8 @@ class ProbeInterceptor extends ApiInterceptorImpl implements ApiInterceptor {
       const bmi = ctx.rawArgs?.[10] ?? 0;
       const w = ctx.rawArgs?.[3] ?? 0;
       const h = ctx.rawArgs?.[4] ?? 0;
+      const xSrc = ctx.rawArgs?.[5] ?? 0;
+      const ySrc = ctx.rawArgs?.[6] ?? 0;
       const rd = (a: number): number => {
         try {
           const b = this.rt.readBytes(a >>> 0, 4);
@@ -147,10 +149,11 @@ class ProbeInterceptor extends ApiInterceptorImpl implements ApiInterceptor {
       const biW = rd((bmi ?? 0) + 4);
       const biH = rd((bmi ?? 0) + 8);
       const biBpp = rd((bmi ?? 0) + 14);
-      if (this.sdibCount <= 20 || (this.sdibCount >= 273 && this.sdibCount <= 282)) {
+      if (this.sdibCount <= 20) {
         sync(
           `[sdib#${this.sdibCount}] dc=0x${(ctx.rawArgs?.[0] ?? 0).toString(16)} dst=(${ctx.rawArgs?.[1]},${ctx.rawArgs?.[2]}) ` +
-            `w=${w} h=${h} bits=0x${(bits >>> 0).toString(16)} bmi=0x${(bmi >>> 0).toString(16)} ` +
+            `w=${w} h=${h} src=(${xSrc},${ySrc}) scan=${ctx.rawArgs?.[7]} lines=${ctx.rawArgs?.[8]} ` +
+            `bits=0x${(bits >>> 0).toString(16)} bmi=0x${(bmi >>> 0).toString(16)} ` +
             `bmiHeader w=${biW} h=${biH} bpp=${biBpp}`,
         );
       }

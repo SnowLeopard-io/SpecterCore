@@ -81,6 +81,8 @@ export interface WindowManager {
   onChange(listener: () => void): Dispose;
   /** 应用图标/进程与窗口的绑定 */
   bindApp(appId: string, windowId: string): void;
+  /** 返回某应用当前绑定的窗口 id（未绑定返回 null） */
+  getAppWindowId(appId: string): string | null;
 }
 
 export interface DesktopAppInfo {

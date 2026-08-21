@@ -1184,26 +1184,43 @@ export class GuestProcessRunner {
       const desc = (ctx.rawArgs[1] ?? 0) >>> 0;
       const thunk = (ctx.rawArgs[4] ?? 0) >>> 0;
       const rd32 = (a: number): number => (a ? this.runtime.readInt32(a) >>> 0 : 0);
+      const rd64 = (a: number): bigint => {
+        const lo = this.runtime.readInt32(a) >>> 0;
+        const hi = this.runtime.readInt32(a + 4) >>> 0;
+        return (BigInt(hi) << 32n) | BigInt(lo);
+      };
+      // x64 IAT/INT entries are 8 bytes; x86 entries are 4. The name RVA lives
+      // in the low 4 bytes of each entry (RVAs are < 4GB). For x64 the ordinal
+      // marker is bit 63 (IMAGE_ORDINAL_FLAG64), which sits in the HIGH dword —
+      // reading only the low dword would mistake an ordinal import for a tiny
+      // name RVA, resolve nothing, and make ResolveDelayLoadedAPI return 0,
+      // which aborts cmd.exe's Wldp.dll delay-load init. So read the full
+      // 8-byte thunk-data to detect ordinals on x64.
+      const stride = pe.is64 ? 8 : 4;
       const dllRva = rd32(desc + 4);
       const iatRva = rd32(desc + 12);
       const intRva = rd32(desc + 16);
       if (!parentBase || !dllRva || !intRva || !thunk || !iatRva) return { returnValue: 0, errorCode: E.NO_ERROR };
       const dllName = readCStr(parentBase + dllRva).toLowerCase();
-      const idx = (thunk - (parentBase + iatRva)) / 4;
-      const intThunk = parentBase + intRva + idx * 4;
-      const nameVal = rd32(intThunk);
+      const idx = (thunk - (parentBase + iatRva)) / stride;
+      const intThunk = parentBase + intRva + idx * stride;
+      const entry = pe.is64 ? rd64(intThunk) : BigInt(rd32(intThunk));
+      const ORDINAL_FLAG = pe.is64 ? 0x8000000000000000n : 0x80000000n;
       let procName: string;
-      if (nameVal & 0x80000000) {
-        procName = `#${nameVal & 0xffff}`;
+      if ((entry & ORDINAL_FLAG) !== 0n) {
+        procName = `#${Number(entry & 0xffffn)}`;
       } else {
-        // hint/name entry: u16 hint followed by the ASCII name
-        procName = readCStr(parentBase + nameVal + 2);
+        const nameRva = Number(entry & 0xffffffffn);
+        procName = readCStr(parentBase + nameRva + 2);
       }
       if (!procName) return { returnValue: 0, errorCode: E.NO_ERROR };
       const stub = allocDynamicStub(procName, dllName);
       if (!stub) return { returnValue: 0, errorCode: E.NO_ERROR };
-      this.runtime.writeInt32(thunk, stub);
-      if (dllName) this.runtime.writeInt32(thunk + 4, 0);
+      // For x64 the IAT slot is 8 bytes; resolve it with a full 64-bit pointer
+      // (guest addresses stay in the low 4GB, so the high dword is 0).
+      this.runtime.writeInt32(thunk, stub >>> 0);
+      if (pe.is64) this.runtime.writeInt32(thunk + 4, 0);
+      else if (dllName) this.runtime.writeInt32(thunk + 4, 0);
       return { returnValue: stub, errorCode: E.NO_ERROR };
     });
 
@@ -3980,6 +3997,10 @@ export class GuestProcessRunner {
       const hdc = ctx.rawArgs[0] ?? 0;
       const xDest = ctx.rawArgs[1] ?? 0;
       const yDest = ctx.rawArgs[2] ?? 0;
+      const drawWidth = ctx.rawArgs[3] ?? 0;
+      const drawHeight = ctx.rawArgs[4] ?? 0;
+      const xSrc = ctx.rawArgs[5] ?? 0;
+      const ySrc = ctx.rawArgs[6] ?? 0;
       const startScan = ctx.rawArgs[7] ?? 0;
       const cLines = ctx.rawArgs[8] ?? 0;
       const lpvBits = ctx.rawArgs[9] ?? 0;
@@ -3992,8 +4013,8 @@ export class GuestProcessRunner {
       const biHeight = peek(lpbmi + 8);
       const biBitCount = peek(lpbmi + 14) & 0xffff;
       const biCompression = peek(lpbmi + 16);
-      const biClrUsed = peek(lpbmi + 32);
       if (biCompression !== 0 || biWidth <= 0 || biHeight === 0) return ok1(); // BI_RGB only
+      const biClrUsed = peek(lpbmi + 32);
       let palette: Uint32Array | null = null;
       if (biBitCount <= 8) {
         const nColors = biClrUsed || 1 << biBitCount;
@@ -4007,10 +4028,25 @@ export class GuestProcessRunner {
           palette[i] = (0xff000000 | (r << 16) | (g << 8) | b) >>> 0;
         }
       }
+      // lpvBits 只含 cLines 条扫描线（从 StartScan 起），winmine 把 bits 指针
+      // 直接指向精灵图内某块 tile 的数据，bmi 却描述整张 16x256 图——按
+      // stride*cLines 读取，避免越界读入相邻数据。
       const stride = Math.floor((biWidth * biBitCount + 31) / 32) * 4;
-      const bits = runtime.readBytes(lpvBits, stride * Math.abs(biHeight));
-      const dib: DibSurface = { width: biWidth, height: biHeight, bitCount: biBitCount, palette, bits };
-      await safe(() => bridge.setDIBitsToDevice(hdc, xDest, yDest, startScan, cLines, dib));
+      const bits = runtime.readBytes(lpvBits, stride * Math.max(0, cLines));
+      const dib: DibSurface = {
+        width: biWidth,
+        height: biHeight,
+        bitCount: biBitCount,
+        palette,
+        bits,
+        xSrc,
+        ySrc,
+        drawWidth,
+        drawHeight,
+        startScan,
+        cLines,
+      };
+      await safe(() => bridge.setDIBitsToDevice(hdc, xDest, yDest, dib));
       return { returnValue: cLines, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('gdi32.dll', 'StretchBlt', async (ctx) => {

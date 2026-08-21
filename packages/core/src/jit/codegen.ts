@@ -10,7 +10,7 @@
  * flag-affecting instruction, matching real x86 semantics (design 4.1.1).
  */
 
-import type { Instruction, MemOperand, Operand, RegName, Size, XmmOperand } from './ir';
+import type { ImmOperand, Instruction, MemOperand, Operand, RegName, Size, XmmOperand } from './ir';
 import { CTX_BASE, EFLAGS_OFFSET, EIP_OFFSET, FLAG_DF, FLAG_ZF, INT_VECTOR_OFFSET, REG_OFFSET, STATUS_CONTINUE, STATUS_FAULT, STATUS_TRAP, TSC_OFFSET, fpuAddr, xmmAddr } from './cpu';
 import type { Cond } from './cpu';
 import { WasmFunction } from './wasm-encoder';
@@ -2585,9 +2585,10 @@ function emitMul64(fn: WasmFunction, inst: Instruction): void {
   const isImulImm = inst.target !== undefined && inst.target!.kind === 'imm';
   if (isImulImm) {
     // imul r64, r/m64, imm
+    const imm = inst.target! as ImmOperand;
     pushOperand(fn, inst.src!);
     fn.localSet(L_I64A);
-    fn.i64Const(inst.target!.value);
+    fn.i64Const(imm.value);
     fn.localSet(L_I64B);
     fn.localGet(L_I64A);
     fn.localGet(L_I64B);

@@ -144,6 +144,8 @@ export interface DeviceCaps {
  * SetDIBitsToDevice 的 DIB 载荷：BITMAPINFO 头部解析结果 + 调色板 + 像素位。
  * `height` 为正表示 bottom-up（内存首行是图像底行），为负表示 top-down。
  * `palette` 为索引色格式（1/4/8bpp）的 ARGB 调色板，直接色格式为 null。
+ * `bits` 只含 `cLines` 条扫描线（从 `startScan` 起）；`xSrc/ySrc` 是 DIB 内
+ * 源矩形的左下角，`drawWidth/drawHeight` 是要绘制的 w×h 区域。
  */
 export interface DibSurface {
   width: number;
@@ -151,6 +153,12 @@ export interface DibSurface {
   bitCount: number;
   palette: Uint32Array | null;
   bits: Uint8Array;
+  xSrc: number;
+  ySrc: number;
+  drawWidth: number;
+  drawHeight: number;
+  startScan: number;
+  cLines: number;
 }
 
 export interface GdiBridge {
@@ -210,14 +218,7 @@ export interface GdiBridge {
   ): Promise<WinError>;
 
   /** DIB 位图数据（SetDIBitsToDevice 的像素载荷，已从客户机内存读出）。 */
-  setDIBitsToDevice(
-    dc: number,
-    xDest: number,
-    yDest: number,
-    startScan: number,
-    cLines: number,
-    dib: DibSurface,
-  ): Promise<WinError>;
+  setDIBitsToDevice(dc: number, xDest: number, yDest: number, dib: DibSurface): Promise<WinError>;
   stretchBlt(
     destDc: number,
     destRect: Rect,
