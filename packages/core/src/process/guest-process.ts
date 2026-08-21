@@ -642,9 +642,17 @@ export class GuestProcessRunner {
       const entry = resourceTable.get(key);
       return entry ? { returnValue: entry.size, errorCode: E.NO_ERROR } : { returnValue: 0, errorCode: E.ERROR_FILE_NOT_FOUND };
     });
-    this.interceptor.hook('kernel32.dll', 'LoadResource', () => ({ returnValue: 2, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('kernel32.dll', 'LockResource', () => {
-      const entry = resourceTable.get(lastResourceKey);
+    // LoadResource must return a per-resource handle so LockResource can
+    // resolve the right entry even when several resources are loaded before
+    // any LockResource (winmine: Find×3 → Load×3 → Lock×3). The FindResourceW
+    // return value (hResInfo = resource key) doubles as that handle.
+    this.interceptor.hook('kernel32.dll', 'LoadResource', (ctx) => {
+      const hResInfo = (ctx.rawArgs[1] ?? 0) >>> 0;
+      return { returnValue: hResInfo, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('kernel32.dll', 'LockResource', (ctx) => {
+      const hResData = (ctx.rawArgs[0] ?? 0) >>> 0;
+      const entry = resourceTable.get(hResData) ?? resourceTable.get(lastResourceKey);
       return entry ? { returnValue: entry.address, errorCode: E.NO_ERROR } : { returnValue: 0, errorCode: E.NO_ERROR };
     });
 

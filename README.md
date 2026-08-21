@@ -4,7 +4,7 @@
 
 SpecterCore is a browser-based Windows compatibility layer that executes unmodified PE32 (and PE32+) binaries through an in-house **x86 → WebAssembly JIT**, intercepts their Win32 API calls via **trap-stub IAT rewriting**, and bridges them onto browser primitives (OPFS for the file system, WebUSB for devices, WebGPU for graphics, AudioWorklet for audio). It does not emulate any CPU hardware peripherals; instead it implements the Win32 API contract at the boundary, the same way Wine does on Linux.
 
-The project is currently at the **P1 milestone**: the PE loader, the x86 → WASM basic-block JIT, the `int 0x2E` trap dispatcher, and the API interceptor are wired end-to-end. `pnpm run:exe` runs a hand-assembled PE32 (`sample/hello.exe`) headless and prints its stdout; the L6 desktop shell can also launch and run a real `notepad.exe` (copied from Windows `SysWOW64`).
+The project is currently at the **P1 milestone**: the PE loader, the x86 → WASM basic-block JIT, the `int 0x2E` trap dispatcher, and the API interceptor are wired end-to-end. `pnpm run:exe` runs a hand-assembled PE32 (`sample/hello.exe`) headless and prints its stdout; the L6 desktop shell can also launch and run a real `notepad.exe` — both the **x86** build (Windows `SysWOW64`) and the **x64 PE32+** build (Windows `System32`), including the Save/Open file-dialog chain.
 
 See the [architecture notes](docs/ARCHITECTURE.md) and the live [development/handover log](docs/PROGRESS.md) for the full spec.
 
@@ -325,11 +325,11 @@ The test suite covers the PE loader round-trip, the x86 decoder against hand-cra
 | Stage | Goal | Status |
 |-------|------|--------|
 | P0 | Infrastructure + six-layer skeleton | ✅ Delivered |
-| P1 | PE loading + x86 JIT translation | ✅ Delivered: PE32/PE32+ load + map + IAT trap-stub rewrite + x86→WASM basic-block JIT + executor + trap→API interceptor end-to-end. `pnpm run:exe` runs a PE headless; the L6 desktop launches real `notepad.exe`. |
-| P2 | Real GUI/console programs run in the browser | 🔶 In progress: a real `notepad.exe` (SysWOW64 x86) reaches a clean exit and drives its WndProc / GUI window tree; `cmd.exe` is being brought up (currently at the command-parsing stage). See [docs/PROGRESS.md](docs/PROGRESS.md). |
-| P3 | Graphics bridge + L6 desktop running notepad.exe with full paint | 🔶 Partial: a generic GDI bridge layer (software rasterizer + paint-command capture) plus an L6 "guest window" panel are implemented; WndProc-side host rendering is not yet bitmap-level. |
+| P1 | PE loading + x86 JIT translation | ✅ Delivered: PE32 **and PE32+ (x64)** load + map + IAT trap-stub rewrite + x86→WASM basic-block JIT + executor + trap→API interceptor end-to-end. `pnpm run:exe` runs a PE headless; the L6 desktop launches real `notepad.exe` (x86 **and** x64 PE32+) including the Save/Open file-dialog chain. |
+| P2 | Real GUI/console programs run in the browser | ✅ **`notepad.exe` (x86 and x64 PE32+) runs in the desktop**: its WndProc / GUI window tree renders through the GDI bridge, and the Save/Open chain works via the `comdlg32` file-dialog bridge (`GetOpenFileNameW` / `GetSaveFileNameW` → host file picker → `host.fs` `createFile` / `writeFile` / `readFile`). `cmd.exe` is being brought up (currently at the command-parsing stage). See [docs/PROGRESS.md](docs/PROGRESS.md) and [`progress_64.md`](progress_64.md). |
+| P3 | Graphics bridge + L6 desktop running notepad.exe with full paint | ✅ `notepad` (x86 + x64) paints through the GDI bridge into the L6 guest-window canvas; the x64 path runs the guest `WndProc` through a nested x64 executor (`rcx/rdx/r8/r9` + shadow space + 8-byte sentinel return). Audio / WebGPU 3D / USB passthrough remain. |
 | P4–P7 | Audio / 3D (WebGPU) / USB passthrough / perf targets | ⬜ |
 
 ## License
 
-This repository is an internal learning / research project. No license is specified.
+Released under the **MIT License** — see the [`LICENSE`](LICENSE) file for the full text. Copyright (c) 2026 SnowLeopard-io.
