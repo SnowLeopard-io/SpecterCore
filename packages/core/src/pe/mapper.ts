@@ -301,8 +301,14 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'sizeofresource': 2,
   'entercriticalsection': 1,
   'initializecriticalsection': 1,
+  // InitializeCriticalSectionEx(lpCriticalSection, dwSpinCount, dwFlags) is
+  // 3-arg stdcall; a 1-arg stub ret 4 over-cleans 8 bytes and the caller's
+  // epilogue `ret` pops a garbage slot (PuTTY delay-load path 0x4c35a7).
+  'initializecriticalsectionex': 3,
+  'initializecriticalsectionandspincount': 2,
   'leavecriticalsection': 1,
   'deletecriticalsection': 1,
+  'tryentercriticalsection': 1,
   // SRW locks: 1-arg stdcall (PSRWLOCK). Missing these leaks 4 bytes/call —
   // notepad's locked getter (0x40a2ec) pushes the lock pointer, calls
   // AcquireSRWLockExclusive, then `pop edi; pop ebx; pop esi; ret` — with a
@@ -848,8 +854,10 @@ export function mapPeImage(runtime: WasmRuntimeImpl, rawImage: Uint8Array, pe: P
       }
       runtime.writeBytes(stubAddress, stub);
 
-      // IAT slot: image base + iatRva + slot*4 (thunks are 8 bytes on PE32+)
-      const slot = imp.functions.indexOf(fn);
+      // IAT slot: image base + iatRva + slot*8 (thunks are 8 bytes on PE32+).
+      // The slot must use the entry's ILT index: dropping entries (e.g. ordinal
+      // imports) earlier would shift later slots and mispatch `call [IAT]` sites.
+      const slot = fn.index ?? imp.functions.indexOf(fn);
       const iatAddress = baseAddress + imp.iatRva + slot * (pe.is64 ? 8 : 4);
       if (pe.is64) {
         runtime.writeInt32(iatAddress, stubAddress);

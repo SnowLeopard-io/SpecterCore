@@ -187,6 +187,8 @@ export type Op =
   | 'xmm-movhps-store'
   | 'xmm-pshufd'
   | 'xmm-pxor'
+  | 'xmm-psrldq'
+  | 'xmm-pslldq'
   | 'bsf'
   | 'bsr'
   | 'bt'

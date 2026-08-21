@@ -149,7 +149,7 @@ describe('PeLoaderImpl', () => {
     expect(pe.imports).toHaveLength(1);
     const imp = pe.imports[0]!;
     expect(imp.moduleName).toBe('kernel32.dll');
-    expect(imp.functions).toEqual([{ name: 'ExitProcess' }]);
+    expect(imp.functions).toEqual([{ name: 'ExitProcess', index: 0 }]);
     expect(imp.iatRva).toBe(0x1160);
   });
 
@@ -212,6 +212,7 @@ describe('mapPeImage', () => {
       exports: [],
       is64: false,
       relocations: [],
+      tls: null,
       resources: new Uint8Array(0),
       path: '',
       imageSize: 0x2000,

@@ -21,6 +21,8 @@ export interface PeSection {
 export interface PeImportFunction {
   name?: string;
   ordinal?: number;
+  /** Index of this entry in the descriptor's ILT/FirstThunk array (thunk position). */
+  index?: number;
 }
 
 export interface PeImport {
@@ -34,6 +36,22 @@ export interface PeExport {
   name: string;
   ordinal: number;
   address: number;
+}
+
+/** IMAGE_TLS_DIRECTORY (data directory index 9), resolved to RVAs. */
+export interface PeTls {
+  /** RVA of the TLS template (StartAddressOfRawData - ImageBase). */
+  templateRva: number;
+  /** Size of the TLS template in bytes (End - Start). */
+  templateSize: number;
+  /** RVA of the TLS index variable (AddressOfIndex - ImageBase), 0 if none. */
+  indexRva: number;
+  /** RVA of the TLS callback array (AddressOfCallBacks - ImageBase), 0 if none. */
+  callbacksRva: number;
+  /** Bytes to zero-fill after the template. */
+  zeroFillSize: number;
+  /** Initial template bytes (zero-filled when the section has no raw data). */
+  template: Uint8Array;
 }
 
 export interface PeImage {
@@ -51,6 +69,8 @@ export interface PeImage {
   is64: boolean;
   /** Base-relocation entries (RVA + type), used to rebase the image. */
   relocations: readonly { rva: number; type: number }[];
+  /** PE TLS directory (template + index variable), null when absent. */
+  tls: PeTls | null;
   /** PE 头原始字节 */
   header: Uint8Array;
 }

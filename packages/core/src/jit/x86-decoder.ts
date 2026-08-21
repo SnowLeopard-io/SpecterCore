@@ -1048,6 +1048,31 @@ class DecoderState {
         const imm = this.readU8();
         return { inst: { op: 'xmm-pshufd', dst, src, target: this.immOperand(imm, 8) }, terminator: false };
       }
+      case 0x71:
+      case 0x72:
+      case 0x73: {
+        // 66 0F 7x /r, imm8 — PSRL/PSLL with the /digit selecting the element
+        // size. We support the 128-bit whole-register shifts notepad uses:
+        //   /2 PSRLQ (shift right by imm qwords), /3 PSRLLDQ (by imm bytes),
+        //   /6 PSLLDQ (left by imm bytes). Without 66: MMX — unsupported.
+        if (!o66 || f3 || f2) throw new UnsupportedError(this.abs(), `unsupported mmx opcode 0f ${opcode.toString(16)}`);
+        const raw = this.decodeXmmRm();
+        const dst = this.xmmOperand(raw.reg);
+        const src = this.xmmRmOperand(raw);
+        const imm = this.readU8();
+        const digit = raw.reg & 7;
+        if (digit === 2 && opcode === 0x73) {
+          // PSRLQ — shift right by imm qwords == imm*8 bytes
+          return { inst: { op: 'xmm-psrldq', dst, src, target: this.immOperand(imm * 8, 8) }, terminator: false };
+        }
+        if (digit === 3 && opcode === 0x73) {
+          return { inst: { op: 'xmm-psrldq', dst, src, target: this.immOperand(imm, 8) }, terminator: false };
+        }
+        if (digit === 6 && opcode === 0x73) {
+          return { inst: { op: 'xmm-pslldq', dst, src, target: this.immOperand(imm, 8) }, terminator: false };
+        }
+        throw new UnsupportedError(this.abs(), `unsupported 0f ${opcode.toString(16)} /${digit} shift`);
+      }
       case 0xef: {
         // PXOR xmm, xmm/m128 (66). Without 66: MMX PXOR — unsupported.
         if (!o66 || f3 || f2) throw new UnsupportedError(this.abs(), `unsupported mmx opcode 0f ef`);

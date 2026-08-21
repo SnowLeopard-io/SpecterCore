@@ -14,6 +14,13 @@ function fail(errorCode: number): ApiResult {
   return { returnValue: 0, errorCode };
 }
 
+/** Unlocked CRITICAL_SECTION image (LockCount=-1, rest zeroed). */
+function csInit(): Uint8Array {
+  const b = new Uint8Array(24);
+  new DataView(b.buffer).setInt32(4, -1, true);
+  return b;
+}
+
 /**
  * Stable 32-bit volume serial derived from the root path name. Real Windows
  * derives it from volume creation time/format info; here we hash the path so
@@ -496,6 +503,29 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     GetCurrentThreadId: () => ok(1),
     GetCurrentProcess: () => ok(0xffffffff), // pseudo-handle (-1)
     GetCurrentThread: () => ok(0xffffffff), // pseudo-handle (-1)
+    // CRITICAL_SECTION (x86, 24 bytes): +0 DebugInfo +4 LockCount +8
+    // RecursionCount +0xC OwningThread +0x10 LockSemaphore +0x14 SpinCount.
+    // Single-threaded guest: init writes LockCount=-1 (unlocked), enter/leave
+    // are no-ops, try-enter always succeeds.
+    InitializeCriticalSection: (ctx, host) => {
+      const cs = raw(ctx, 0) >>> 0;
+      if (cs) host.memory.write(cs, csInit());
+      return ok(0);
+    },
+    InitializeCriticalSectionEx: (ctx, host) => {
+      const cs = raw(ctx, 0) >>> 0;
+      if (cs) host.memory.write(cs, csInit());
+      return ok(0);
+    },
+    InitializeCriticalSectionAndSpinCount: (ctx, host) => {
+      const cs = raw(ctx, 0) >>> 0;
+      if (cs) host.memory.write(cs, csInit());
+      return ok(0);
+    },
+    EnterCriticalSection: () => ok(0),
+    LeaveCriticalSection: () => ok(0),
+    DeleteCriticalSection: () => ok(0),
+    TryEnterCriticalSection: () => ok(1),
     GetSystemTime: (ctx, host) => {
       // SYSTEMTIME is 8 x WORD; zero it (no RTC yet).
       const out = raw(ctx, 0);

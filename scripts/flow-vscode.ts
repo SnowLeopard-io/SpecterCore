@@ -21,7 +21,7 @@ import {
 } from '@specter-core/core';
 
 const STACK_TOP = 0x08000000;
-const FLOW_CAP = 1200; // 保留最后 1200 个基本块
+const FLOW_CAP = 8000; // 保留最后 8000 个基本块
 
 // ---------- 环形轨迹缓冲 ----------
 const eips = new Int32Array(FLOW_CAP);
@@ -94,6 +94,35 @@ class FlowInterceptor extends ApiInterceptorImpl implements ApiInterceptor {
       /* ignore */
     }
     const result = await super.dispatch(ctx);
+    if (/^Tls/i.test(ctx.proc)) {
+      const args = (ctx.rawArgs ?? []).map((a) => `0x${(a >>> 0).toString(16)}`).join(',');
+      console.error(
+        `[tls] API #${n} ${ctx.module}.${ctx.proc}(${args}) ra=0x${ra.toString(16)} ` +
+          `-> 0x${(result.returnValue >>> 0).toString(16)} err=${result.errorCode}`,
+      );
+    }
+    if (/^LoadLibrary/i.test(ctx.proc)) {
+      const args = (ctx.rawArgs ?? []).map((a) => `0x${(a >>> 0).toString(16)}`).join(',');
+      let name = '';
+      try {
+        const p = (ctx.rawArgs?.[0] ?? 0) >>> 0;
+        if (p) {
+          const bytes: number[] = [];
+          for (let i = 0; i < 512; i += 2) {
+            const w = this.rt.readInt16(p + i);
+            if (!w) break;
+            bytes.push(w);
+          }
+          name = String.fromCharCode(...bytes);
+        }
+      } catch {
+        /* ignore */
+      }
+      console.error(
+        `[loadlib] API #${n} ${ctx.module}.${ctx.proc}(${args}) name="${name}" ra=0x${ra.toString(16)} ` +
+          `-> 0x${(result.returnValue >>> 0).toString(16)} err=${result.errorCode}`,
+      );
+    }
     tagCurrent(
       `API #${n} ${ctx.module}.${ctx.proc} ra=0x${ra.toString(16)} ` +
         `-> 0x${(result.returnValue >>> 0).toString(16)} err=${result.errorCode}`,
@@ -251,6 +280,83 @@ function dumpAt(label: string, rt: WasmRuntimeImpl, extraOffsets: number[]): voi
   } catch {
     /* ignore */
   }
+  // TLS slot 0 chain dump: eax = TLS slot 0 value. 0x40cc60 returns the slot
+  // VALUE, which is a pointer to the head variable (&head); [&head] is the head
+  // frame. Follow head -> [head] -> ... and dump [0]/[4]/[8]/[0xc] per node.
+  try {
+    const slot = rt.getReg('eax') >>> 0;
+    if (slot) {
+      const head = rt.readInt32(slot) >>> 0;
+      const chain: string[] = [];
+      let cur = head;
+      for (let i = 0; i < 10; i++) {
+        const next = rt.readInt32(cur) >>> 0;
+        const f4 = rt.readInt32(cur + 4) >>> 0;
+        const f8 = rt.readInt32(cur + 8) >>> 0;
+        const fc = rt.readInt32(cur + 0xc) >>> 0;
+        chain.push(`0x${cur.toString(16)}[0]=0x${next.toString(16)}[4]=0x${f4.toString(16)}[8]=0x${f8.toString(16)}${sectionOf(f8)}[c]=0x${fc.toString(16)}${sectionOf(fc)}`);
+        if (!next || next === cur || next === 0xffffffff) break;
+        cur = next;
+      }
+      console.error(`[probe]   TLSslot=0x${slot.toString(16)} head=0x${head.toString(16)} chain: ${chain.join(' -> ')}`);
+    } else {
+      // slot == 0: dump the TEB head + tlsArray to see where the frame head lives.
+      const teb0 = rt.readInt32(0) >>> 0;
+      const tlsptr = rt.readInt32(0x2c) >>> 0;
+      const slot0 = tlsptr ? rt.readInt32(tlsptr) >>> 0 : 0;
+      console.error(`[probe]   TLSslot=0x0 [0]=0x${teb0.toString(16)} [0x2c]=0x${tlsptr.toString(16)} [tlsArray+0]=0x${slot0.toString(16)}`);
+      // Follow the chain from [0] (the head) to see the frame list.
+      if (teb0) {
+        const chain: string[] = [];
+        let cur = teb0;
+        for (let i = 0; i < 10; i++) {
+          const next = rt.readInt32(cur) >>> 0;
+          const f4 = rt.readInt32(cur + 4) >>> 0;
+          const f8 = rt.readInt32(cur + 8) >>> 0;
+          const fc = rt.readInt32(cur + 0xc) >>> 0;
+          chain.push(`0x${cur.toString(16)}[0]=0x${next.toString(16)}[4]=0x${f4.toString(16)}[8]=0x${f8.toString(16)}${sectionOf(f8)}[c]=0x${fc.toString(16)}${sectionOf(fc)}`);
+          if (!next || next === cur || next === 0xffffffff) break;
+          cur = next;
+        }
+        console.error(`[probe]   [0]-chain: ${chain.join(' -> ')}`);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  // TLS init state: [4b7c14] index, [4be630] flag, TLS array + slot value.
+  try {
+    const idx = rt.readInt32(0x4b7c14) >>> 0;
+    const flag = rt.readInt32(0x4be630) >>> 0;
+    const tlsptr = rt.readInt32(0x2c) >>> 0;
+    const slotv = tlsptr && idx < 128 ? rt.readInt32(tlsptr + idx * 4) >>> 0 : 0;
+    console.error(`[probe]   TLSidx=0x${idx.toString(16)} flag=0x${flag.toString(16)} tlsArray=0x${tlsptr.toString(16)} slot=0x${slotv.toString(16)}`);
+  } catch {
+    /* ignore */
+  }
+}
+
+// 帧链 dump：从 TLS array[0] 的 head 变量出发，打印整个 finally-frame 链。
+function dumpFrameChain(rt: WasmRuntimeImpl, label: string): void {
+  try {
+    const tlsptr = rt.readInt32(0x2c) >>> 0;
+    const headVar = tlsptr ? rt.readInt32(tlsptr) >>> 0 : 0;
+    const head = headVar ? rt.readInt32(headVar) >>> 0 : 0;
+    const chain: string[] = [];
+    let cur = head;
+    for (let i = 0; i < 12; i++) {
+      const next = rt.readInt32(cur) >>> 0;
+      const f4 = rt.readInt32(cur + 4) >>> 0;
+      const f8 = rt.readInt32(cur + 8) >>> 0;
+      const fc = rt.readInt32(cur + 0xc) >>> 0;
+      chain.push(`0x${cur.toString(16)}[0]=0x${next.toString(16)}[4]=0x${f4.toString(16)}[8]=0x${f8.toString(16)}${sectionOf(f8)}[c]=0x${fc.toString(16)}${sectionOf(fc)}`);
+      if (!next || next === cur || next === 0xffffffff) break;
+      cur = next;
+    }
+    console.error(`[probe]   ${label}: tlsArray=0x${tlsptr.toString(16)} headVar=0x${headVar.toString(16)} head=0x${head.toString(16)} chain: ${chain.join(' -> ')}`);
+  } catch {
+    /* ignore */
+  }
 }
 
 async function main(): Promise<void> {
@@ -301,10 +407,68 @@ async function main(): Promise<void> {
         return null;
       }
     },
-    probes: probeSpecs.map((p) => ({
-      eip: p.eip,
-      fn: (rt: WasmRuntimeImpl) => dumpAt(`hit 0x${p.eip.toString(16)} (block #${total})`, rt, p.offsets),
-    })),
+    probes: [
+      ...probeSpecs.map((p) => ({
+        eip: p.eip,
+        fn: (rt: WasmRuntimeImpl) => dumpAt(`hit 0x${p.eip.toString(16)} (block #${total})`, rt, p.offsets),
+      })),
+      {
+        eip: 0x406e60,
+        fn: (rt: WasmRuntimeImpl) => {
+          const esp = rt.getReg('esp') >>> 0;
+          console.error(`\n[probe] unwind-target @0x406e60 (block #${total}) esp=0x${esp.toString(16)}`);
+          // dump the accepting record: [esp+0x28]
+          try {
+            const rec = rt.readInt32(esp + 0x28) >>> 0;
+            const vals: string[] = [];
+            for (let i = 0; i < 6; i++) {
+              vals.push(`[+0x${(i * 4).toString(16)}]=0x${(rt.readInt32(rec + i * 4) >>> 0).toString(16)}`);
+            }
+            console.error(`[probe]   accepting record=0x${rec.toString(16)} ${vals.join(' ')}`);
+          } catch { /* ignore */ }
+          dumpFrameChain(rt, 'before-push');
+        },
+      },
+      {
+        eip: 0x406e8a,
+        fn: (rt: WasmRuntimeImpl) => {
+          const esp = rt.getReg('esp') >>> 0;
+          console.error(`\n[probe] unwind-done @0x406e8a (block #${total}) esp=0x${esp.toString(16)}`);
+          dumpFrameChain(rt, 'after-push');
+        },
+      },
+      {
+        eip: 0x40718c,
+        fn: (rt: WasmRuntimeImpl) => {
+          const esp = rt.getReg('esp') >>> 0;
+          console.error(`\n[probe] frame-pop @0x40718c (block #${total}) esp=0x${esp.toString(16)}`);
+          dumpFrameChain(rt, 'before-pop');
+        },
+      },
+      {
+        eip: 0x4ae51e,
+        fn: (rt: WasmRuntimeImpl) => {
+          const cookie = rt.readInt32(0x50602c) >>> 0;
+          const enc = rt.readInt32(0x508734) >>> 0;
+          const esi = rt.getReg('esi') >>> 0;
+          console.error(
+            `\n[probe] putty-decode @0x4ae51e (block #${total}) cookie=0x${cookie.toString(16)} ` +
+              `enc[508734]=0x${enc.toString(16)} esi=0x${esi.toString(16)}`,
+          );
+        },
+      },
+      {
+        eip: 0x4ae547,
+        fn: (rt: WasmRuntimeImpl) => {
+          const esi = rt.getReg('esi') >>> 0;
+          const ecx = rt.getReg('ecx') >>> 0;
+          const eax = rt.getReg('eax') >>> 0;
+          console.error(
+            `[probe] putty-call-esi @0x4ae547 (block #${total}) esi=0x${esi.toString(16)} ecx=0x${ecx.toString(16)} eax=0x${eax.toString(16)}`,
+          );
+        },
+      },
+    ],
     onStep: (eip, rt) => {
       let esp = 0;
       try {

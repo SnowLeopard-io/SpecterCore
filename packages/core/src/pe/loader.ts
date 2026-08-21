@@ -7,7 +7,7 @@
  * WASM linear memory and rewrite the IAT (design 4.2.2).
  */
 
-import type { PeExport, PeImage, PeImport, PeImportFunction, PeLoader, PeSection } from '@specter-core/contracts';
+import type { PeExport, PeImage, PeImport, PeImportFunction, PeLoader, PeSection, PeTls } from '@specter-core/contracts';
 import { PE_MAGIC } from '@specter-core/contracts';
 import { extractPeIcon } from '@specter-core/shared';
 
@@ -38,6 +38,7 @@ const DIR_EXPORT = 0;
 const DIR_IMPORT = 1;
 const DIR_RESOURCE = 2;
 const DIR_BASERELOC = 5;
+const DIR_TLS = 9;
 
 const PE32_MAGIC = 0x10b;
 const PE32_PLUS_MAGIC = 0x20b;
@@ -90,6 +91,10 @@ export class PeLoaderImpl implements PeLoader {
 
     const rvaToOffset = (rva: number): number | null => {
       for (const sec of sections) {
+        // Sections without raw data (.bss, .tls) must not map to a file offset —
+        // their bytes are zero-filled in memory, so a caller reading them gets
+        // the raw file bytes (e.g. the MZ header) instead of zeros.
+        if (sec.rawSize === 0) continue;
         const span = Math.max(sec.virtualSize, sec.rawSize);
         if (rva >= sec.virtualAddress && rva < sec.virtualAddress + span) {
           const off = rva - sec.virtualAddress + this.rawPointer(image, sec);
@@ -115,6 +120,9 @@ export class PeLoaderImpl implements PeLoader {
     // base relocations (needed to rebase a PE32+ image below the 4GB WASM memory)
     const relocations = this.parseRelocations(image, dirEntry(DIR_BASERELOC), rvaToOffset);
 
+    // TLS directory (template + index variable) — used to seed per-thread TLS.
+    const tls = this.parseTls(image, dirEntry(DIR_TLS), rvaToOffset, imageBase);
+
     // resources: raw resource-section bytes for later icon extraction
     const resDir = dirEntry(DIR_RESOURCE);
     let resources = new Uint8Array(0);
@@ -135,6 +143,7 @@ export class PeLoaderImpl implements PeLoader {
       exports,
       is64,
       relocations,
+      tls,
       resources,
       header: image.slice(0, sectionTable),
     };
@@ -209,14 +218,16 @@ export class PeLoaderImpl implements PeLoader {
       for (let t = 0; ; t++) {
         const entry = is64 ? readU64(image, thunkOff + t * thunkSize) : readU32(image, thunkOff + t * thunkSize);
         if (entry === 0) break;
-        const ordinalBit = is64 ? 0x8000000000000000 : 0x80000000;
-        if (entry & ordinalBit) {
-          functions.push({ ordinal: entry & 0xffff });
+        // JS bitwise ops truncate to int32, so `entry & 0x8000000000000000` is
+        // always 0 for 64-bit ordinals with all-zero low bits; test the value.
+        const isOrdinal = is64 ? entry >= 0x8000000000000000 : (entry & 0x80000000) !== 0;
+        if (isOrdinal) {
+          functions.push({ ordinal: entry & 0xffff, index: t });
         } else {
           const byNameOff = rvaToOffset(entry);
           if (byNameOff === null) continue;
           const name = readCStr(image, byNameOff + 2);
-          functions.push({ name });
+          functions.push({ name, index: t });
         }
       }
       if (functions.length > 0) out.push({ moduleName, functions, iatRva: firstThunkRva });
@@ -245,6 +256,34 @@ export class PeLoaderImpl implements PeLoader {
       off += blockSize;
     }
     return out;
+  }
+
+  private parseTls(image: Uint8Array, dir: { rva: number; size: number } | null, rvaToOffset: (rva: number) => number | null, imageBase: number): PeTls | null {
+    if (!dir || dir.rva === 0) return null;
+    const off = rvaToOffset(dir.rva);
+    if (off === null) return null;
+    const startRaw = readU32(image, off);
+    const endRaw = readU32(image, off + 4);
+    const index = readU32(image, off + 8);
+    const callbacks = readU32(image, off + 12);
+    const zeroFill = readU32(image, off + 16);
+    const templateRva = startRaw - imageBase;
+    const templateSize = endRaw - startRaw;
+    if (templateSize < 0 || templateSize > 0x100000) return null;
+    const template = new Uint8Array(templateSize);
+    const tOff = rvaToOffset(templateRva);
+    if (tOff !== null) {
+      const n = Math.min(templateSize, image.byteLength - tOff);
+      if (n > 0) template.set(image.subarray(tOff, tOff + n));
+    }
+    return {
+      templateRva,
+      templateSize,
+      indexRva: index ? index - imageBase : 0,
+      callbacksRva: callbacks ? callbacks - imageBase : 0,
+      zeroFillSize: zeroFill,
+      template,
+    };
   }
 
   private parseExports(image: Uint8Array, dir: { rva: number; size: number } | null, rvaToOffset: (rva: number) => number | null): PeExport[] {

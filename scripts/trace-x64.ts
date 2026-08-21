@@ -134,7 +134,8 @@ const result = await runner.run(image, {
   const counts = new Map<string, number>();
   for (const c of called) counts.set(c, (counts.get(c) ?? 0) + 1);
   const unique = [...counts.entries()].map(([n, c]) => `${n}x${c}`).join(' ');
-  console.log(`[trace] status=${result.status} eip=0x${result.eip.toString(16)} traps=${called.length}`);
+  console.log(`[trace] status=${result.status} eip=0x${result.eip.toString(16)} traps=${called.length} exitCode=${result.exitCode}`);
+  if (result.error) console.error(`[trace] error: ${(result.error as Error).message}`);
   console.log(`[trace] calls: ${unique}`);
   console.log(`[trace] last 20: ${called.slice(-20).join(' ')}`);
   console.log(`[trace] tail eips: ${tail.map((e) => '0x' + e.toString(16)).join(' ')}`);

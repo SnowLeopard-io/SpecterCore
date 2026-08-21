@@ -471,6 +471,12 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
     case 'xmm-pxor':
       emitXmmPxor(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand);
       return;
+    case 'xmm-psrldq':
+      emitXmmShiftBytes(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, (inst.target as { value: number }).value, false);
+      return;
+    case 'xmm-pslldq':
+      emitXmmShiftBytes(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, (inst.target as { value: number }).value, true);
+      return;
     case 'finit':
     case 'fldcw':
       // FPU emulated as idle: FNINIT and FLDCW are no-ops.
@@ -946,8 +952,33 @@ function emitArith64(fn: WasmFunction, op: Instruction['op'], dst: Operand, src:
       fn.i64Xor();
       fn.localTee(L_I64);
       break;
+    case 'sbb':
+      // s = a - b - CF
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Sub();
+      fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+      fn.i32Load();
+      fn.i32Const(1);
+      fn.i32And();
+      fn.i64ExtendI32U();
+      fn.i64Sub();
+      fn.localTee(L_I64);
+      break;
+    case 'adc':
+      // s = a + b + CF
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Add();
+      fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+      fn.i32Load();
+      fn.i32Const(1);
+      fn.i32And();
+      fn.i64ExtendI32U();
+      fn.i64Add();
+      fn.localTee(L_I64);
+      break;
     default:
-      // 64-bit adc/sbb not implemented yet
       fn.unreachable();
   }
   if (op !== 'cmp') {
@@ -958,18 +989,49 @@ function emitArith64(fn: WasmFunction, op: Instruction['op'], dst: Operand, src:
   beginFlags(fn);
   emitZspFlags64(fn);
   emitOfBinary64(fn, op);
-  if (op === 'add') {
-    // CF: s <u a
-    fn.localGet(L_I64);
-    fn.localGet(L_I64A);
-    fn.i64LtU();
+  if (op === 'add' || op === 'adc') {
+    // CF: s1 = a + b; (s1 <u a) | (s <u s1)
+    if (op === 'add') {
+      fn.localGet(L_I64);
+      fn.localGet(L_I64A);
+      fn.i64LtU();
+    } else {
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Add();
+      fn.localGet(L_I64A);
+      fn.i64LtU();
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Add();
+      fn.localGet(L_I64);
+      fn.i64LtU();
+      fn.i32Or();
+    }
     orFlag(fn, 0);
     emitAfAdd64(fn);
-  } else if (op === 'sub' || op === 'cmp') {
-    // CF: a <u b
-    fn.localGet(L_I64A);
-    fn.localGet(L_I64B);
-    fn.i64LtU();
+  } else if (op === 'sub' || op === 'sbb' || op === 'cmp') {
+    if (op === 'sub' || op === 'cmp') {
+      // CF: a <u b
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64LtU();
+    } else {
+      // s1 = a - b; CF: (a <u b) | (s1 <u CF)
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64LtU();
+      fn.localGet(L_I64A);
+      fn.localGet(L_I64B);
+      fn.i64Sub();
+      fn.i32Const(EFLAGS_OFFSET + CTX_BASE);
+      fn.i32Load();
+      fn.i32Const(1);
+      fn.i32And();
+      fn.i64ExtendI32U();
+      fn.i64LtU();
+      fn.i32Or();
+    }
     orFlag(fn, 0);
     emitAfSub64(fn);
   }
@@ -1678,6 +1740,54 @@ function emitXmmPxor(fn: WasmFunction, dst: XmmOperand, src: MemOperand | XmmOpe
     fn.i32Const(xmmAddr(dst.reg) + i * 4);
     fn.localGet(L_TMP);
     fn.i32Store();
+  }
+}
+
+/**
+ * PSRLLDQ / PSLLDQ (66 0F 73 /3, /6 — also PSRLQ as /2 with the count scaled
+ * to bytes): byte-shift the whole 128-bit XMM register right/left by `imm`.
+ * Iterates in the direction that keeps an in-place (dst === src) shift safe.
+ */
+function emitXmmShiftBytes(fn: WasmFunction, dst: XmmOperand, src: MemOperand | XmmOperand, imm: number, left: boolean): void {
+  const count = imm & 15;
+  if (count === 0) {
+    emitXmmMove(fn, dst, src, true, 4);
+    return;
+  }
+  if (src.kind === 'xmm') {
+    fn.i32Const(xmmAddr(src.reg));
+  } else {
+    emitEa(fn, src);
+  }
+  fn.localSet(L_TMP2);
+  if (left) {
+    for (let k = 15; k >= 0; k--) {
+      const s = k - count;
+      fn.i32Const(xmmAddr(dst.reg) + k);
+      if (s >= 0) {
+        fn.localGet(L_TMP2);
+        fn.i32Const(s);
+        fn.i32Add();
+        fn.i32Load8U();
+      } else {
+        fn.i32Const(0);
+      }
+      fn.i32Store8();
+    }
+  } else {
+    for (let k = 0; k < 16; k++) {
+      const s = k + count;
+      fn.i32Const(xmmAddr(dst.reg) + k);
+      if (s < 16) {
+        fn.localGet(L_TMP2);
+        fn.i32Const(s);
+        fn.i32Add();
+        fn.i32Load8U();
+      } else {
+        fn.i32Const(0);
+      }
+      fn.i32Store8();
+    }
   }
 }
 

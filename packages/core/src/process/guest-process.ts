@@ -1156,6 +1156,8 @@ export class GuestProcessRunner {
     const pseudoLoad = (): ApiResult => ({ returnValue: base, errorCode: E.NO_ERROR });
     this.interceptor.hook('kernel32.dll', 'LoadLibraryW', pseudoLoad);
     this.interceptor.hook('kernel32.dll', 'LoadLibraryA', pseudoLoad);
+    this.interceptor.hook('kernel32.dll', 'LoadLibraryExW', pseudoLoad);
+    this.interceptor.hook('kernel32.dll', 'LoadLibraryExA', pseudoLoad);
 
     // CRT exit paths terminate the process like ExitProcess. Without this,
     // notepad's WinMain failure path calls _o_exit (ucrtbase), our handler
@@ -1670,6 +1672,20 @@ export class GuestProcessRunner {
     const tlsSlotCount = 128;
     const tlsArray = bumpAlloc(tlsSlotCount * 4);
     this.runtime.writeInt32(0x2c, tlsArray);
+    // Seed slot 0 from the PE TLS directory: allocate a per-thread TLS block,
+    // copy the template, and point TLS array[0] at it. Inno's embedded RTL
+    // reads TLS inline via fs:[0x2c] (see 0x40cc60) and stores its exception-
+    // frame list head in slot 0. Without the template the slot stays 0, so the
+    // frame push/pop code reads/writes [0] (the SEH chain head at TEB+0)
+    // instead of the frame head variable — corrupting the SEH chain and then
+    // treating an SEH record as a finally-frame (magic check fails -> fault).
+    const tls = pe.tls;
+    if (tls && tls.templateRva) {
+      const tlsBlock = bumpAlloc(tls.templateSize + tls.zeroFillSize);
+      if (tls.templateSize > 0) this.runtime.writeBytes(tlsBlock, tls.template);
+      this.runtime.writeInt32(tlsArray, tlsBlock);
+      if (tls.indexRva) this.runtime.writeInt32(tls.indexRva + pe.baseAddress, 0);
+    }
     this.interceptor.hook('kernel32.dll', 'TlsGetValue', (ctx) => {
       const slot = (ctx.rawArgs[0] ?? 0) >>> 0;
       return {

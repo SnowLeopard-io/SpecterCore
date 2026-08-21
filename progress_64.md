@@ -199,3 +199,57 @@ fothk   VA=0x28000 vsize=0x1000  raw=0x28000   ← 仅 0x28010 有代码，其�
 ### 本轮调试工具变更
 - `scripts/imp-x64.ts`（callers of 0x274e0/0x28010 扫描 + delay 名字表）、`scripts/verify-x64.ts`（节表/调用点/thunk 扫描）、`scripts/fothk.ts`、`scripts/slots-x64.ts`（槽区精确字节）、`scripts/writes-x64.ts`（RIP-relative 写槽扫描）、`scripts/secs-x64.ts`（三 exe 节表对比）——一次性探针脚本，可留作复现。
 - 确认 `scripts/build-x64-exe.ts` 只生成 sample/hello-x64.exe，与 notepad/cmd 无关。
+
+---
+
+## 2026-08-21 会话更新 3：notepad-x64 / cmd-x64 双双跑通到干净退出
+
+> 里程碑：**notepad-x64.exe 与 cmd-x64.exe 现在都能在 JIT 里启动、初始化、创建窗口/控制台并干净退出（exitCode=0，无 fault、无 unsupported）**。fothk 槽 0x2a450 之谜随 PMP 修复自行消解——不是"未填充"的问题，而是**激活工厂走通后 guest 自填**。
+
+### 修复 1：PMP vtable 指针写（guest-process.ts）
+- 根因：x64 下 PMP vtable 是 8 字节步长，guest 读 `vtable[12]`（偏移 0x60）/ `vtable[14]`（0x70）。`RoGetActivationFactory` 的 `out` 写与 `pmp_qi` 写之前用 32 位写，只写了低 4 字节 → 高 4 字节垃圾 → `pmp_isprotected/checkaccess/release` 跳到假地址（headless 卡死就是这里）。
+- 修复：两处写指针处判断 `pe.is64` 时先写低 4 字节再写高 4 字节=0。
+- 验证：EDP helper 继续推进，`pmp_*` 三个陷阱正常触发，**CreateWindowExW 真正执行**（此前为卡死点）。
+
+### 修复 2：emitArith64 缺失 64 位 sbb/adc（codegen.ts ~940-1020）
+- 根因：`0x101f361` 块内 `sbb r9,r9` 命中 `default: fn.unreachable()` → wasm 验证错误。
+- 修复：新增 `case 'sbb'`（s = a−b−CF）与 `case 'adc'`（s = a+b+CF），CF 出：sbb 用 `(a<b)|((a−b)<CF)`，adc 用 `(s1<a)|(s<s1)`（s1=a+b），并补 `emitAfSub64`/`emitAfAdd64`。
+- 坑：首次编辑留下悬空 `} else` 语法错误，esbuild 打包的是**旧 bundle** 造成"改了没生效"假象——改完必须先确认 build 成功再跑。
+
+### 修复 3：64 位 ordinal 导入 + IAT 槽对齐（loader/mapper/contracts）
+- 根因：`entry & 0x8000000000000000` 经 JS 位运算截断成 int32 → 恒 0 → **64 位 ordinal 导入被静默丢弃**。COMCTL32 描述符（desc[47]，OFT=0x30dc0，FT=0x298d8）ILT 有 11 项 = 7 命名 + 4 ordinal，但 loader 只解析出 7 个 → 只 patch 7 个 IAT 槽 → 第 8 个槽（0x29928，CreateStatusWindowW 所在）未填 stub → `call [0x1029928]` 跳进 hint/name 表数据（0x33600）fault。
+- 修复：
+  - `packages/contracts/src/core/pe.ts`：`PeImportFunction.index?: number`（ILT 序号）。
+  - `packages/core/src/pe/loader.ts` parseImports：ordinal 判定改 `entry >= 0x8000000000000000`（64 位）/`entry & 0x80000000`（32 位），并记录 `index: t`。
+  - `packages/core/src/pe/mapper.ts`：IAT 槽 = `fn.index ?? imp.functions.indexOf(fn)`。
+- 验证（scripts/loadercheck.ts）：COMCTL32 全部 11 个槽被 patch（0x29928 → 0x2009c0）。
+
+### 修复 4：PSRLLDQ/PSLLDQ/PSRLQ（ir.ts + x86-decoder.ts + codegen.ts）
+- 根因：`0x101eda2` 块 `66 0f 73 d8 04`（PSRLLDQ xmm0,4）在 decodeTwoByte 无 0x73 case → UnsupportedError → faultBlock（STATUS_FAULT，无 error 消息）。
+- 修复：
+  - `ir.ts`：新增 op `xmm-psrldq` / `xmm-pslldq`。
+  - `x86-decoder.ts`：case 0x73（66 前缀下 `/2`=PSRLQ 按 imm*8 字节、`/3`=PSRLLDQ 按 imm 字节、`/6`=PSLLDQ 按 imm 字节），用 `raw.reg & 7` 判 /digit；非 66 前缀（MMX）仍 unsupported。
+  - `codegen.ts`：`emitXmmShiftBytes` 逐字节搬移（i32Load8U/i32Store8），count=0 退化为 emitXmmMove。**原地移位（dst===src）安全**：右移顺序 0→15、左移 15→0。count 与 15 掩码。
+- 验证：修复后 notepad 一路推进到 traps=268 → `status=exit eip=0x0 exitCode=0`。
+
+### 当前状态（实测）
+- **notepad-x64**：`trace-x64.mjs` → `status=exit eip=0x0 traps=268 exitCode=0`。完整跑完 CRT 启动、LoadStringW×120、注册表读取、CreateWindowExW×2、WinRT 激活（pmp_*）、CoCreateInstance、COMCTL32 CreateStatusWindowW、SRW 锁、CreateThreadpoolTimer，最后干净退出。
+- **cmd-x64**：`status=exit eip=0x0 traps=82 exitCode=0`。跑完 CRT、注册表（RegQueryValueExW×21）、控制台（GetConsoleOutputCP/GetConsoleMode/SetConsoleCtrlHandler）、环境块等。
+- `run-exe`（真实依赖加载，315 stubs + MUI 合并）：notepad 报 `entry returned WITHOUT ExitProcess (startup aborted, eip=0x0)` —— WinMain 因消息循环无消息（GetMessageW stub 返回）而正常返回，非崩溃。headless 下为预期行为。
+- typecheck：无新增错误（仍仅 9 个预存：codegen XmmOperand.size ×6、x86-decoder:815、BrowserApp:139、codegen:2590）。
+- vitest：259 通过 / 1 失败 = **预存的** `process-manager.test.ts > creates threads and tracks counts`（threadCount 期望 1 实得 2，与本次改动无关，未触碰该文件）。loader.test.ts 的 `functions` 断言已同步加 `index: 0`（新增字段的必然结果）。
+
+### 交互模式实测（scripts/interact-x64.ts，新）
+- notepad-x64（interactive:true）：**windows=2**（主窗口+状态栏都建好了），消息循环把队列里已排的消息全部排空后干净退出（`status=exit exitCode=0`），未触发 `onMessageWait` 阻塞——即消息循环确实跑起来了，只是队列排空后 guest 走了自己的退出路径（非崩溃）。
+- cmd-x64（interactive:true）：windows=0（控制台程序），干净退出。其主循环在 ReadConsoleW 不在 GetMessageW，headless 下无控制台输入故直接退出。
+- 结论：**桌面集成路径（interactive + getWindows + postMessage）可端到端工作**；若要让 notepad 窗口"常驻"，需要让消息循环在队列空时阻塞（当前 interact 探测显示队列排空后 guest 直接退出，可能与 WinMain 检测到无交互输入有关，待 UI 实测确认）。
+
+### 下一步
+1. **桌面集成**：dev server 跑 `windows-notepad-x64`，确认窗口真的渲染（此前卡死点是 PMP vtable，现已修复，应能到消息循环）。
+2. 若窗口一闪而过：查 notepad 排空队列后为何退出（GetMessageW 返回 0 的触发者 / WinMain 退出分支），决定是否需在 interactive 空队列时让 GetMessageW 阻塞等待 postMessage。
+3. 清理：一次性探针脚本（fault*.ts、imports*.ts、loadercheck.ts、scan.ts、comctl.ts、datadir.ts、slotregion.ts、targets.ts、delay.ts）可留作复现；executor.ts 的 SPECTER_TRACE_EXEC 诊断日志可删。
+4. 收尾：跑 cmd-x64 桌面/控制台集成 → typecheck + vitest + 更新本文档。
+
+### 遗留观察（未解决，低优先）
+- 槽 rva 0x29890 无任何导入描述符覆盖，但早期 trace 显示 `[0x1029890]` 跳到 stub 0x200350——runner 路径里应另有 patch（独立 mapPeImage 的 loadercheck 不显示）。当前不致命。
+- `ResolveDelayLoadedAPI` handler（guest-process.ts ~1138）`idx = (thunk - (parentBase + iatRva)) / 4` 在 x64 应为 `/ 8`；因 procName 仅作元数据未触发错误，暂未修。

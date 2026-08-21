@@ -4,8 +4,8 @@
 import { readFile } from 'node:fs/promises';
 
 async function main(): Promise<void> {
-  const exe = 'C:/Windows/SysWOW64/notepad.exe';
-  const target = parseInt(process.argv[2] ?? '42a208', 16);
+  const exe = process.argv[2] ?? 'C:/Windows/SysWOW64/notepad.exe';
+  const target = parseInt(process.argv[3] ?? '42a208', 16);
   const buf = await readFile(exe);
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const peOff = dv.getUint32(0x3c, true);
