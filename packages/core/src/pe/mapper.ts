@@ -441,7 +441,7 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'globalunlock': 1,
   'regsetvalueexw': 4,
   'regcreatekeyw': 3,
-  'regcreatekeyexw': 7,
+  'regcreatekeyexw': 9,
   'regdeletekeyexw': 6,
   'regenumvaluew': 6,
   'regqueryinfokeyw': 5,

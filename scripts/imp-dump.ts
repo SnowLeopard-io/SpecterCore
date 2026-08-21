@@ -39,6 +39,13 @@ const cstr = (rva: number): string => {
   while (image[o] && s.length < 128) s += String.fromCharCode(image[o++]!);
   return s;
 };
+/** Import names are [WORD hint][char name[]]; skip the hint. */
+const impName = (rva: number): string => {
+  const o = foff(rva) + 2;
+  let s = '';
+  while (image[o] && s.length < 128) s += String.fromCharCode(image[o++]!);
+  return s;
+};
 
 const pe = d32(0x3c);
 const opt = pe + 24;
@@ -75,13 +82,13 @@ for (let i = 0; i < maxDesc; i++) {
         fn = `#${ent & 0xffff}`;
       } else {
         const nameRva = ent;
-        fn = cstr(nameRva);
+        fn = impName(nameRva);
         if (!fn) fn = `?rva0x${nameRva.toString(16)}`;
       }
+      j++;
       if (label === 'FT') continue; // FT mirrors OFT in the file; avoid double rows
       rows.push([dll, fn]);
       unique.add(`${dll.toLowerCase()}!${fn.toLowerCase()}`);
-      j++;
     }
   }
 }

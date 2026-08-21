@@ -333,6 +333,14 @@ export class GuestProcessRunner {
   private wideEnvBlock = 0;
   /** Narrow environment block pointer (GetEnvironmentStringsA). */
   private narrowEnvBlock = 0;
+  /** Active execution mode for the current run (x86 / x64). */
+  private mode: 'x86' | 'x64' = 'x86';
+  /** Mode-correct JIT engine (per-run, from run()'s createEngine path). */
+  private activeJit!: JitEngine;
+  /** Trap dispatcher used by nested WndProc executions. */
+  private guiDispatcher!: ApiTrapDispatcher;
+  /** Run options captured for nested-executor onStep/probes. */
+  private activeOptions: GuestProcessOptions = {};
 
   constructor(
     private readonly runtime: WasmRuntimeImpl,
@@ -392,6 +400,9 @@ export class GuestProcessRunner {
     this.installFileDialogs();
     const mode: 'x86' | 'x64' = pe.is64 ? 'x64' : 'x86';
     const jit = options.createEngine ? options.createEngine(mode) : this.jit;
+    this.mode = mode;
+    this.activeJit = jit;
+    this.activeOptions = options;
 
     // Initial stack: grows down from stackTop; the null return address makes a
     // bare `ret` out of the entry point look like a clean exit (eip -> 0).
@@ -603,10 +614,12 @@ export class GuestProcessRunner {
     });
 
     // LoadStringW: reads a string from the RT_STRING resource (type 6).
-    // String resources are blocks of 16 strings, each prefixed with a 1-byte
-    // length followed by UTF-16 code units; id = block*16 + index. notepad
-    // loads its whole UI (menus, dialogs) through this — returning 0 makes it
-    // fail-fast.
+    // String resources are blocks of 16 strings, each prefixed with a WORD
+    // (2-byte) length followed by UTF-16 code units; id = block*16 + index.
+    // notepad loads its whole UI (menus, dialogs) through this — returning 0
+    // makes it fail-fast. (Reading a 1-byte length drifts 1 byte per slot and
+    // returns the wrong string — winmine's "Error: %d" came back as the
+    // 17-char "Minesweeper Error".)
     const readWChar = (addr: number): number => {
       const b = this.runtime.readBytes(addr, 2);
       return b.byteLength >= 2 ? new DataView(b.buffer, b.byteOffset, 2).getUint16(0, true) : 0;
@@ -618,21 +631,19 @@ export class GuestProcessRunner {
       if (!buf || !cch) return { returnValue: 0, errorCode: E.NO_ERROR };
       // RT_STRING: block id = (stringId >> 4) + 1 (string ids are 1-based,
       // block 1 holds ids 1..15 at slots 1..15, slot 0 of block 1 is the
-      // unused id 0), in-block slot = stringId & 0xF. The previous code used
-      // floor(id/16) and id%16, which looked up the wrong block (id 1 -> block
-      // 0) and the wrong slot (id 16 -> slot 0 of block 1, which is empty).
+      // unused id 0), in-block slot = stringId & 0xF.
       const block = resourceTable.get((6 << 16) | ((id >> 4) + 1));
       if (block) {
         let off = block.address;
         const slot = id & 0xf;
         for (let i = 0; i < 16; i++) {
-          const b = this.runtime.readBytes(off, 1);
-          const len = b.byteLength >= 1 ? b[0]! : 0;
+          const b = this.runtime.readBytes(off, 2);
+          const len = b.byteLength >= 2 ? new DataView(b.buffer, b.byteOffset, 2).getUint16(0, true) : 0;
           if (i === slot) {
             const n = Math.min(len, cch);
             const w = new Uint8Array(n * 2);
             for (let j = 0; j < n; j++) {
-              const c = readWChar(off + 1 + j * 2);
+              const c = readWChar(off + 2 + j * 2);
               w[j * 2] = c & 0xff;
               w[j * 2 + 1] = (c >> 8) & 0xff;
             }
@@ -640,7 +651,7 @@ export class GuestProcessRunner {
             this.runtime.writeInt32(buf + n * 2, 0); // NUL terminator
             return { returnValue: n, errorCode: E.NO_ERROR };
           }
-          off += 1 + len * 2;
+          off += 2 + len * 2;
         }
       }
       // Fallback: the RT_STRING table is missing (no MUI satellite resources,
@@ -2110,7 +2121,7 @@ export class GuestProcessRunner {
       for (let i = 0; i < 16; i++) if (b[i] !== notepadHostClsid[i]) return false;
       return true;
     };
-    this.interceptor.hook('ole32.dll', 'com_qi', (ctx) => {
+    this.interceptor.hook('kernel32.dll', 'com_qi', (ctx) => {
       const out = (ctx.rawArgs?.[2] ?? 0) >>> 0;
       const self = (ctx.rawArgs?.[0] ?? 0) >>> 0;
       if (out) {
@@ -2119,10 +2130,32 @@ export class GuestProcessRunner {
       }
       return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
     });
-    this.interceptor.hook('ole32.dll', 'com_addref', () => ({ returnValue: 1, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('ole32.dll', 'com_release', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
-    this.interceptor.hook('ole32.dll', 'com_method', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('kernel32.dll', 'com_addref', () => ({ returnValue: 1, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('kernel32.dll', 'com_release', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('kernel32.dll', 'com_method', async (ctx) => {
+      const self = (ctx.rawArgs?.[0] ?? 0) >>> 0;
+      console.log('[GDI-walk] com_method self=0x%s comObj=0x%s queue=%d', self.toString(16), comObj.toString(16), this.guiMessageQueue.length);
+      // The host object's method is notepad-x64's message-pump entry. Run it so
+      // the window actually pumps and renders (see runGuiPump).
+      if (self === comObj) {
+        return { returnValue: await this.runGuiPump(), errorCode: E.NO_ERROR };
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('ole32.dll', 'CoCreateInstance', (ctx) => {
+      const rclsid = (ctx.rawArgs?.[0] ?? 0) >>> 0;
+      const ppv = (ctx.rawArgs?.[4] ?? 0) >>> 0;
+      if (clsidMatches(rclsid)) {
+        if (ppv) {
+          this.runtime.writeInt32(ppv, comObj | 0);
+          if (pe.is64) this.runtime.writeInt32(ppv + 4, 0);
+        }
+        return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
+      }
+      return { returnValue: 0x80040154, errorCode: E.NO_ERROR }; // REGDB_E_CLASSNOTREG
+    });
+    // CoCreateInstance may also resolve under the api-ms forwarding module.
+    this.interceptor.hook('api-ms-win-core-com-l1-1-0.dll', 'CoCreateInstance', (ctx) => {
       const rclsid = (ctx.rawArgs?.[0] ?? 0) >>> 0;
       const ppv = (ctx.rawArgs?.[4] ?? 0) >>> 0;
       if (clsidMatches(rclsid)) {
@@ -3167,20 +3200,11 @@ export class GuestProcessRunner {
    */
   private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64', options: GuestProcessOptions = {}): void {
     const runtime = this.runtime;
+    this.guiDispatcher = dispatcher;
     // Bounds-checked 32-bit guest read (never grows the linear memory).
     const peek = (a: number): number => {
       if (a < 0 || a + 4 > runtime.memory.buffer.byteLength) return 0;
       return new DataView(runtime.memory.buffer).getInt32(a, true) >>> 0;
-    };
-    const snapshot = (): { regs: Array<[RegName, number]>; eflags: number; eip: number } => ({
-      regs: (['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'] as const).map((r) => [r, runtime.getReg64(r)]),
-      eflags: runtime.getEflags(),
-      eip: runtime.getEip(),
-    });
-    const restore = (s: { regs: Array<[RegName, number]>; eflags: number; eip: number }): void => {
-      for (const [r, v] of s.regs) runtime.setReg64(r, v);
-      runtime.setEflags(s.eflags);
-      runtime.setEip(s.eip);
     };
     const readWStr = (address: number): string => {
       if (!address) return '';
@@ -3202,12 +3226,17 @@ export class GuestProcessRunner {
       const atom = ++classAtom;
       const lpWndClass = ctx.rawArgs[0] ?? 0;
       if (lpWndClass) {
+        // WNDCLASSEXW field offsets differ between x86 and x64 because x64 has
+        // 8-byte pointers: x86  lpfnWndProc=+8, lpszMenuName=+36, lpszClassName=+40
+        //                  x64  lpfnWndProc=+8, lpszMenuName=+56, lpszClassName=+64
+        const menuNameOff = this.mode === 'x64' ? 56 : 36;
+        const nameOff = this.mode === 'x64' ? 64 : 40;
         this.classWndProcs.set(atom, peek(lpWndClass + 8)); // WNDCLASSEXW.lpfnWndProc
-        const name = readWStr(peek(lpWndClass + 40)); // lpszClassName
+        const name = readWStr(peek(lpWndClass + nameOff)); // lpszClassName
         if (name) classNames.set(name.toLowerCase(), atom);
-        // WNDCLASSEXW.lpszMenuName (+36): numeric MAKEINTRESOURCE -> RT_MENU.
+        // WNDCLASSEXW.lpszMenuName: numeric MAKEINTRESOURCE -> RT_MENU.
         // notepad attaches its menu to the class, so parse it here (Layer 3).
-        const menuName = peek(lpWndClass + 36);
+        const menuName = peek(lpWndClass + menuNameOff);
         if ((menuName >>> 16) === 0) {
           const entry = this.menuResourceTable.get(menuName & 0xffff);
           if (entry) this.classMenus.set(atom, this.parseMenuResource(entry.address, entry.size));
@@ -3834,79 +3863,159 @@ export class GuestProcessRunner {
       const lpMsg = ctx.rawArgs[0] ?? 0;
       if (!lpMsg) return { returnValue: 0, errorCode: E.NO_ERROR };
       const hwnd = peek(lpMsg);
-      const wndRec = this.windowRecords.get(hwnd);
-      const wndProc = wndRec?.wndProc ?? 0;
-      const sAddr = this.sehSentinelAddr;
-      console.log('[GDI-walk] DispatchMessageW hwnd=0x%s wndProc=0x%s sAddr=0x%s mode=%s', hwnd.toString(16), wndProc.toString(16), sAddr.toString(16), mode);
       const message = peek(lpMsg + 4);
       const wParam = peek(lpMsg + 8);
       const lParam = peek(lpMsg + 12);
-      // System classes (EDIT, BUTTON, STATIC, …) have no guest WndProc.
-      // Handle their messages directly here instead of dropping them.
-      if (!wndProc) {
-        if (wndRec && wndRec.className.toLowerCase() === 'edit' && message === 0x000f /* WM_PAINT */) {
-          const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
-          if (bridge) {
-            const hdc = await bridge.createDC('DISPLAY');
-            await safe(() => bridge.flush(hdc));
-            await safe(() => bridge.deleteDC(hdc));
-          }
-        }
-        return { returnValue: 0, errorCode: E.NO_ERROR };
-      }
-      if (mode === 'x64' || sAddr === 0) {
-        return { returnValue: 0, errorCode: E.NO_ERROR };
-      }
-      const saved = snapshot();
-      const esp = runtime.getReg('esp') >>> 0;
-      const frame = (esp - 20) >>> 0; // 4 stdcall args + sentinel return addr
-      runtime.writeInt32(frame + 0, sAddr);
-      runtime.writeInt32(frame + 4, hwnd);
-      runtime.writeInt32(frame + 8, message);
-      runtime.writeInt32(frame + 12, wParam);
-      runtime.writeInt32(frame + 16, lParam);
-      runtime.setReg('esp', frame);
-      runtime.setEip(wndProc);
-      const nested = new Executor(
-        runtime,
-        jit,
-        {
-          handle: async (vector) => {
-            if (vector === SEH_SENTINEL_VECTOR) {
-              console.log('[GDI-walk] nested sentinel hit → WndProc returned');
-              runtime.setEip(0);
-              return;
-            }
-            console.log('[GDI-walk] nested trap vector=%d', vector);
-            await dispatcher.handle(vector);
-            const lastStub = dispatcher.lastCalled;
-            if (lastStub) {
-              console.log('[GDI-walk] nested trap → %s!%s idx=%d', lastStub.module, lastStub.proc, runtime.getReg('eax'));
-            } else {
-              console.log('[GDI-walk] nested trap → unknown stub (eax=%d)', runtime.getReg('eax'));
-            }
-          },
-        },
-        {
-          maxSteps: 500_000,
-          // Probes must also fire inside the WndProc nested executor — the
-          // guest save routine (WM_COMMAND → 0x410c00) runs there, not on the
-          // main executor loop.
-          onStep: options.probes?.length
-            ? (eip: number, rt: WasmRuntimeImpl) => {
-                for (const p of options.probes ?? []) if (p.eip === eip) p.fn(rt);
-                options.onStep?.(eip, rt);
-              }
-            : options.onStep,
-        },
-      );
-      await nested.run(wndProc);
-      const result = runtime.getReg('eax') >>> 0;
-      restore(saved);
-      return { returnValue: result, errorCode: E.NO_ERROR };
+      await this.dispatchMessageRecord({ hwnd, msg: message, wParam, lParam });
+      return { returnValue: 0, errorCode: E.NO_ERROR };
     };
     this.interceptor.hook('user32.dll', 'DispatchMessageW', dispatchMessage);
     this.interceptor.hook('user32.dll', 'DispatchMessageA', dispatchMessage);
+  }
+
+  /**
+   * Dispatches a single window message to the guest WndProc. For x86 this runs
+   * the classic stdcall 4-arg frame; for x64 it sets up the Microsoft x64
+   * calling convention (rcx/rdx/r8/r9 + 32-byte shadow space) and an 8-byte
+   * sentinel return address so the WndProc's `ret` lands on the SEH sentinel
+   * and the nested executor stops. Re-entrant: a WndProc may itself trap into
+   * the API dispatcher (e.g. DefWindowProcW, GDI) — those run on the main
+   * dispatcher while this method awaits the nested executor.
+   */
+  private async dispatchMessageRecord(msg: { hwnd: number; msg: number; wParam: number; lParam: number }): Promise<void> {
+    const { hwnd, msg: message, wParam, lParam } = msg;
+    const wndRec = this.windowRecords.get(hwnd);
+    const wndProc = wndRec?.wndProc ?? 0;
+    const sAddr = this.sehSentinelAddr;
+    console.log('[GDI-walk] DispatchMessageW hwnd=0x%s wndProc=0x%s sAddr=0x%s mode=%s', hwnd.toString(16), wndProc.toString(16), sAddr.toString(16), this.mode);
+    // System classes (EDIT, BUTTON, STATIC, …) have no guest WndProc.
+    // Handle their messages directly here instead of dropping them.
+    if (!wndProc) {
+      if (wndRec && wndRec.className.toLowerCase() === 'edit' && message === 0x000f /* WM_PAINT */) {
+        const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
+        if (bridge) {
+          try {
+            const hdc = await bridge.createDC('DISPLAY');
+            await bridge.flush(hdc);
+            await bridge.deleteDC(hdc);
+          } catch { /* ignore */ }
+        }
+      }
+      return;
+    }
+    if (sAddr === 0) return;
+    const saved = this.snapshotRegs();
+    if (this.mode === 'x86') {
+      const esp = this.runtime.getReg('esp') >>> 0;
+      const frame = (esp - 20) >>> 0; // 4 stdcall args + sentinel return addr
+      this.runtime.writeInt32(frame + 0, sAddr);
+      this.runtime.writeInt32(frame + 4, hwnd);
+      this.runtime.writeInt32(frame + 8, message);
+      this.runtime.writeInt32(frame + 12, wParam);
+      this.runtime.writeInt32(frame + 16, lParam);
+      this.runtime.setReg('esp', frame);
+      this.runtime.setEip(wndProc);
+      const nested = new Executor(this.runtime, this.activeJit, this.sentinelHandler(), { maxSteps: 500_000, onStep: this.dispatchOnStep() });
+      await nested.run(wndProc);
+      this.restoreRegs(saved);
+      return;
+    }
+    // x64: Microsoft x64 calling convention. Place the 8-byte sentinel return
+    // address at frameR; set rsp = frameR so the prologue `sub rsp,0x28` leaves
+    // [rsp+0x28] = sentinel. rcx/rdx/r8/r9 carry the four args. The WndProc's
+    // `ret` pops the sentinel into rip → SEH sentinel trap.
+    const rsp = this.runtime.getReg('rsp') >>> 0;
+    let frameR = (rsp & ~0xf) - 0x40;
+    if ((frameR & 0xf) === 0) frameR -= 8; // ensure frameR % 16 == 8 (post-call alignment)
+    const dv = new DataView(new ArrayBuffer(8));
+    dv.setBigUint64(0, BigInt(sAddr >>> 0), true);
+    this.runtime.writeBytes(frameR, new Uint8Array(dv.buffer));
+    this.runtime.setReg('rcx', hwnd);
+    this.runtime.setReg('rdx', message);
+    this.runtime.setReg('r8', wParam);
+    this.runtime.setReg('r9', lParam);
+    this.runtime.setReg('rsp', frameR);
+    this.runtime.setEip(wndProc);
+    const nested = new Executor(this.runtime, this.activeJit, this.sentinelHandler(), { maxSteps: 500_000, onStep: this.dispatchOnStep() });
+    await nested.run(wndProc);
+    this.restoreRegs(saved);
+  }
+
+  /** Nested-executor trap handler: SEH sentinel ends the WndProc, others go to the API dispatcher. */
+  private sentinelHandler(): TrapHandler {
+    return {
+      handle: async (vector: number): Promise<void> => {
+        if (vector === SEH_SENTINEL_VECTOR) {
+          console.log('[GDI-walk] nested sentinel hit → WndProc returned');
+          this.runtime.setEip(0);
+          return;
+        }
+        console.log('[GDI-walk] nested trap vector=%d', vector);
+        await this.guiDispatcher.handle(vector);
+        const lastStub = this.guiDispatcher.lastCalled;
+        if (lastStub) {
+          console.log('[GDI-walk] nested trap → %s!%s idx=%d', lastStub.module, lastStub.proc, this.runtime.getReg('eax'));
+        } else {
+          console.log('[GDI-walk] nested trap → unknown stub (eax=%d)', this.runtime.getReg('eax'));
+        }
+      },
+    };
+  }
+
+  /** onStep wrapper that fires probes + the host onStep inside the nested WndProc executor. */
+  private dispatchOnStep(): ((eip: number, rt: WasmRuntimeImpl) => void) | undefined {
+    const opts = this.activeOptions;
+    if (!opts.probes?.length && !opts.onStep) return undefined;
+    return (eip: number, rt: WasmRuntimeImpl) => {
+      for (const p of opts.probes ?? []) if (p.eip === eip) p.fn(rt);
+      opts.onStep?.(eip, rt);
+    };
+  }
+
+  /** Save/restore the full GP register file around a nested WndProc execution. */
+  private snapshotRegs(): { regs: Array<[RegName, number]>; eflags: number; eip: number } {
+    const names: RegName[] = this.mode === 'x64'
+      ? ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']
+      : ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+    return {
+      regs: names.map((r) => [r, this.runtime.getReg64(r)]),
+      eflags: this.runtime.getEflags(),
+      eip: this.runtime.getEip(),
+    };
+  }
+
+  private restoreRegs(s: { regs: Array<[RegName, number]>; eflags: number; eip: number }): void {
+    for (const [r, v] of s.regs) this.runtime.setReg64(r, v);
+    this.runtime.setEflags(s.eflags);
+    this.runtime.setEip(s.eip);
+  }
+
+  /**
+   * Message pump for the WinUI/THF host object. notepad-x64's message loop
+   * lives inside the framework COM object's method, not in its own WinMain, so
+   * the fake host `com_method` runs this pump. Non-interactive (headless) runs
+   * drain the already-queued WM_CREATE/WM_PAINT once; interactive runs loop
+   * until a WM_QUIT (posted by the host on window close).
+   */
+  private async runGuiPump(): Promise<number> {
+    if (!this.interactive) {
+      while (this.guiMessageQueue.length > 0) {
+        const m = this.guiMessageQueue.shift()!;
+        await this.dispatchMessageRecord(m);
+      }
+      return 0;
+    }
+    while (true) {
+      if (this.guiMessageQueue.length === 0) {
+        await new Promise<void>((resolve) => { this.pendingMessageResolve = resolve; });
+      }
+      const m = this.guiMessageQueue.shift()!;
+      if (m.msg === 0x0012 /* WM_QUIT */) {
+        this.quitRequested = true;
+        return m.wParam;
+      }
+      await this.dispatchMessageRecord(m);
+    }
   }
 
   /** Small helper: BOOL TRUE with NO_ERROR. */
