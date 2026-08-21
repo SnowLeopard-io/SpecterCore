@@ -90,6 +90,16 @@ export const DEFAULT_APPS: AppDefinition[] = [
     group: 'System',
     render: () => null,
   },
+  {
+    appId: 'windows-minesweeper',
+    name: 'Minesweeper',
+    icon: 'icons/minesweeper.svg',
+    description: 'Run the bundled Windows winmine.exe (real 32-bit PE) — the flagship GUI demo',
+    group: 'Games',
+    // Launch is special-cased in DesktopController: it runs the bundled
+    // winmine.exe as a real guest window (no application-shell window).
+    render: () => null,
+  },
 ];
 
 export function toDesktopApp(app: AppDefinition): DesktopAppInfo {

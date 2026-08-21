@@ -132,6 +132,15 @@ export interface DesktopController {
    */
   pickLocalFile(): Promise<LocalFileInfo | null>;
   /**
+   * 宿主驱动的文件对话框（comdlg32 GetOpenFileNameW/GetSaveFileNameW 的提供方）。
+   * 弹出一个虚拟盘浏览器窗口，用户选择后返回 Windows 路径，取消/关闭返回 null。
+   * guest 进程在 comdlg32 陷阱处 await 此 Promise（与 GetMessageW 阻塞同模式）。
+   */
+  showFileDialog(
+    kind: 'open' | 'save',
+    opts: { title: string; initialDir: string; defaultName: string; filter: string },
+  ): Promise<string | null>;
+  /**
    * 清空虚拟硬盘（format）并重置已安装应用缓存，随后刷新页面。
    * 桌面右键菜单「Wipe Virtual Disk」调用。
    */

@@ -124,6 +124,10 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'getstockobject': 1,
   'selectobject': 2,
   'deleteobject': 1,
+  // DeleteDC(hdc) — 1-arg stdcall. MISSING -> stub ret 0 -> 4 bytes leaked
+  // per call; winmine's bitmap cleanup loop (0x1002607) calls it 16x, so the
+  // drift shifts the epilogue `ret` to pop a garbage return address.
+  'deletedc': 1,
   'createfontindirectw': 1,
   'createfontindirecta': 1,
   'createsolidbrush': 1,
@@ -152,6 +156,19 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'setwindoworgex': 3,
   'createcompatibledc': 1,
   'createcompatiblebitmap': 3,
+  // SetDIBitsToDevice(hdc, xDest, yDest, dwWidth, dwHeight, xSrc, ySrc,
+  // uStartScan, cScanLines, lpvBits, lpbmi, fColorUse) — 12-arg stdcall.
+  // MISSING -> stub ret 0 -> 48 bytes leaked per call; winmine's board-draw
+  // loop calls it 16x and the epilogue `ret` then popped garbage (eip=0x10).
+  'setdibitstodevice': 12,
+  // SetROP2(hdc, fnDrawMode) / SetPixel(hdc, x, y, crColor) — used by winmine's
+  // board drawing (SetROP2 R2_XORPEN for flag reveal). Missing argCounts leak
+  // 8/12 bytes per call and corrupt the draw-loop stack.
+  'setrop2': 2,
+  'setpixel': 3,
+  // GetLayout(hdc) / SetLayout(hdc, dwLayout) — 1/2-arg stdcall (GDI).
+  'getlayout': 1,
+  'setlayout': 2,
   'selectpalette': 3,
   'realizepalette': 1,
   'savedc': 1,
@@ -318,6 +335,10 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'acquiresrwlockshared': 1,
   'releasesrwlockshared': 1,
   'initcommoncontrols': 0,
+  // InitCommonControlsEx(const INITCOMMONCONTROLSEX*) — 1-arg stdcall
+  // (comctl32). MISSING -> stub ret 0 -> 4 bytes leaked; winmine calls it
+  // during startup before RegisterClassW.
+  'initcommoncontrolsex': 1,
   'createwindowexw': 12,
   'translatemessage': 1,
   'charlowerbuffw': 2,
@@ -351,6 +372,10 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   // stdcall; without the arg counts the caller's stack drifts after each call.
   'registerclassexw': 1,
   'registerclassexa': 1,
+  // RegisterClassW/A(const WNDCLASS*) — 1-arg stdcall. MISSING -> stub ret 0
+  // -> 4 bytes leaked; winmine registers its board window class through it.
+  'registerclassw': 1,
+  'registerclassa': 1,
   'showwindow': 2,
   'updatewindow': 1,
   'getmessagew': 4,
@@ -388,6 +413,30 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'loadacceleratorsa': 2,
   'setcursor': 1,
   'getkeyboardlayout': 1,
+  // winmine (classic Minesweeper) message-loop / dialog helpers. Missing
+  // argCounts leak 4-16 bytes per call; winmine's timer + dialog paths then
+  // `ret` from a shifted stack slot.
+  'settimer': 4,
+  'killtimer': 2,
+  'getdesktopwindow': 0,
+  'loadmenu': 2,
+  // LoadMenuW(hInstance, lpMenuName) — 2-arg stdcall. MISSING -> stub ret 0
+  // -> 8 bytes leaked; winmine loads its menu right after RegisterClassW.
+  'loadmenuw': 2,
+  'loadmenua': 2,
+  'setmenu': 2,
+  'getdlgitemint': 4,
+  'setdlgitemint': 4,
+  'releasecapture': 0,
+  'setcapture': 1,
+  'mapwindowpoints': 4,
+  'ptinrect': 3,
+  // SetRect(lprc, xLeft, yTop, xRight, yBottom) — 5-arg stdcall. MISSING ->
+  // stub ret 0 -> 20 bytes leaked; winmine's window positioner 0x1001950
+  // calls it right before InvalidateRect, so the drift shifts the epilogue
+  // `ret 4` to pop a leftover return address (0x1002823) and fault.
+  'setrect': 5,
+  'winhelpw': 4,
   // --- more User32/GDI/kernel32 stdcall arg counts observed in notepad ---
   // (each missing count makes the trap stub `ret 0` and leak the args —
   // register-restoring `pop reg` sequences then read leaked values).

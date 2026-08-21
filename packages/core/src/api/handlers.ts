@@ -14,6 +14,22 @@ function fail(errorCode: number): ApiResult {
   return { returnValue: 0, errorCode };
 }
 
+/**
+ * MSVCRT rand()/srand() state. The guest only touches it through these two
+ * calls, so a JS-side LCG is enough. winmine's mine-placement loop is
+ * `do { x=rand()%w; y=rand()%h } while (cell already mined)` — a constant
+ * rand() (the old no-op srand + missing rand) spins that loop forever.
+ */
+let randState = 1;
+const randImpl = (): ApiResult => {
+  randState = (Math.imul(randState, 1103515245) + 12345) >>> 0;
+  return ok((randState >>> 16) & 0x7fff);
+};
+const srandImpl = (ctx: ApiCallContext): ApiResult => {
+  randState = (raw(ctx, 0) >>> 0) || 1;
+  return ok(0);
+};
+
 /** Unlocked CRITICAL_SECTION image (LockCount=-1, rest zeroed). */
 function csInit(): Uint8Array {
   const b = new Uint8Array(24);
@@ -1424,8 +1440,10 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
       }
       return ok(t);
     },
-    _o_srand: () => ok(0),
-    srand: () => ok(0),
+    _o_srand: srandImpl,
+    srand: srandImpl,
+    _o_rand: randImpl,
+    rand: randImpl,
     // _o__get_osfhandle(int fd): maps a CRT file descriptor to an OS handle.
     // cmd.exe calls this for fd 0/1/2 during console init; returning 0 (the
     // default) makes GetFileType(0) return FILE_TYPE_UNKNOWN and cmd takes
@@ -1447,6 +1465,16 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
     },
   };
   interceptor.hookBatch('ucrtbase.dll', ucrtbase);
+  // Legacy msvcrt.dll: winmine (VC6-era) imports rand/srand/__p__fmode etc.
+  // from msvcrt.dll directly, which normalizeApiSetModule does NOT map to
+  // ucrtbase — without these, msvcrt.dll.rand falls to the default stub and
+  // returns 0 forever, spinning winmine's mine-placement loop.
+  interceptor.hookBatch('msvcrt.dll', {
+    rand: randImpl,
+    _o_rand: randImpl,
+    srand: srandImpl,
+    _o_srand: srandImpl,
+  });
 }
 
 /**

@@ -20,6 +20,9 @@ export const BUILTIN_WIN_FILES: Array<{ url: string; storePath: string }> = [
   { url: 'win/cmd.exe', storePath: 'Windows/SysWOW64/cmd.exe' },
   { url: 'win/en-US/cmd.exe.mui', storePath: 'Windows/SysWOW64/en-US/cmd.exe.mui' },
   { url: 'win/zh-CN/cmd.exe.mui', storePath: 'Windows/SysWOW64/zh-CN/cmd.exe.mui' },
+  // Classic Minesweeper (winmine.exe, VC6-era 32-bit) — the flagship GUI demo:
+  // full Win32 startup (registry, resources, menu) + GDI board rendering.
+  { url: 'win/winmine.exe', storePath: 'Windows/SysWOW64/winmine.exe' },
   // Real files copied from the host C: drive so the virtual disk (and the
   // file explorer / notepad open dialog) has genuine content by default.
   { url: 'win/win.ini', storePath: 'Windows/win.ini' },

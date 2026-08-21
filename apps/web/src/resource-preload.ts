@@ -18,6 +18,7 @@ const UI_RESOURCES: readonly string[] = [
   'icons/folder.svg',
   'icons/image-file.svg',
   'icons/local-disk.svg',
+  'icons/minesweeper.svg',
   'icons/notepad.svg',
   'icons/package.svg',
   'icons/photos.svg',

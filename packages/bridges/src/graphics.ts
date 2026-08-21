@@ -3,6 +3,7 @@ import type {
   Color,
   D3DBridge,
   DeviceCaps,
+  DibSurface,
   Dispose,
   FontSpec,
   GdiBridge,
@@ -104,6 +105,16 @@ export class NullGdiBridge implements GdiBridge {
     _srcDc: number,
     _srcRect: Rect,
     _rop: number,
+  ): Promise<WinError> {
+    return NOT_IMPLEMENTED;
+  }
+  async setDIBitsToDevice(
+    _dc: number,
+    _xDest: number,
+    _yDest: number,
+    _startScan: number,
+    _cLines: number,
+    _dib: DibSurface,
   ): Promise<WinError> {
     return NOT_IMPLEMENTED;
   }
@@ -437,6 +448,34 @@ export class CanvasGdiBridge implements GdiBridge {
     return E.NO_ERROR;
   }
 
+  async setDIBitsToDevice(
+    dc: number,
+    xDest: number,
+    yDest: number,
+    startScan: number,
+    cLines: number,
+    dib: DibSurface,
+  ): Promise<WinError> {
+    const { surface } = this.requireDc(dc);
+    const { width, height, bitCount, palette, bits } = dib;
+    const stride = Math.floor((width * bitCount + 31) / 32) * 4;
+    const totalRows = Math.abs(height);
+    const bottomUp = height > 0;
+    const rows = Math.max(0, Math.min(cLines, totalRows - startScan));
+    for (let r = 0; r < rows; r++) {
+      const dibRow = startScan + r;
+      const srcRow = bottomUp ? totalRows - 1 - dibRow : dibRow;
+      const rowBase = srcRow * stride;
+      for (let x = 0; x < width; x++) {
+        const color = readDibPixel(bits, rowBase, x, bitCount, palette);
+        if (!color) continue;
+        surface.setPixel(xDest + x, yDest + r, color, ROP_INDEX_COPY);
+      }
+    }
+    this.notify(dc, { x: xDest, y: yDest, width, height: rows });
+    return E.NO_ERROR;
+  }
+
   async stretchBlt(
     destDc: number,
     destRect: Rect,
@@ -492,6 +531,59 @@ export class CanvasGdiBridge implements GdiBridge {
 
 function toRgb(color: Color): number {
   return (((color.r & 0xff) << 16) | ((color.g & 0xff) << 8) | (color.b & 0xff)) >>> 0;
+}
+
+/** 从 DIB 位数据中读取 (rowBase, x) 处的像素颜色（支持 1/4/8/16/24/32bpp）。 */
+function readDibPixel(
+  bits: Uint8Array,
+  rowBase: number,
+  x: number,
+  bitCount: number,
+  palette: Uint32Array | null,
+): Color | null {
+  let idx: number;
+  switch (bitCount) {
+    case 1: {
+      const byte = bits[rowBase + (x >> 3)] ?? 0;
+      idx = (byte >> (7 - (x & 7))) & 1;
+      break;
+    }
+    case 4: {
+      const byte = bits[rowBase + (x >> 1)] ?? 0;
+      idx = (x & 1) === 0 ? (byte >> 4) & 0xf : byte & 0xf;
+      break;
+    }
+    case 8:
+      idx = bits[rowBase + x] ?? 0;
+      break;
+    case 16: {
+      const v = (bits[rowBase + x * 2] ?? 0) | ((bits[rowBase + x * 2 + 1] ?? 0) << 8);
+      return { r: ((v >> 10) & 0x1f) << 3, g: ((v >> 5) & 0x1f) << 3, b: (v & 0x1f) << 3, a: 255 };
+    }
+    case 24: {
+      const b = bits[rowBase + x * 3] ?? 0;
+      const g = bits[rowBase + x * 3 + 1] ?? 0;
+      const r = bits[rowBase + x * 3 + 2] ?? 0;
+      return { r, g, b, a: 255 };
+    }
+    case 32: {
+      const b = bits[rowBase + x * 4] ?? 0;
+      const g = bits[rowBase + x * 4 + 1] ?? 0;
+      const r = bits[rowBase + x * 4 + 2] ?? 0;
+      const a = bits[rowBase + x * 4 + 3] ?? 255;
+      return { r, g, b, a };
+    }
+    default:
+      return null;
+  }
+  if (!palette) return null;
+  const px = palette[idx] ?? 0;
+  return {
+    r: (px >>> 16) & 0xff,
+    g: (px >>> 8) & 0xff,
+    b: px & 0xff,
+    a: (px >>> 24) & 0xff,
+  };
 }
 
 function toCanvasFont(font: FontSpec | null): string {

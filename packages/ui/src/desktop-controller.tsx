@@ -55,6 +55,7 @@ function guestIconFor(name: string): string {
   if (lower.includes('cmd') || lower.includes('command') || lower.includes('console')) return 'icons/cmd.svg';
   if (lower.includes('explorer')) return 'icons/explorer.svg';
   if (lower.includes('paint') || lower.includes('photo') || lower.includes('image')) return 'icons/image-file.svg';
+  if (lower.includes('mine') || lower.includes('sweeper')) return 'icons/minesweeper.svg';
   return 'icons/application.svg';
 }
 
@@ -148,6 +149,14 @@ export class DesktopControllerImpl implements DesktopController {
         modulePath: 'C:/Windows/System32/notepad.exe',
         name: 'Notepad (x64)',
         commandLine: args?.path ? toWindowsPath(args.path) : undefined,
+      });
+      return;
+    }
+    if (app.appId === 'windows-minesweeper') {
+      await this.launchGuestWindow({
+        storePath: 'Windows/SysWOW64/winmine.exe',
+        modulePath: 'C:/Windows/SysWOW64/winmine.exe',
+        name: 'Minesweeper',
       });
       return;
     }
@@ -291,7 +300,7 @@ export class DesktopControllerImpl implements DesktopController {
    * user cancels / closes the window. The guest process suspends on the
    * comdlg32 trap while this awaits (same pattern as GetMessageW blocking).
    */
-  private showFileDialog(
+  showFileDialog(
     kind: 'open' | 'save',
     opts: { title: string; initialDir: string; defaultName: string; filter: string },
   ): Promise<string | null> {
@@ -530,6 +539,10 @@ export class DesktopControllerImpl implements DesktopController {
           }
         },
         interactive: true,
+        // Report the real desktop viewport as the guest's virtual screen so
+        // GUI programs (winmine centers its board window) compute positive
+        // coordinates instead of landing off-screen.
+        screenSize: { width: window.innerWidth, height: window.innerHeight },
         gdiBridge: (hwnd) => guestGdiBridgeProvider(hwnd),
         fileDialog: async (kind, opts) => this.showFileDialog(kind, opts),
         onMessageWait: () => {
@@ -537,11 +550,16 @@ export class DesktopControllerImpl implements DesktopController {
           for (const w of wins) {
             if (w.parent !== 0 || guestWinIds.has(w.hwnd)) continue;
             const edit = wins.find((c) => c.parent === w.hwnd && c.className.toLowerCase() === 'edit');
+            // Size the host window to the guest's reported client size (from
+            // MoveWindow) so e.g. winmine's 170x248 board fills the window
+            // instead of huddling in the top-left corner of a 680x500 box.
+            const gw = w.width > 0 ? w.width : 680;
+            const gh = w.height > 0 ? w.height : 500;
             void this.windowManager
               .createWindow({
                 title: `${w.className}${w.text ? ` — ${w.text}` : ''}`,
-                width: 680,
-                height: 500,
+                width: Math.max(240, gw + 16),
+                height: Math.max(160, gh + 40),
                 icon: guestIconFor(source.name),
                 resizable: true,
                 appId: 'guest-window',

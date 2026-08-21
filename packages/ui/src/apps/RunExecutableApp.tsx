@@ -122,7 +122,9 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
   // size, sync the canvas pixel buffer to match and notify the guest with
   // WM_SIZE so it repaints into the new client area. MAKELONG(cx, cy):
   // low 16 = cx, high 16 = cy. Setting canvas.width/height clears the
-  // surface, so we coalesce into a rAF and always follow with WM_SIZE.
+  // surface, so we coalesce into a rAF and always follow with WM_SIZE and a
+  // WM_PAINT — the resize wipes the canvas, and guests that only repaint on
+  // WM_PAINT (e.g. winmine ignores WM_SIZE) would otherwise stay blank.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || typeof ResizeObserver === 'undefined') return;
@@ -139,6 +141,7 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
       raf = requestAnimationFrame(() => {
         const lParam = ((h & 0xffff) << 16) | (w & 0xffff);
         runner.postMessage({ hwnd, msg: 0x0005 /* WM_SIZE */, wParam: 0 /* SIZE_RESTORED */, lParam });
+        runner.postMessage({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 });
       });
     });
     ro.observe(canvas);
@@ -358,6 +361,11 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
         },
         interactive: true,
         gdiBridge: (hwnd) => guestGdiBridgeProvider(hwnd),
+        // Host-driven file dialog (comdlg32 GetOpenFileNameW/GetSaveFileNameW):
+        // notepad's Save/Open routes through here; without a provider the dialog
+        // hook returns "cancelled" and the save/open chain silently dies.
+        fileDialog: async (kind, opts) => controller.showFileDialog(kind, opts),
+        onTextChanged: (hwnd, text) => setGuestText(hwnd, text),
         onMessageWait: () => {
           // Host each guest top-level window as a real desktop window.
           void ensureGuestWindows(runner);

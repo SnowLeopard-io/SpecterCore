@@ -2,6 +2,63 @@
 
 > Short handover notes for recent work. Full details live in `docs/PROGRESS.md`.
 
+## 2026-08-21 — Session 20 (winmine.exe flagship demo — RUNS!)
+
+### Mission
+- Make classic Minesweeper (`apps/web/public/win/winmine.exe`, VC6-era 32-bit
+  GUI) run inside SpecterCore as the flagship browser-desktop demo.
+
+### Milestone: winmine runs the FULL startup + initial render (headless)
+- `flow-api.mjs apps/web/public/win/winmine.exe` → **184 API calls, clean exit
+  (GetMessageW queue empty = WM_QUIT), no fault.** Sequence:
+  CRT init → LoadStringW (UI strings) → registry reads (RegCreateKeyExW /
+  RegQueryValueExW) → LoadIconW/LoadCursorW/GetStockObject → RegisterClassW →
+  LoadMenuW/LoadAcceleratorsW → **CreateWindowExW** → GetMenuItemRect/MoveWindow
+  → LoadResource (bitmaps) → **board draw (16× SetDIBitsToDevice)** →
+  CheckMenuItem ×7 + SetMenu → **mine placement (20× rand = 10 mines × x/y)** →
+  board redraw with mines → SetRect/InvalidateRect → clean exit.
+
+### Fixes this round
+1. **`setdibitstodevice: 12`** (mapper.ts) — MISSING argCount → stub `ret 0` →
+   48 bytes leaked per call; winmine's 16-iteration draw loop then `ret` popped
+   garbage (eip=0x10). Also added `setrop2: 2`, `setpixel: 3`, `getlayout: 1`,
+   `setlayout: 2` (GDI) and `settimer/killtimer/getdesktopwindow/loadmenu/
+   setmenu/getdlgitemint/setdlgitemint/releasecapture/setcapture/
+   mapwindowpoints/ptinrect/winhelpw` (USER32).
+2. **`rand`/`srand` implemented** (handlers.ts) — MSVCRT LCG
+   (`next = next*1103515245+12345; return (next>>16)&0x7fff`), state in a JS
+   module var. Registered under BOTH `ucrtbase.dll` AND `msvcrt.dll` (winmine
+   imports msvcrt.dll directly; normalizeApiSetModule does NOT map msvcrt→
+   ucrtbase). Before: no-op srand + missing rand → rand() always 0 → mine
+   placement `do{x=rand()%w;y=rand()%h}while(cell mined)` spun forever (890K
+   rand calls / 200MB log).
+
+### Desktop integration (browser)
+- `builtin-win.ts`: provision `win/winmine.exe` → `Windows/SysWOW64/winmine.exe`.
+- `apps.tsx`: `windows-minesweeper` app (Games group, `icons/minesweeper.svg`).
+- `desktop-controller.tsx`: special-case launch via `launchGuestWindow` (same
+  path as notepad — real guest window, no shell), `guestIconFor` → minesweeper.
+- `resource-preload.ts`: preload `icons/minesweeper.svg`.
+- New icon: `apps/web/public/icons/minesweeper.svg`.
+
+### Build / run commands
+```
+NODE="C:/Users/HUAWEI/.workbuddy/binaries/node/versions/22.22.2/node.exe"
+$NODE node_modules/esbuild/bin/esbuild scripts/flow-api.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/flow-api.mjs
+$NODE node_modules/.cache/flow-api.mjs "apps/web/public/win/winmine.exe" 40
+```
+- Type check: pre-existing errors ONLY (codegen XmmOperand `.size`,
+  x86-decoder `b` undefined, BrowserApp `getAppWindowId`). No new errors.
+
+### Next steps (in order)
+1. **Verify in the browser**: run the vite dev server, click Minesweeper on the
+   desktop, confirm the board window renders (GDI canvas) with the menu bar.
+   Mouse clicks (WM_LBUTTONDOWN) → reveal cells — the interactive message loop
+   already blocks on GetMessageW waiting for host input.
+2. If the board renders but cells don't reveal: check the WM_LBUTTONDOWN →
+   WndProc dispatch path and the SetDIBitsToDevice redraw after each click.
+3. Keep the handover notes in this file updated.
+
 ## 2026-08-21 — Session 19 round 2 (32-bit VSCode installer, agent handover)
 
 > **Handover**: THIS file was written for an agent switch at 2026-08-21 05:50 GMT+8.

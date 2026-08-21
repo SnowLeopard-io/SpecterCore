@@ -18,6 +18,7 @@ import type {
   ApiInterceptor,
   ApiResult,
   Color,
+  DibSurface,
   GdiBridge,
   JitEngine,
   PeImage,
@@ -32,6 +33,16 @@ import { Executor, type TrapHandler } from '../jit/executor';
 import { mapPeImage, X86_API_ARG_COUNT, type ApiStub, type MappedImage } from '../pe/mapper';
 import type { WasmRuntimeImpl } from '../jit/runtime';
 import type { RegName } from '../jit/ir';
+
+/**
+ * Module-level HWND mint: shared across every GuestProcessRunner instance so
+ * two concurrently-running guests never hand out the same window handle. The
+ * GDI bridge registry (guest hwnd -> canvas bridge) is a global map keyed by
+ * hwnd, so colliding handles would route one guest's drawing to another's
+ * canvas (e.g. opening winmine twice made the first window paint the second's
+ * board).
+ */
+let hwndSeq = 0x10000;
 
 // SEH exception dispositions returned by guest handlers (winnt.h).
 const EXCEPTION_CONTINUE_EXECUTION = 0;
@@ -109,6 +120,9 @@ export interface GuestWindowRecord {
   text: string;
   /** Menu bar sections parsed from the window's RT_MENU (empty when none). */
   menu: GuestMenuSection[];
+  /** Client size last reported by MoveWindow (0 when never resized). */
+  width: number;
+  height: number;
 }
 
 export interface GuestProcessResult {
@@ -235,6 +249,14 @@ export interface GuestProcessOptions {
    * provided the dialogs return 0 (FALSE, cancelled) like a no-op host.
    */
   fileDialog?: (kind: 'open' | 'save', opts: FileDialogOptions) => Promise<string | null>;
+  /**
+   * Virtual screen size reported by GetSystemMetrics (SM_CXSCREEN/SM_CYSCREEN
+   * and the SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN pair). GUI guests center
+   * their main window on this; a 0 default (no handler) makes them compute
+   * negative coordinates and place the window off-screen. Defaults to
+   * 1024x768 when not provided.
+   */
+  screenSize?: { width: number; height: number };
 }
 
 /** What comdlg32 told us about the dialog the guest is opening. */
@@ -280,7 +302,15 @@ export class GuestProcessRunner {
   private classWndProcs = new Map<number, number>();
   private windowRecords = new Map<
     number,
-    { wndProc: number; parent: number; className: string; text: string; menu: GuestMenuSection[] }
+    {
+      wndProc: number;
+      parent: number;
+      className: string;
+      text: string;
+      menu: GuestMenuSection[];
+      width: number;
+      height: number;
+    }
   >();
   /** LoadMenuW handle -> parsed RT_MENU sections (Layer 3 menu bar). */
   private menuByHandle = new Map<number, GuestMenuSection[]>();
@@ -314,6 +344,8 @@ export class GuestProcessRunner {
   private onMessageWait?: () => void;
   /** Host-driven file dialog (see GuestProcessOptions.fileDialog). */
   private fileDialog?: (kind: 'open' | 'save', opts: FileDialogOptions) => Promise<string | null>;
+  /** Virtual screen size reported by GetSystemMetrics (see GuestProcessOptions.screenSize). */
+  private screenSize = { width: 1024, height: 768 };
   /**
    * Heap bump allocator installed by installStartupHandlers (see the heap
    * section there). GUI-bridge handlers (SendMessageW EM_GETHANDLE) allocate
@@ -378,6 +410,7 @@ export class GuestProcessRunner {
     this.onTextChanged = options.onTextChanged;
     this.onMessageWait = options.onMessageWait;
     this.fileDialog = options.fileDialog;
+    this.screenSize = options.screenSize ?? { width: 1024, height: 768 };
     this.muiLoaded = false;
     this.muiSource = '';
     this.cwd = options.cwd ?? 'C:\\';
@@ -470,6 +503,8 @@ export class GuestProcessRunner {
         parent: r.parent,
         text: r.text,
         menu: r.menu,
+        width: r.width,
+        height: r.height,
       })),
       paintCommands: [...this.paintCommands],
       muiLoaded: this.muiLoaded,
@@ -3078,27 +3113,45 @@ export class GuestProcessRunner {
       return s;
     };
 
-    // OPENFILENAME (32-bit layout, x86): struct offsets below.
-    // 0x00 lStructSize, 0x04 hwndOwner, 0x08 hInstance, 0x0c lpstrFilter,
-    // 0x10 lpstrCustomFilter, 0x14 nMaxCustFilter, 0x18 nFilterIndex,
-    // 0x1c lpstrFile, 0x20 nMaxFile, 0x24 lpstrFileTitle, 0x28 nMaxFileTitle,
-    // 0x2c lpstrInitialDir, 0x30 lpstrTitle, 0x34 Flags, 0x38 nFileOffset,
-    // 0x3a nFileExtension, 0x3c lpstrDefExt, ... (Vista+ tail ignored).
+    // OPENFILENAME field offsets differ between x86 and x64 because x64 uses
+    // 8-byte pointers (and 8-byte alignment for them):
+    //   x86  lpstrFilter=0x0c lpstrFile=0x1c nMaxFile=0x20 lpstrFileTitle=0x24
+    //        lpstrInitialDir=0x2c lpstrTitle=0x30 nFileOffset=0x38 nFileExtension=0x3a
+    //   x64  lpstrFilter=0x18 lpstrFile=0x30 nMaxFile=0x38 lpstrFileTitle=0x40
+    //        lpstrInitialDir=0x50 lpstrTitle=0x58 nFileOffset=0x64 nFileExtension=0x66
+    // NOTE: this.mode is assigned AFTER installFileDialogs() runs, so the
+    // offset table + pointer reader must be computed per CALL (below), not here.
     const dialogHandler =
       (kind: 'open' | 'save', wide: boolean) =>
       async (ctx: ApiCallContext): Promise<ApiResult> => {
         const ofn = ctx.rawArgs[0] ?? 0;
         if (!ofn) return { returnValue: 0, errorCode: E.NO_ERROR };
-        const lpstrFile = rd32(ofn + 0x1c) >>> 0;
-        const nMaxFile = rd32(ofn + 0x20) >>> 0;
+        // Compute x86/x64 offsets at call time, when this.mode is known.
+        const is64 = this.mode === 'x64';
+        const off = is64
+          ? { lpstrFilter: 0x18, lpstrFile: 0x30, nMaxFile: 0x38, lpstrFileTitle: 0x40, lpstrInitialDir: 0x50, lpstrTitle: 0x58, nFileOffset: 0x64, nFileExtension: 0x66 }
+          : { lpstrFilter: 0x0c, lpstrFile: 0x1c, nMaxFile: 0x20, lpstrFileTitle: 0x24, lpstrInitialDir: 0x2c, lpstrTitle: 0x30, nFileOffset: 0x38, nFileExtension: 0x3a };
+        // Pointer fields are 8 bytes on x64; read the full width there (addresses
+        // are still < 4GB, but the field spans 8 bytes so a 32-bit read is wrong
+        // at the x64 offset). rd32 is fine for the 4-byte DWORDs (nMaxFile, etc.).
+        const rdPtr = (a: number): number => {
+          if (!a) return 0;
+          if (is64) {
+            const b = runtime.readBytes(a >>> 0, 8);
+            return b.byteLength < 8 ? 0 : Number(new DataView(b.buffer, b.byteOffset, b.byteLength).getBigUint64(0, true));
+          }
+          return rd32(a);
+        };
+        const lpstrFile = rdPtr(ofn + off.lpstrFile) >>> 0;
+        const nMaxFile = rd32(ofn + off.nMaxFile) >>> 0;
         if (!lpstrFile || nMaxFile === 0) return { returnValue: 0, errorCode: E.NO_ERROR };
         // Pre-fill: what comdlg32 shows as the default file name comes from
         // lpstrFile's CURRENT contents (notepad puts "Untitled" there before
         // Save As; an existing file's path for Save).
         const current = wide ? readW(lpstrFile, Math.min(nMaxFile * 2, 32768)) : readCStrRaw(lpstrFile, nMaxFile);
-        const initialDir = wide ? readW(rd32(ofn + 0x2c) >>> 0, 4096) : readCStrRaw(rd32(ofn + 0x2c) >>> 0, 4096);
-        const title = wide ? readW(rd32(ofn + 0x30) >>> 0, 1024) : readCStrRaw(rd32(ofn + 0x30) >>> 0, 1024);
-        const filter = wide ? readFilterBlock(rd32(ofn + 0x0c) >>> 0) : readFilterBlockA(rd32(ofn + 0x0c) >>> 0);
+        const initialDir = wide ? readW(rdPtr(ofn + off.lpstrInitialDir) >>> 0, 4096) : readCStrRaw(rdPtr(ofn + off.lpstrInitialDir) >>> 0, 4096);
+        const title = wide ? readW(rdPtr(ofn + off.lpstrTitle) >>> 0, 1024) : readCStrRaw(rdPtr(ofn + off.lpstrTitle) >>> 0, 1024);
+        const filter = wide ? readFilterBlock(rdPtr(ofn + off.lpstrFilter) >>> 0) : readFilterBlockA(rdPtr(ofn + off.lpstrFilter) >>> 0);
         if (!this.fileDialog) {
           // No host provider: cancel the dialog (FALSE), like a no-op comdlg32.
           return { returnValue: 0, errorCode: E.NO_ERROR };
@@ -3136,8 +3189,8 @@ export class GuestProcessRunner {
         const nameStart = lastSep >= 0 ? lastSep + 1 : 0;
         const dot = path.lastIndexOf('.');
         const extStart = dot > nameStart ? dot : path.length;
-        wr16(ofn + 0x38, nameStart);
-        wr16(ofn + 0x3a, extStart);
+        wr16(ofn + off.nFileOffset, nameStart);
+        wr16(ofn + off.nFileExtension, extStart);
         return { returnValue: 1, errorCode: E.NO_ERROR };
       };
     // ANSI (narrow) string readers for the A variants (code page is assumed
@@ -3222,7 +3275,6 @@ export class GuestProcessRunner {
 
     const classNames = new Map<string, number>(); // lowercase class name -> atom
     let classAtom = 0;
-    let hwndSeq = 0x10000;
     const registerClass = (ctx: ApiCallContext): ApiResult => {
       const atom = ++classAtom;
       const lpWndClass = ctx.rawArgs[0] ?? 0;
@@ -3292,6 +3344,8 @@ export class GuestProcessRunner {
         className,
         text: '',
         menu,
+        width: 0,
+        height: 0,
       });
       // Windows delivers WM_CREATE to every window as it is created. Enqueue
       // it for windows that have a real guest window procedure so the message
@@ -3490,10 +3544,78 @@ export class GuestProcessRunner {
     this.interceptor.hook('user32.dll', 'GetWindowLongW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'SetWindowLongW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'DestroyWindow', () => this.ok1());
+    // GetSystemMetrics: report a real virtual screen so GUI guests (winmine
+    // centers its board window) compute positive coordinates. Without it the
+    // default stub returns 0 and the window lands off-screen (x/y negative).
+    this.interceptor.hook('user32.dll', 'GetSystemMetrics', (ctx) => {
+      const { width, height } = this.screenSize;
+      const index = ctx.rawArgs[0] ?? 0;
+      let value = 0;
+      switch (index) {
+        case 0: // SM_CXSCREEN
+        case 78: // SM_CXVIRTUALSCREEN
+          value = width;
+          break;
+        case 1: // SM_CYSCREEN
+        case 79: // SM_CYVIRTUALSCREEN
+          value = height;
+          break;
+        case 4: // SM_CYCAPTION
+        case 54: // SM_CXMENUSIZE
+          value = 19;
+          break;
+        case 5: // SM_CXBORDER
+        case 6: // SM_CYBORDER
+          value = 1;
+          break;
+        case 7: // SM_CXDLGFRAME
+        case 8: // SM_CYDLGFRAME
+        case 32: // SM_CXFRAME
+        case 33: // SM_CYFRAME
+          value = 4;
+          break;
+        case 11: // SM_CXICON
+        case 12: // SM_CYICON
+          value = 32;
+          break;
+        case 13: // SM_CXCURSOR
+        case 14: // SM_CYCURSOR
+          value = 32;
+          break;
+        case 15: // SM_CXSMICON
+        case 16: // SM_CYSMCAPTION
+        case 49: // SM_CXSMICON (alt)
+        case 50: // SM_CYSMCAPTION (alt)
+          value = 16;
+          break;
+        case 45: // SM_CXEDGE
+        case 46: // SM_CYEDGE
+          value = 2;
+          break;
+        case 19: // SM_MOUSEPRESENT
+        case 43: // SM_CMOUSEBUTTONS
+          value = 1;
+          break;
+        case 75: // SM_MOUSEWHEELPRESENT
+          value = 1;
+          break;
+        default:
+          value = 0;
+          break;
+      }
+      return { returnValue: value, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('user32.dll', 'MoveWindow', (ctx) => {
       const hwnd = ctx.rawArgs[0] ?? 0;
+      const w = ctx.rawArgs[3] ?? 0;
+      const h = ctx.rawArgs[4] ?? 0;
       const bRepaint = ctx.rawArgs[5] ?? 0;
-      console.log('[GDI-walk] MoveWindow hwnd=0x%s x=%d y=%d w=%d h=%d repaint=%d', hwnd.toString(16), ctx.rawArgs[1] ?? 0, ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0, ctx.rawArgs[4] ?? 0, bRepaint);
+      const rec = this.windowRecords.get(hwnd);
+      if (rec) {
+        rec.width = w;
+        rec.height = h;
+      }
+      console.log('[GDI-walk] MoveWindow hwnd=0x%s x=%d y=%d w=%d h=%d repaint=%d', hwnd.toString(16), ctx.rawArgs[1] ?? 0, ctx.rawArgs[2] ?? 0, w, h, bRepaint);
       if (bRepaint) {
         this.guiMessageQueue.push({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 });
         if (this.pendingMessageResolve) {
@@ -3842,6 +3964,47 @@ export class GuestProcessRunner {
       }
       return ok1();
     });
+    // SetDIBitsToDevice(hdc, xDest, yDest, w, h, xSrc, ySrc, StartScan, cLines,
+    // lpvBits, lpbmi, ColorUse): winmine blits its 4bpp board tiles through this.
+    // Parse BITMAPINFO + palette + bits from guest memory and forward to the
+    // bridge's pixel path so the board actually reaches the canvas.
+    this.interceptor.hook('gdi32.dll', 'SetDIBitsToDevice', async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const xDest = ctx.rawArgs[1] ?? 0;
+      const yDest = ctx.rawArgs[2] ?? 0;
+      const startScan = ctx.rawArgs[7] ?? 0;
+      const cLines = ctx.rawArgs[8] ?? 0;
+      const lpvBits = ctx.rawArgs[9] ?? 0;
+      const lpbmi = ctx.rawArgs[10] ?? 0;
+      const bridge = bridgeFor(hdc);
+      if (!bridge || !lpbmi || !lpvBits) return ok1();
+      const biSize = peek(lpbmi);
+      if (biSize < 40) return ok1();
+      const biWidth = peek(lpbmi + 4);
+      const biHeight = peek(lpbmi + 8);
+      const biBitCount = peek(lpbmi + 14) & 0xffff;
+      const biCompression = peek(lpbmi + 16);
+      const biClrUsed = peek(lpbmi + 32);
+      if (biCompression !== 0 || biWidth <= 0 || biHeight === 0) return ok1(); // BI_RGB only
+      let palette: Uint32Array | null = null;
+      if (biBitCount <= 8) {
+        const nColors = biClrUsed || 1 << biBitCount;
+        const palBytes = runtime.readBytes(lpbmi + 40, nColors * 4);
+        const view = new DataView(palBytes.buffer, palBytes.byteOffset, palBytes.byteLength);
+        palette = new Uint32Array(nColors);
+        for (let i = 0; i < nColors; i++) {
+          const b = view.getUint8(i * 4);
+          const g = view.getUint8(i * 4 + 1);
+          const r = view.getUint8(i * 4 + 2);
+          palette[i] = (0xff000000 | (r << 16) | (g << 8) | b) >>> 0;
+        }
+      }
+      const stride = Math.floor((biWidth * biBitCount + 31) / 32) * 4;
+      const bits = runtime.readBytes(lpvBits, stride * Math.abs(biHeight));
+      const dib: DibSurface = { width: biWidth, height: biHeight, bitCount: biBitCount, palette, bits };
+      await safe(() => bridge.setDIBitsToDevice(hdc, xDest, yDest, startScan, cLines, dib));
+      return { returnValue: cLines, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('gdi32.dll', 'StretchBlt', async (ctx) => {
       const dest = ctx.rawArgs[0] ?? 0;
       const src = ctx.rawArgs[5] ?? 0;
@@ -4149,6 +4312,8 @@ export class GuestProcessRunner {
       parent: r.parent,
       text: r.text,
       menu: r.menu,
+      width: r.width,
+      height: r.height,
     }));
   }
 
