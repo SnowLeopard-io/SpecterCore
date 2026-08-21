@@ -51,7 +51,7 @@ export class ProcessManagerImpl implements ProcessManager {
       imagePath,
       args: options.args ?? [],
       memoryBytes: options.initialMemoryBytes ?? 0,
-      threadCount: 1,
+      threadCount: 0,
       startTime: Date.now(),
     };
     this.processes.set(pid, { info, threads: new Set() });

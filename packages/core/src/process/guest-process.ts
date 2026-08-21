@@ -3277,7 +3277,7 @@ export class GuestProcessRunner {
    * + shadow space + 8-byte sentinel return), so 64-bit guests (e.g.
    * notepad-x64) render through the same bridge path as x86.
    */
-  private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64', options: GuestProcessOptions = {}): void {
+  private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64', _options: GuestProcessOptions = {}): void {
     const runtime = this.runtime;
     this.guiDispatcher = dispatcher;
     // Bounds-checked 32-bit guest read (never grows the linear memory).
