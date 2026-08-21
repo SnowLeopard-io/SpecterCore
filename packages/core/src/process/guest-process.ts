@@ -2134,7 +2134,6 @@ export class GuestProcessRunner {
     this.interceptor.hook('kernel32.dll', 'com_release', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('kernel32.dll', 'com_method', async (ctx) => {
       const self = (ctx.rawArgs?.[0] ?? 0) >>> 0;
-      console.log('[GDI-walk] com_method self=0x%s comObj=0x%s queue=%d', self.toString(16), comObj.toString(16), this.guiMessageQueue.length);
       // The host object's method is notepad-x64's message-pump entry. Run it so
       // the window actually pumps and renders (see runGuiPump).
       if (self === comObj) {
@@ -3195,8 +3194,10 @@ export class GuestProcessRunner {
    *    stack (stdcall — the callee pops them).
    *
    * The remaining message-loop slots (TranslateAcceleratorW etc.) keep their
-   * sane zero defaults. x64 mode keeps the minimal fake-handle behaviour (the
-   * sentinel-stop infrastructure is only wired up for x86 so far).
+   * sane zero defaults. x64 DispatchMessageW runs the guest WndProc through a
+   * nested Executor using the Microsoft x64 calling convention (rcx/rdx/r8/r9
+   * + shadow space + 8-byte sentinel return), so 64-bit guests (e.g.
+   * notepad-x64) render through the same bridge path as x86.
    */
   private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64', options: GuestProcessOptions = {}): void {
     const runtime = this.runtime;
@@ -3246,6 +3247,26 @@ export class GuestProcessRunner {
     };
     this.interceptor.hook('user32.dll', 'RegisterClassExW', registerClass);
     this.interceptor.hook('user32.dll', 'RegisterClassExA', registerClass);
+    // RegisterClassW/A takes a WNDCLASSW (not EX): lpfnWndProc is at +4 and
+    // lpszClassName at +36 (EX moves them to +8/+40). winmine registers its
+    // board window class through this — returning 0 makes it _cexit and abort.
+    const registerClassW = (ctx: ApiCallContext): ApiResult => {
+      const atom = ++classAtom;
+      const lpWndClass = ctx.rawArgs[0] ?? 0;
+      if (lpWndClass) {
+        this.classWndProcs.set(atom, peek(lpWndClass + 4)); // WNDCLASSW.lpfnWndProc
+        const name = readWStr(peek(lpWndClass + 36)); // WNDCLASSW.lpszClassName
+        if (name) classNames.set(name.toLowerCase(), atom);
+        const menuName = peek(lpWndClass + 32); // WNDCLASSW.lpszMenuName
+        if ((menuName >>> 16) === 0) {
+          const entry = this.menuResourceTable.get(menuName & 0xffff);
+          if (entry) this.classMenus.set(atom, this.parseMenuResource(entry.address, entry.size));
+        }
+      }
+      return { returnValue: atom, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook('user32.dll', 'RegisterClassW', registerClassW);
+    this.interceptor.hook('user32.dll', 'RegisterClassA', registerClassW);
 
     const createWindow = (ctx: ApiCallContext): ApiResult => {
       const hwnd = ++hwndSeq;
@@ -4007,6 +4028,9 @@ export class GuestProcessRunner {
     }
     while (true) {
       if (this.guiMessageQueue.length === 0) {
+        // Signal the host (mirrors GetMessageW) so it can post WM_PAINT /
+        // WM_QUIT and keep the pump alive.
+        this.onMessageWait?.();
         await new Promise<void>((resolve) => { this.pendingMessageResolve = resolve; });
       }
       const m = this.guiMessageQueue.shift()!;

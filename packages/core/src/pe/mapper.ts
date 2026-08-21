@@ -325,6 +325,11 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'charupperw': 1,
   'peekmessagew': 5,
   'getsystemmetrics': 1,
+  // GetMenuItemRect(hWnd, hMenu, uItem, lprcItem) — 4-arg stdcall. MISSING
+  // argCount -> stub ret 0 -> 16 bytes leaked per call; winmine's window
+  // positioner calls it twice and the epilogue `ret` then popped the window
+  // title buffer 0x1005aa0 as the return address.
+  'getmenuitemrect': 4,
   'setwindowlongw': 3,
   'getwindowlongw': 2, // GetWindowLongW(hWnd, nIndex) — 2 args, not 3
   'destroywindow': 1,
@@ -358,6 +363,11 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'sendmessagea': 4,
   'postmessagew': 4,
   'postmessagea': 4,
+  // PlaySoundW(pszSound, hmod, fdwSound) — 3-arg stdcall (winmm). MISSING
+  // argCount -> stub ret 0 -> 12 bytes leaked; winmine's sound helper then
+  // `ret`s from a stack slot holding 0 -> eip=0 -> "entry returned without
+  // ExitProcess" right before CreateWindowExW.
+  'playsoundw': 3,
   'getdc': 1,
   'getwindowdc': 1,
   'releasedc': 2,
