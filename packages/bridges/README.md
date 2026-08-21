@@ -28,4 +28,4 @@ focused on translating to concrete host adapters.
 The current GDI layer is a **software rasterizer + paint-command capture** with a
 no-op `NullGdiBridge` fallback. The "guest window" rendering path at the L6 desktop
 layer still needs bitmap-level host rendering, which is tracked under the graphics
-bridge milestone in [docs/PROGRESS.md](../../docs/PROGRESS.md).
+bridge milestone in the [root README](../../README.md).

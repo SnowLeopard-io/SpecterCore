@@ -3975,7 +3975,16 @@ export class GuestProcessRunner {
       const dest = ctx.rawArgs[0] ?? 0;
       const src = ctx.rawArgs[5] ?? 0;
       const destBridge = bridgeFor(dest);
-      if (destBridge && bridgeFor(src) === destBridge) {
+      const srcBridge = bridgeFor(src);
+      console.log(
+        '[GDI-walk] BitBlt dest=0x%s src=0x%s destBridge=%s srcBridge=%s same=%s',
+        dest.toString(16),
+        src.toString(16),
+        destBridge ? 'Y' : 'N',
+        srcBridge ? 'Y' : 'N',
+        destBridge && srcBridge === destBridge ? 'Y' : 'N',
+      );
+      if (destBridge && srcBridge === destBridge) {
         const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
         await safe(() =>
           destBridge.bitBlt(
@@ -4063,6 +4072,7 @@ export class GuestProcessRunner {
     this.interceptor.hook('gdi32.dll', 'CreateCompatibleDC', async (ctx) => {
       const src = ctx.rawArgs[0] ?? 0;
       const bridge = bridgeFor(src);
+      console.log('[GDI-walk] CreateCompatibleDC src=0x%s bridge=%s', src.toString(16), bridge ? 'Y' : 'N');
       if (bridge) {
         const hdc = await bridge.createCompatibleDC(src);
         bridgeByHdc.set(hdc, bridge);

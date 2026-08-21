@@ -72,7 +72,7 @@ Before opening a PR:
 
 1. Run `pnpm lint` and fix all errors.
 2. Run `pnpm typecheck` and `pnpm test` — all green.
-3. Update the milestone table in `docs/PROGRESS.md` if your change moves a milestone forward.
+3. Update the milestone table in `README.md` if your change moves a milestone forward.
 4. Keep PRs focused on a single layer or feature.
 
 ## Branching and CI

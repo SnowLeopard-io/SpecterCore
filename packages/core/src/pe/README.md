@@ -14,7 +14,7 @@ JIT runs against.
 
 `mapper.ts` owns `X86_API_ARG_COUNT`, the table that tells the trap-stub machinery
 how many **stack slots** a stdcall callee pops (`ret N`). Getting an entry wrong is a
-classic failure mode documented in `docs/PROGRESS.md`:
+classic failure mode documented in the root [README](../README.md):
 
 - Under-counting → stub `ret 0` while the caller expects `ret N` → args left on the
   stack → the caller's epilogue `pop edi/esi/ebx` reads shifted slots → garbage

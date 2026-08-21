@@ -34,3 +34,14 @@ and the expected guest output.
 `guest-process.ts` seeds fake handles for `GetStdHandle` (fd 0/1/2 → `STD_INPUT/OUTPUT
 /ERROR_HANDLE`), `_o__get_osfhandle`/`GetFileType` for the CRT, and an interactive
 stdin/stdout bridge so command-line tools like `cmd.exe` can read/write console I/O.
+
+## x64 delay-load fix (`ResolveDelayLoadedAPI`)
+
+For x64, the delay-load thunk table is **8-byte** per entry. The ordinal marker is
+`IMAGE_ORDINAL_FLAG64` (bit 63 of the full 8-byte thunk-data), not the low dword the
+32-bit path reads. The fix reads the full 64-bit thunk-data (`rd64`), detects the flag,
+and resolves by ordinal (`#${entry & 0xffff}`); the resolved pointer is written as a
+full 8 bytes (`writeInt32(thunk, stub)` + `writeInt32(thunk+4, 0)`). Without this,
+ordinal-only imports (e.g. `cmd.exe` delay-loading `Wldp.dll` by `#10`/`#2`) are mistaken
+for tiny name RVAs, the proc name comes back empty, `ResolveDelayLoadedAPI` returns 0,
+and CRT init aborts.

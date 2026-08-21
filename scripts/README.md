@@ -54,4 +54,4 @@ throwaway harnesses; a few are referenced by the handover log.
 
 > Note: when debugging `cmd.exe`, the bare `cmd.exe` filename is blocked by bash's
 > safety filter — copy it to `cguest.exe` (same guest image) as described in
-> `docs/PROGRESS.md`.
+> the root `README.md`.

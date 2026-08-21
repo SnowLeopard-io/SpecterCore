@@ -101,7 +101,7 @@ Design-doc section 7.1 metrics are pre-placed in the contract layer:
 
 - P0: full skeleton runnable — `pnpm test/build/lint` pass.
 - P1: PE loading + x86 JIT — delivered (see the table in the [README](../README.md)).
-- Ongoing: see the [development/handover log](PROGRESS.md).
+- Ongoing: see the milestone table in the [README](../README.md).
 
 ## Related commands
 

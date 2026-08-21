@@ -25,6 +25,14 @@ const L_ORIG = 5;
 const L_I64 = 6; // i64 scratch for mul/div + 64-bit results
 const L_I64A = 7; // i64 operand A (64-bit arithmetic)
 const L_I64B = 8; // i64 operand B (64-bit arithmetic)
+const L_I64HI = 9; // i64: high 64 bits of a 128-bit product
+const L_I64C = 10; // i64: mul split temp (aL / lo)
+const L_I64D = 11; // i64: mul split temp (aH)
+const L_I64E = 12; // i64: mul split temp (bL)
+const L_I64F = 13; // i64: mul split temp (bH)
+const L_I64G = 14; // i64: mul split temp (t0 = aL*bL)
+const L_I64H = 15; // i64: mul split temp (t1 = aL*bH)
+const L_I64I = 16; // i64: mul split temp (t2 = aH*bL)
 
 /** Active decode mode; set at the start of each block compile. */
 let MODE: 'x86' | 'x64' = 'x86';
@@ -42,6 +50,14 @@ export function buildBlockFunction(instructions: readonly { inst: Instruction; n
   fn.declareLocal('i64'); // L_I64
   fn.declareLocal('i64'); // L_I64A
   fn.declareLocal('i64'); // L_I64B
+  fn.declareLocal('i64'); // L_I64HI
+  fn.declareLocal('i64'); // L_I64C
+  fn.declareLocal('i64'); // L_I64D
+  fn.declareLocal('i64'); // L_I64E
+  fn.declareLocal('i64'); // L_I64F
+  fn.declareLocal('i64'); // L_I64G
+  fn.declareLocal('i64'); // L_I64H
+  fn.declareLocal('i64'); // L_I64I
   for (const di of instructions) emitInstruction(fn, di.inst, di.nextAddress);
   if (!opts.terminated) {
     // straight-line block: advance EIP past the block so the dispatcher continues
@@ -2601,24 +2617,143 @@ function emitMul64(fn: WasmFunction, inst: Instruction): void {
     storeFlags(fn);
     return;
   }
+  // Single-operand forms: the implicit multiplier is RAX.
+  //   MUL  r/m64 : RDX:RAX = RAX * r/m64  (unsigned, 128-bit product)
+  //   IMUL r/m64 : RAX     = RAX * r/m64  (signed, low 64; RDX = sign-ext)
+  // The decoder emits { op:'mul'/'imul', dst: r/m64 } with no src/target, so we
+  // must read RAX ourselves and write RDX:RAX (not dst).
+  fn.i32Const(regAddr('rax'));
+  fn.i64Load();
+  fn.localSet(L_I64A); // a
+  pushOperand(fn, inst.dst!);
+  fn.localSet(L_I64B); // b
+
   if (!signed) {
-    // MUL r/m64 — RDX:RAX = RAX * r/m64 needs a 128-bit product; not yet
-    fn.unreachable();
+    // low 64 bits of the product (RAX = a*b, truncated to 64 bits)
+    fn.localGet(L_I64A);
+    fn.localGet(L_I64B);
+    fn.i64Mul();
+    fn.localSet(L_I64);
+    // high 64 bits via 32-bit half products of (aH:aL) * (bH:bL):
+    //   product = aL*bL + (aL*bH + aH*bL)<<32 + aH*bH<<64
+    fn.localGet(L_I64A);
+    fn.i64Const(0xffffffff);
+    fn.i64And();
+    fn.localSet(L_I64C); // aL
+    fn.localGet(L_I64A);
+    fn.i64Const(32);
+    fn.i64ShrU();
+    fn.localSet(L_I64D); // aH
+    fn.localGet(L_I64B);
+    fn.i64Const(0xffffffff);
+    fn.i64And();
+    fn.localSet(L_I64E); // bL
+    fn.localGet(L_I64B);
+    fn.i64Const(32);
+    fn.i64ShrU();
+    fn.localSet(L_I64F); // bH
+    fn.localGet(L_I64C);
+    fn.localGet(L_I64E);
+    fn.i64Mul();
+    fn.localSet(L_I64G); // t0 = aL*bL
+    fn.localGet(L_I64C);
+    fn.localGet(L_I64F);
+    fn.i64Mul();
+    fn.localSet(L_I64H); // t1 = aL*bH
+    fn.localGet(L_I64D);
+    fn.localGet(L_I64E);
+    fn.i64Mul();
+    fn.localSet(L_I64I); // t2 = aH*bL
+    // lo = t0 & 0xffffffff
+    fn.localGet(L_I64G);
+    fn.i64Const(0xffffffff);
+    fn.i64And();
+    fn.localSet(L_I64C); // lo (reuses aL slot)
+    // mid = t1 + t2 + (t0 >>> 32)
+    fn.localGet(L_I64H);
+    fn.localGet(L_I64I);
+    fn.i64Add();
+    fn.localGet(L_I64G);
+    fn.i64Const(32);
+    fn.i64ShrU();
+    fn.i64Add(); // mid
+    fn.localSet(L_I64H); // mid
+    fn.localGet(L_I64H);
+    fn.i64Const(0xffffffff);
+    fn.i64And();
+    fn.localSet(L_I64E); // mid_lo
+    fn.localGet(L_I64H);
+    fn.i64Const(32);
+    fn.i64ShrU();
+    fn.localSet(L_I64F); // mid_hi
+    // hi = aH*bH + mid_hi
+    fn.localGet(L_I64D);
+    fn.localGet(L_I64F);
+    fn.i64Mul(); // t3 = aH*bH
+    fn.localGet(L_I64F); // mid_hi
+    fn.i64Add();
+    fn.localSet(L_I64HI); // high 64 bits
+    // low64 = (mid_lo << 32) | lo
+    fn.localGet(L_I64E);
+    fn.i64Const(32);
+    fn.i64Shl();
+    fn.localGet(L_I64C);
+    fn.i64Const(0xffffffff);
+    fn.i64And();
+    fn.i64Or();
+    fn.localSet(L_I64); // low 64 bits
+    // RAX = low, RDX = high
+    fn.i32Const(regAddr('rax'));
+    fn.localGet(L_I64);
+    fn.i64Store();
+    fn.i32Const(regAddr('rdx'));
+    fn.localGet(L_I64HI);
+    fn.i64Store();
+    // CF = OF = (high != 0)
+    beginFlags(fn);
+    fn.localGet(L_I64HI);
+    fn.i64Eqz();
+    fn.i32Eqz();
+    orFlag(fn, 0);
+    fn.localGet(L_I64HI);
+    fn.i64Eqz();
+    fn.i32Eqz();
+    orFlag(fn, 11);
+    storeFlags(fn);
     return;
   }
-  // IMUL r64, r/m64
-  pushOperand(fn, inst.dst!);
-  fn.localSet(L_I64A);
-  pushOperand(fn, inst.src!);
-  fn.localSet(L_I64B);
+
+  // signed IMUL r/m64: RAX = RAX * r/m64 (low 64); RDX = sign-extend(low)
   fn.localGet(L_I64A);
   fn.localGet(L_I64B);
   fn.i64Mul();
   fn.localSet(L_I64);
+  fn.i32Const(regAddr('rax'));
   fn.localGet(L_I64);
-  storeOperand(fn, inst.dst!);
+  fn.i64Store();
+  fn.localGet(L_I64);
+  fn.i64Const(63);
+  fn.i64ShrS();
+  fn.localSet(L_I64HI); // sign-extended high
+  fn.i32Const(regAddr('rdx'));
+  fn.localGet(L_I64HI);
+  fn.i64Store();
+  // OF = CF = (RDX != sign-extend(RAX))
   beginFlags(fn);
-  emitZspFlags64(fn);
+  fn.localGet(L_I64HI);
+  fn.localGet(L_I64);
+  fn.i64Const(63);
+  fn.i64ShrS();
+  fn.i64Ne();
+  fn.i32WrapI64();
+  orFlag(fn, 0);
+  fn.localGet(L_I64HI);
+  fn.localGet(L_I64);
+  fn.i64Const(63);
+  fn.i64ShrS();
+  fn.i64Ne();
+  fn.i32WrapI64();
+  orFlag(fn, 11);
   storeFlags(fn);
 }
 

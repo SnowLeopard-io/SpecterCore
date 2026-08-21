@@ -130,6 +130,17 @@ async function main(): Promise<void> {
       if (e instanceof UnsupportedError) console.error(`[diag]   unsupported: ${e.message}`);
       else console.error(`[diag]   decode err: ${String(e)}`);
     }
+    const raw = runtime.readBytes(0x1000, 136);
+    const names = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];
+    const parts: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      const v = Number(BigInt.asIntN(64, new DataView(raw.buffer, raw.byteOffset + i * 8).getBigUint64(0, true)));
+      parts.push(`${names[i]}=0x${(v >>> 0).toString(16)}`);
+    }
+    parts.push(`rip=0x${(result.eip ?? 0).toString(16)}`);
+    console.error(`[diag] regs: ${parts.join(' ')}`);
+    const MEM = runtime.memory.buffer.byteLength;
+    console.error(`[diag] memory bytes=${MEM} (0x${MEM.toString(16)})`);
   }
   if (result.error) console.error(`[diag] error: ${String(result.error)}`);
   const od = new TextDecoder('utf-8').decode(result.output ?? new Uint8Array(0));
