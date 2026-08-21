@@ -2077,6 +2077,65 @@ export class GuestProcessRunner {
       if (out) this.runtime.writeInt32(out, 0);
       return { returnValue: 0, errorCode: E.NO_ERROR };
     });
+    // ------------------------------------------------------------------
+    // WinUI/THF host object: notepad-x64 bootstraps its message pump through
+    //   CoCreateInstance({0B35F8B5-4805-48B1-A6EE-88BD00B4A5E7}, ...)
+    // which is the Windows App SDK / WinUI host class. With no COM servers we
+    // returned REGDB_E_CLASSNOTREG, and the 64-bit WinMain treats that as fatal
+    // (it never calls GetMessageW — its loop lives inside the framework).
+    // Mint a minimal COM object (IUnknown + generic method stubs) so WinMain
+    // proceeds. This is the first step of "emulate WinUI/XAML": enough object
+    // surface for notepad to drive its own host window; richer XAML content
+    // rendering is out of scope here.
+    if (pe.is64) {
+    const notepadHostClsid = [0x0b, 0x35, 0xf8, 0xb5, 0x48, 0x05, 0xb1, 0x48, 0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7];
+    const comSlotCount = pe.is64 ? 64 : 32;
+    const comVt = bumpAlloc(pe.is64 ? comSlotCount * 8 : comSlotCount * 4);
+    const comObj = bumpAlloc(0x10);
+    {
+      const slotName = (i: number): string =>
+        i === 0 ? 'com_qi' : i === 1 ? 'com_addref' : i === 2 ? 'com_release' : 'com_method';
+      for (let i = 0; i < comSlotCount; i++) {
+        const stub = allocDynamicStub(slotName(i));
+        const addr = comVt + i * (pe.is64 ? 8 : 4);
+        this.runtime.writeInt32(addr, stub | 0);
+        if (pe.is64) this.runtime.writeInt32(addr + 4, 0);
+      }
+      this.runtime.writeInt32(comObj, comVt | 0);
+      if (pe.is64) this.runtime.writeInt32(comObj + 4, 0);
+    }
+    const clsidMatches = (p: number): boolean => {
+      if (!p) return false;
+      const b = this.runtime.readBytes(p, 16);
+      for (let i = 0; i < 16; i++) if (b[i] !== notepadHostClsid[i]) return false;
+      return true;
+    };
+    this.interceptor.hook('ole32.dll', 'com_qi', (ctx) => {
+      const out = (ctx.rawArgs?.[2] ?? 0) >>> 0;
+      const self = (ctx.rawArgs?.[0] ?? 0) >>> 0;
+      if (out) {
+        this.runtime.writeInt32(out, self | 0);
+        if (pe.is64) this.runtime.writeInt32(out + 4, 0);
+      }
+      return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
+    });
+    this.interceptor.hook('ole32.dll', 'com_addref', () => ({ returnValue: 1, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('ole32.dll', 'com_release', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('ole32.dll', 'com_method', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('ole32.dll', 'CoCreateInstance', (ctx) => {
+      const rclsid = (ctx.rawArgs?.[0] ?? 0) >>> 0;
+      const ppv = (ctx.rawArgs?.[4] ?? 0) >>> 0;
+      if (clsidMatches(rclsid)) {
+        if (ppv) {
+          this.runtime.writeInt32(ppv, comObj | 0);
+          if (pe.is64) this.runtime.writeInt32(ppv + 4, 0);
+        }
+        return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
+      }
+      return { returnValue: 0x80040154, errorCode: E.NO_ERROR }; // REGDB_E_CLASSNOTREG
+    });
+    }
+
     this.interceptor.hook('kernel32.dll', 'RoGetMatchingRestrictedErrorInfo', failHr);
     this.interceptor.hook('kernel32.dll', 'SetRestrictedErrorInfo', failHr);
     // notepad delay-loads SHGetKnownFolderPath (resolved as kernel32 by

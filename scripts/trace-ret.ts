@@ -70,16 +70,38 @@ async function main(): Promise<void> {
 
   const events: string[] = [];
   const origDispatch = interceptor.dispatch.bind(interceptor);
+  const safeReadStr = (h: number): string => {
+    try { return readHstr(h); } catch { return '(err)'; }
+  };
+  const guid = (p: number): string => {
+    try {
+      if (!p) return '(null)';
+      const b = runtime.readBytes(p, 16);
+      const h = (n: number) => (n ?? 0).toString(16).padStart(2, '0');
+      const g = (off: number, len: number) => {
+        let s = '';
+        for (let i = off; i < off + len; i++) s += h(b[i]);
+        return s;
+      };
+      return `{${g(0, 4)}-${g(4, 2)}-${g(6, 2)}-${g(8, 2)}${g(10, 2)}-${g(12, 6)}}`;
+    } catch { return '(err)'; }
+  };
   interceptor.dispatch = async (ctx: { module: string; proc: string; rawArgs?: number[] }) => {
     const name = `${ctx.module}!${ctx.proc}`;
     const res = (await origDispatch(ctx)) as { returnValue: number; errorCode: number };
-    const rv = res.returnValue >>> 0;
-    const failed = (rv & 0x80000000) !== 0 || (res.errorCode ?? 0) !== 0;
+    const rv = (res?.returnValue ?? 0) >>> 0;
+    const failed = (rv & 0x80000000) !== 0 || (res?.errorCode ?? 0) !== 0;
     let extra = '';
-    if (String(ctx.proc).toLowerCase() === 'rogetactivationfactory') {
-      extra = ` class="${readHstr((ctx.rawArgs?.[0] ?? 0) >>> 0)}"`;
-    }
-    events.push(`${failed ? 'FAIL ' : 'ok   '} ${name}${extra} rv=0x${rv.toString(16)} ec=${res.errorCode ?? 0}`);
+    const proc = String(ctx.proc).toLowerCase();
+    try {
+      if (proc === 'rogetactivationfactory') extra = ` class="${safeReadStr((ctx.rawArgs?.[0] ?? 0) >>> 0)}"`;
+      if (proc === 'cocreateinstance') extra = ` rclsid=${guid((ctx.rawArgs?.[0] ?? 0) >>> 0)} riid=${guid((ctx.rawArgs?.[1] ?? 0) >>> 0)}`;
+      if (proc.startsWith('com_')) {
+        const a = (ctx.rawArgs ?? []).map((x) => '0x' + ((x ?? 0) >>> 0).toString(16)).slice(0, 4);
+        extra = ` this=0x${(ctx.rawArgs?.[0] ?? 0).toString(16)} args=[${a.join(',')}]`;
+      }
+    } catch { extra = ' (meta-err)'; }
+    events.push(`${failed ? 'FAIL ' : 'ok   '} ${name}${extra} rv=0x${rv.toString(16)} ec=${res?.errorCode ?? 0}`);
     if (events.length > 200) events.shift();
     return res;
   };

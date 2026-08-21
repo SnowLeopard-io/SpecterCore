@@ -246,9 +246,37 @@ fothk   VA=0x28000 vsize=0x1000  raw=0x28000   ← 仅 0x28010 有代码，其�
 
 ### 下一步
 1. **桌面集成**：dev server 跑 `windows-notepad-x64`，确认窗口真的渲染（此前卡死点是 PMP vtable，现已修复，应能到消息循环）。
-2. 若窗口一闪而过：查 notepad 排空队列后为何退出（GetMessageW 返回 0 的触发者 / WinMain 退出分支），决定是否需在 interactive 空队列时让 GetMessageW 阻塞等待 postMessage。
+2. 若窗口一闪而过：查 notepad 排空队列后为何退出（GetMessageZ 返回 0 的触发者 / WinMain 退出分支），决定是否需在 interactive 空队列时让 GetMessageW 阻塞等待 postMessage。
 3. 清理：一次性探针脚本（fault*.ts、imports*.ts、loadercheck.ts、scan.ts、comctl.ts、datadir.ts、slotregion.ts、targets.ts、delay.ts）可留作复现；executor.ts 的 SPECTER_TRACE_EXEC 诊断日志可删。
 4. 收尾：跑 cmd-x64 桌面/控制台集成 → typecheck + vitest + 更新本文档。
+
+---
+
+## 2026-08-21 会话更新 4：notepad-x64 渲染阻断点精确定位（WinUI/THF 宿主）
+
+> 用户要求"尝试模拟 WinUI/XAML"。实测定位到**唯一阻断点**并做了最小尝试，结论是：notepad-x64 的可见内容由 WinUI/XAML 框架绘制，而该框架的消息泵在 `CoCreateInstance` 出来的宿主 COM 对象的方法内部——不重新实现 WinAppSDK 无法渲染。但 JIT 启动/窗口创建已完全可用。
+
+### 诊断证据
+- 用 `scripts/trace-ret.ts`（包裹 `interceptor.dispatch` 并 `await`，之前误把 Promise 当结果导致 rv 全 0，已修）逐调用记录返回值。
+- 32 位 `notepad.exe`：`CoCreateInstance` **同样返回 REGDB_E_CLASSNOTREG**，但**忽略失败**直接跑 `GetMessageW` 消息循环 → GDI 桥接渲染正常（probe 显示 `flush dc=1` + `GetMessageW blocked`）。
+- 64 位 `notepad-x64.exe`：`CoCreateInstance({0B35F8B5-4805-48B1-A6EE-88BD00B4A5E7}, riid=NULL)` 失败 → **WinMain 视为致命，从不调用 GetMessageW**（尾部无 GetMessageW）→ 创建窗口 `0x10001` 后直接返回退出。
+- 该 CLSID 是 **WinAppSDK / WinUI 宿主类**（THF 宿主）。notepad 的 WinMain 消息泵活在该 COM 对象的某个方法内部（框架驱动），不是直接的 `GetMessageW`。
+
+### 已做的最小尝试
+- `guest-process.ts`（installStartupHandlers 内，PMP 块之后）新增：为上述 CLSID 伪造一个最小 COM 对象（IUnknown + 通用方法 stub，`com_qi`/`com_addref`/`com_release`/`com_method`），`CoCreateInstance` 对该 CLSID 返回 S_OK 并写入 ppv。
+- 结果：`CoCreateInstance` 现在返回 S_OK，notepad 对该对象**只调用了 1 次 `com_method`**（`this=0x2000f98`，参数 `[this, 0x10002, 0xfffffffc, 0x0]`，0x10002 是第二个窗口句柄）。但 `com_method` 的 S_OK 桩立即返回 → WinMain 继续 `return` → 仍退出（waits=0，无 GDI 绘制）。
+- **结论**：那个 `com_method` 就是框架的"运行/承载窗口"方法，其内部才会泵消息循环、把 WM_PAINT 派发给 notepad 的 Win32 `WndProc`（画边框/菜单/状态栏）。桩返回 S_OK 不会泵消息 → notepad 不进循环。
+
+### 工作量结论
+- **真正渲染 notepad-x64 的 XAML 内容** = 重新实现 Windows App SDK 的 XAML 宿主（含 DWM/窗口承载、XAML 解析与排版、输入/焦点、消息泵语义）→ 远超增量修复范围。
+- **折中可得的最小收益**：让那个宿主方法的桩**自行实现一段消息泵**（拉 `guiMessageQueue` → 调 DispatchMessageW 派发到 WndProc），可让 notepad 的 Win32 `WndProc` 跑起来、画出**窗口边框/菜单/状态栏**（GDI 桥接能渲染），但中央文本编辑区是 XAML `TextBox`，仍是空白。属"有窗口框架、无内容"。
+- **可立即验证的对照**：`apps/web/public/win/notepad.exe`（32 位）是经典 Win32 GDI 应用，已确认能经 GDI 桥接正常渲染（进消息循环、flush）。
+
+### 下一步（待用户决策）
+1. **(A)** 实现宿主方法的消息泵桩 → notepad-x64 显示**空白窗口框架**（边框/菜单/状态栏可见，编辑区空白）。
+2. **(B)** 桌面 Notepad 入口改指 32 位 `notepad.exe` → 立即可渲染完整记事本（GDI 路径已验证）。
+3. **(C)** 接受 x64 仅作"能启动、不卡死"的 JIT 验证目标，渲染走 32 位。
+4. 清理探针脚本：`trace-ret.ts`、`probe-render.ts`（及早期 fault*/imports*/loadercheck 等）可留作复现。
 
 ### 遗留观察（未解决，低优先）
 - 槽 rva 0x29890 无任何导入描述符覆盖，但早期 trace 显示 `[0x1029890]` 跳到 stub 0x200350——runner 路径里应另有 patch（独立 mapPeImage 的 loadercheck 不显示）。当前不致命。
