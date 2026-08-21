@@ -3707,6 +3707,14 @@ export class GuestProcessRunner {
     const curBrushByHdc = new Map<number, Color>();
     const curPenByHdc = new Map<number, Color>();
     const penPosByHdc = new Map<number, { x: number; y: number }>();
+    /**
+     * Software DIB fallback: DCs created before the host bridge is registered
+     * (winmine loads its 16 board tiles in WinMain, before the first
+     * GetMessageW → onMessageWait wires the bridge) have no bridge surface.
+     * SetDIBitsToDevice stores their pixels here so a later BitBlt from that
+     * DC can still reach the real window bridge.
+     */
+    const softDibByHdc = new Map<number, DibSurface>();
     /** Swallow drawing errors (e.g. a guest passing a stale HDC). */
     const safe = async (fn: () => Promise<unknown>): Promise<void> => {
       try {
@@ -3976,16 +3984,8 @@ export class GuestProcessRunner {
       const src = ctx.rawArgs[5] ?? 0;
       const destBridge = bridgeFor(dest);
       const srcBridge = bridgeFor(src);
-      console.log(
-        '[GDI-walk] BitBlt dest=0x%s src=0x%s destBridge=%s srcBridge=%s same=%s',
-        dest.toString(16),
-        src.toString(16),
-        destBridge ? 'Y' : 'N',
-        srcBridge ? 'Y' : 'N',
-        destBridge && srcBridge === destBridge ? 'Y' : 'N',
-      );
+      const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
       if (destBridge && srcBridge === destBridge) {
-        const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
         await safe(() =>
           destBridge.bitBlt(
             dest,
@@ -3995,6 +3995,23 @@ export class GuestProcessRunner {
             ctx.rawArgs[8] ?? 0,
           ),
         );
+      } else if (destBridge && !srcBridge) {
+        // Source DC was created before the bridge existed (winmine's board
+        // tiles): replay its stored DIB pixels onto the real window bridge.
+        const dib = softDibByHdc.get(src);
+        if (dib) {
+          const sx = ctx.rawArgs[6] ?? 0;
+          const sy = ctx.rawArgs[7] ?? 0;
+          await safe(() =>
+            destBridge.setDIBitsToDevice(dest, rc.x, rc.y, {
+              ...dib,
+              xSrc: dib.xSrc + sx,
+              ySrc: dib.ySrc + sy,
+              drawWidth: rc.w,
+              drawHeight: rc.h,
+            }),
+          );
+        }
       }
       return ok1();
     });
@@ -4015,7 +4032,7 @@ export class GuestProcessRunner {
       const lpvBits = ctx.rawArgs[9] ?? 0;
       const lpbmi = ctx.rawArgs[10] ?? 0;
       const bridge = bridgeFor(hdc);
-      if (!bridge || !lpbmi || !lpvBits) return ok1();
+      if (!lpbmi || !lpvBits) return ok1();
       const biSize = peek(lpbmi);
       if (biSize < 40) return ok1();
       const biWidth = peek(lpbmi + 4);
@@ -4055,7 +4072,12 @@ export class GuestProcessRunner {
         startScan,
         cLines,
       };
-      await safe(() => bridge.setDIBitsToDevice(hdc, xDest, yDest, dib));
+      if (bridge) {
+        await safe(() => bridge.setDIBitsToDevice(hdc, xDest, yDest, dib));
+      } else {
+        // Pre-bridge DC: keep the pixels so a later BitBlt can replay them.
+        softDibByHdc.set(hdc, dib);
+      }
       return { returnValue: cLines, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('gdi32.dll', 'StretchBlt', async (ctx) => {
