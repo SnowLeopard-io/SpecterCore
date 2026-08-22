@@ -12,6 +12,10 @@ See the [architecture notes](docs/ARCHITECTURE.md) for the full spec.
 
 ![Windows](docs/Windows.png)
 
+![Minesweeper](docs/minesweeper.png)
+
+> Minesweeper (`winmine.exe`, 32-bit PE) running through the x86 → WASM JIT, GDI bridge, and the L6 desktop shell. The board is fully interactive — click to reveal cells, right-click to flag mines.
+
 ---
 
 ## Table of Contents
@@ -330,7 +334,7 @@ The test suite covers the PE loader round-trip, the x86 decoder against hand-cra
 |-------|------|--------|
 | P0 | Infrastructure + six-layer skeleton | ✅ Delivered |
 | P1 | PE loading + x86 JIT translation | ✅ Delivered: PE32 **and PE32+ (x64)** load + map + IAT trap-stub rewrite + x86→WASM basic-block JIT + executor + trap→API interceptor end-to-end. `pnpm run:exe` runs a PE headless; the L6 desktop launches real `notepad.exe` (x86 **and** x64 PE32+) including the Save/Open file-dialog chain. |
-| P2 | Real GUI/console programs run in the browser | ✅ **`notepad.exe` (x86 and x64 PE32+) runs in the desktop**: its WndProc / GUI window tree renders through the GDI bridge, and the Save/Open chain works via the `comdlg32` file-dialog bridge (`GetOpenFileNameW` / `GetSaveFileNameW` → host file picker → `host.fs` `createFile` / `writeFile` / `readFile`). 🟡 **`cmd.exe` (x64 PE32+) is being brought up**: the guest boots through CRT init and the delay-load (`Wldp.dll` by ordinal) and `MUL r/m64` paths now work; remaining gap is the x64 stack/guest-address layout (a high RSP triggers an out-of-range linear-memory access that needs the JIT's memory model widened for 64-bit addresses). |
+| P2 | Real GUI/console programs run in the browser | ✅ **`notepad.exe` (x86 and x64 PE32+) runs in the desktop**: its WndProc / GUI window tree renders through the GDI bridge, and the Save/Open chain works via the `comdlg32` file-dialog bridge (`GetOpenFileNameW` / `GetSaveFileNameW` → host file picker → `host.fs` `createFile` / `writeFile` / `readFile`). ✅ **`winmine.exe` (Minesweeper, 32-bit PE) runs in the desktop**: the classic Minesweeper board renders through the GDI software rasterizer (`SetDIBitsToDevice` / `BitBlt` / `TextOut`), and the game is fully playable (click to reveal, right-click to flag). 🟡 **`cmd.exe` (x64 PE32+) is being brought up**: the guest boots through CRT init and the delay-load (`Wldp.dll` by ordinal) and `MUL r/m64` paths now work; remaining gap is the x64 stack/guest-address layout (a high RSP triggers an out-of-range linear-memory access that needs the JIT's memory model widened for 64-bit addresses). |
 | P3 | Graphics bridge + L6 desktop running notepad.exe with full paint | ✅ `notepad` (x86 + x64) paints through the GDI bridge into the L6 guest-window canvas; the x64 path runs the guest `WndProc` through a nested x64 executor (`rcx/rdx/r8/r9` + shadow space + 8-byte sentinel return). Audio / WebGPU 3D / USB passthrough remain. |
 | P4–P7 | Audio / 3D (WebGPU) / USB passthrough / perf targets | ⬜ |
 
