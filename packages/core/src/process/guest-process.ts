@@ -3437,14 +3437,16 @@ export class GuestProcessRunner {
       const msg = ctx.rawArgs[1] ?? 0;
       console.log('[GDI-walk] DefWindowProcW hwnd=0x%s msg=0x%s wParam=%d lParam=%d', hwnd.toString(16), msg.toString(16), ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0);
       if (msg === 0x000f /* WM_PAINT */) {
-        // Validate the window by creating a DC on the bridge and flushing.
-        const bridge = this.gdiBridgeProvider?.(hwnd) ?? null;
-        if (bridge) {
-          const hdc = await bridge.createDC('DISPLAY');
-          await safe(() => bridge.flush(hdc));
-          await safe(() => bridge.deleteDC(hdc));
-        }
+        // Do NOT flush here — the guest's own WndProc handles WM_PAINT
+        // (BeginPaint / EndPaint with the bridge). Flushing a blank DC
+        // would clear the canvas.
         return { returnValue: 0, errorCode: E.NO_ERROR };
+      }
+      if (msg === 0x0014 /* WM_ERASEBKGND */) {
+        // The guest calls DefWindowProcW for WM_ERASEBKGND when it doesn't
+        // handle it itself. Return 1 (erased) — the guest's WM_PAINT handler
+        // will draw the correct background (board tiles + 3D border).
+        return { returnValue: 1, errorCode: E.NO_ERROR };
       }
       return { returnValue: 0, errorCode: E.NO_ERROR };
     });
@@ -3630,6 +3632,99 @@ export class GuestProcessRunner {
       }
       return { returnValue: value, errorCode: E.NO_ERROR };
     });
+    // GetSysColor(index): return the classic Windows system color for the
+    // given index. Minesweeper uses this for the 3D board border rendering
+    // (COLOR_BTNFACE, COLOR_BTNSHADOW, COLOR_BTNHIGHLIGHT).
+    const sysColors: Record<number, number> = {
+      0: 0x00808080,   // COLOR_SCROLLBAR
+      1: 0x00c0c0c0,   // COLOR_BACKGROUND / COLOR_DESKTOP
+      2: 0x00c0c0c0,   // COLOR_ACTIVECAPTION
+      3: 0x00ffffff,   // COLOR_INACTIVECAPTION
+      4: 0x00000080,   // COLOR_MENU
+      5: 0x00ffffff,   // COLOR_WINDOW
+      6: 0x00000000,   // COLOR_WINDOWFRAME
+      7: 0x00000000,   // COLOR_MENUTEXT
+      8: 0x00ffffff,   // COLOR_WINDOWTEXT
+      9: 0x00c0c0c0,   // COLOR_CAPTIONTEXT
+      10: 0x00000000,  // COLOR_ACTIVEBORDER
+      11: 0x00808080,  // COLOR_INACTIVEBORDER
+      12: 0x00ffffff,  // COLOR_APPWORKSPACE
+      13: 0x00000000,  // COLOR_HIGHLIGHT
+      14: 0x00ffffff,  // COLOR_HIGHLIGHTTEXT
+      15: 0x00c0c0c0,  // COLOR_BTNFACE (3D face)
+      16: 0x00808080,  // COLOR_BTNSHADOW
+      17: 0x00c0c0c0,  // COLOR_GRAYTEXT
+      18: 0x00000000,  // COLOR_BTNTEXT
+      19: 0x00ffffff,  // COLOR_INACTIVECAPTIONTEXT
+      20: 0x00ffffff,  // COLOR_BTNHIGHLIGHT
+      21: 0x00808080,  // COLOR_BTNDKSHADOW (3D dark shadow)
+      22: 0x00c0c0c0,  // COLOR_BTNLIGHT (3D light)
+      23: 0x00c0c0c0,  // COLOR_INFOTEXT
+      24: 0x00ffffff,  // COLOR_INFOBK
+    };
+    this.interceptor.hook('user32.dll', 'GetSysColor', (ctx) => {
+      const index = ctx.rawArgs[0] ?? 0;
+      const color = sysColors[index] ?? 0x00c0c0c0;
+      return { returnValue: color, errorCode: E.NO_ERROR };
+    });
+    // GetSysColorBrush(index): return a stock brush handle for the system
+    // color. Minesweeper brushes the board background with GetSysColorBrush.
+    this.interceptor.hook('user32.dll', 'GetSysColorBrush', (ctx) => {
+      const index = ctx.rawArgs[0] ?? 0;
+      const color = sysColors[index] ?? 0x00c0c0c0;
+      const obj = nextGdiObj();
+      brushColorByObj.set(obj, { r: color & 0xff, g: (color >>> 8) & 0xff, b: (color >>> 16) & 0xff, a: 255 });
+      return { returnValue: obj, errorCode: E.NO_ERROR };
+    });
+    // PeekMessageW: non-blocking message peek. If the queue is non-empty,
+    // fill lpMsg and return TRUE; otherwise return FALSE.
+    this.interceptor.hook('user32.dll', 'PeekMessageW', (ctx) => {
+      const lpMsg = ctx.rawArgs[0] ?? 0;
+      const hwndFilter = ctx.rawArgs[1] ?? 0;
+      const msgFilterMin = ctx.rawArgs[2] ?? 0;
+      const msgFilterMax = ctx.rawArgs[3] ?? 0;
+      const wRemoveMsg = ctx.rawArgs[4] ?? 0;
+      void hwndFilter; void msgFilterMin; void msgFilterMax; void wRemoveMsg;
+      // Simple peek: scan the queue for a matching message.
+      const idx = this.guiMessageQueue.findIndex((m) => {
+        if (hwndFilter !== 0 && m.hwnd !== hwndFilter) return false;
+        if (msgFilterMin !== 0 && m.msg < msgFilterMin) return false;
+        if (msgFilterMax !== 0 && m.msg > msgFilterMax) return false;
+        return true;
+      });
+      if (idx < 0) return { returnValue: 0, errorCode: E.NO_ERROR };
+      const m = this.guiMessageQueue.splice(idx, 1)[0]!;
+      if (lpMsg) {
+        runtime.writeInt32(lpMsg + 0, m.hwnd);
+        runtime.writeInt32(lpMsg + 4, m.msg);
+        runtime.writeInt32(lpMsg + 8, m.wParam);
+        runtime.writeInt32(lpMsg + 12, m.lParam);
+        runtime.writeInt32(lpMsg + 16, 0); // time
+        runtime.writeInt32(lpMsg + 20, 0); // pt.x
+        runtime.writeInt32(lpMsg + 24, 0); // pt.y
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('user32.dll', 'SetCursor', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('user32.dll', 'ClipCursor', () => this.ok1());
+    this.interceptor.hook('user32.dll', 'ShowCursor', () => ({ returnValue: 1, errorCode: E.NO_ERROR }));
+    // InvalidateRect(hwnd, lpRect, bErase): marks the window as needing
+    // repaint and posts a WM_PAINT. Minesweeper mouse clicks call this to
+    // trigger a board redraw. If bErase is TRUE, also post WM_ERASEBKGND.
+    this.interceptor.hook('user32.dll', 'InvalidateRect', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const bErase = ctx.rawArgs[2] ?? 0;
+      if (bErase) {
+        this.guiMessageQueue.push({ hwnd, msg: 0x0014 /* WM_ERASEBKGND */, wParam: 0, lParam: 0 });
+      }
+      this.guiMessageQueue.push({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 });
+      if (this.pendingMessageResolve) {
+        const r = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        r();
+      }
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('user32.dll', 'MoveWindow', (ctx) => {
       const hwnd = ctx.rawArgs[0] ?? 0;
       const w = ctx.rawArgs[3] ?? 0;
@@ -3707,6 +3802,7 @@ export class GuestProcessRunner {
     const curBrushByHdc = new Map<number, Color>();
     const curPenByHdc = new Map<number, Color>();
     const penPosByHdc = new Map<number, { x: number; y: number }>();
+    const rop2ByHdc = new Map<number, number>();
     /**
      * Software DIB fallback: DCs created before the host bridge is registered
      * (winmine loads its 16 board tiles in WinMain, before the first
@@ -3805,6 +3901,7 @@ export class GuestProcessRunner {
       const hdc = ctx.rawArgs[1] ?? 0;
       const bridge = bridgeFor(hdc);
       if (!bridge) return ok1();
+      await safe(() => bridge.flush(hdc));
       await safe(() => bridge.deleteDC(hdc));
       bridgeByHdc.delete(hdc);
       return ok1();
@@ -3888,6 +3985,26 @@ export class GuestProcessRunner {
     this.interceptor.hook('gdi32.dll', 'GetMapMode', () => ({ returnValue: 1, errorCode: E.NO_ERROR }));
     this.interceptor.hook('gdi32.dll', 'SetViewportOrgEx', () => this.ok1());
     this.interceptor.hook('gdi32.dll', 'SetWindowOrgEx', () => this.ok1());
+    // SetROP2(hdc, fnDrawMode): winmine uses R2_XORPEN for flag reveal.
+    this.interceptor.hook('gdi32.dll', 'SetROP2', (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const prev = rop2ByHdc.get(hdc) ?? 13; // default R2_COPYPEN
+      rop2ByHdc.set(hdc, ctx.rawArgs[1] ?? 13);
+      return { returnValue: prev, errorCode: E.NO_ERROR };
+    });
+    // SetPixel(hdc, x, y, crColor): winmine uses this for XOR drawing.
+    this.interceptor.hook('gdi32.dll', 'SetPixel', async (ctx) => {
+      const hdc = ctx.rawArgs[0] ?? 0;
+      const x = ctx.rawArgs[1] ?? 0;
+      const y = ctx.rawArgs[2] ?? 0;
+      const color = colorFromBgr(ctx.rawArgs[3] ?? 0);
+      const bridge = bridgeFor(hdc);
+      if (bridge) {
+        await safe(() => bridge.setPixel(hdc, x, y, color));
+        return { returnValue: ctx.rawArgs[3] ?? 0, errorCode: E.NO_ERROR };
+      }
+      return { returnValue: ctx.rawArgs[3] ?? 0, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('gdi32.dll', 'GetTextMetrics', (ctx) => {
       const lptm = ctx.rawArgs[1] ?? 0;
       if (lptm) {
@@ -3985,13 +4102,16 @@ export class GuestProcessRunner {
       const destBridge = bridgeFor(dest);
       const srcBridge = bridgeFor(src);
       const rc = { x: ctx.rawArgs[1] ?? 0, y: ctx.rawArgs[2] ?? 0, w: ctx.rawArgs[3] ?? 0, h: ctx.rawArgs[4] ?? 0 };
+      const sx = ctx.rawArgs[6] ?? 0;
+      const sy = ctx.rawArgs[7] ?? 0;
+      console.log('[GDI-walk] BitBlt dest=0x%s src=0x%s (%d,%d %dx%d)->(%d,%d) destBridge=%s srcBridge=%s', dest.toString(16), src.toString(16), sx, sy, rc.w, rc.h, rc.x, rc.y, destBridge ? 'Y' : 'N', srcBridge ? 'Y' : 'N');
       if (destBridge && srcBridge === destBridge) {
         await safe(() =>
           destBridge.bitBlt(
             dest,
             toRect(rc),
             src,
-            toRect({ x: ctx.rawArgs[6] ?? 0, y: ctx.rawArgs[7] ?? 0, w: rc.w, h: rc.h }),
+            toRect({ x: sx, y: sy, w: rc.w, h: rc.h }),
             ctx.rawArgs[8] ?? 0,
           ),
         );
@@ -4000,8 +4120,6 @@ export class GuestProcessRunner {
         // tiles): replay its stored DIB pixels onto the real window bridge.
         const dib = softDibByHdc.get(src);
         if (dib) {
-          const sx = ctx.rawArgs[6] ?? 0;
-          const sy = ctx.rawArgs[7] ?? 0;
           await safe(() =>
             destBridge.setDIBitsToDevice(dest, rc.x, rc.y, {
               ...dib,
@@ -4011,7 +4129,11 @@ export class GuestProcessRunner {
               drawHeight: rc.h,
             }),
           );
+        } else {
+          console.log('[GDI-walk] BitBlt: no softDib for src=0x%s', src.toString(16));
         }
+      } else {
+        console.log('[GDI-walk] BitBlt: no destBridge srcBridge=%s', srcBridge ? 'Y' : 'N');
       }
       return ok1();
     });
@@ -4072,6 +4194,8 @@ export class GuestProcessRunner {
         startScan,
         cLines,
       };
+      console.log('[GDI-walk] SetDIBitsToDevice hdc=0x%s bridge=%s (%d,%d)->(%d,%d) w=%d h=%d xSrc=%d ySrc=%d startScan=%d cLines=%d stride=%d bitCount=%d biWidth=%d biHeight=%d palSize=%d',
+        hdc.toString(16), bridge ? 'Y' : 'N', xDest, yDest, drawWidth, drawHeight, biWidth, biHeight, xSrc, ySrc, startScan, cLines, stride, biBitCount, biWidth, biHeight, palette?.length ?? 0);
       if (bridge) {
         await safe(() => bridge.setDIBitsToDevice(hdc, xDest, yDest, dib));
       } else {

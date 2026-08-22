@@ -447,6 +447,10 @@ export class CanvasGdiBridge implements GdiBridge {
     const stride = Math.floor((width * bitCount + 31) / 32) * 4;
     const bottomUp = height > 0;
     const rows = Math.max(0, Math.min(drawHeight, cLines));
+    if (rows > 0) {
+      console.log('[GDI-bridge] setDIBitsToDevice dc=%d xDest=%d yDest=%d w=%d h=%d xSrc=%d ySrc=%d startScan=%d cLines=%d stride=%d bottomUp=%s bitsLen=%d surface=%dx%d',
+        dc, xDest, yDest, drawWidth, drawHeight, xSrc, ySrc, startScan, cLines, stride, String(bottomUp), bits.length, surface.width, surface.height);
+    }
     for (let r = 0; r < rows; r++) {
       // 输出行 r（自上而下）对应 DIB 扫描线：bottom-up 时 ySrc 是源矩形底边。
       const scanLine = bottomUp ? ySrc + drawHeight - 1 - r : ySrc + r;

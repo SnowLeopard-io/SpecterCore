@@ -345,6 +345,11 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'callwindowprocw': 5,
   'charupperw': 1,
   'peekmessagew': 5,
+  'getsyscolor': 1,
+  'getsyscolorbrush': 1,
+  'setcursor': 1,
+  'clipcursor': 1,
+  'showcursor': 1,
   'getsystemmetrics': 1,
   // GetMenuItemRect(hWnd, hMenu, uItem, lprcItem) — 4-arg stdcall. MISSING
   // argCount -> stub ret 0 -> 16 bytes leaked per call; winmine's window
@@ -411,7 +416,6 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'loadimagea': 6,
   'loadacceleratorsw': 2,
   'loadacceleratorsa': 2,
-  'setcursor': 1,
   'getkeyboardlayout': 1,
   // winmine (classic Minesweeper) message-loop / dialog helpers. Missing
   // argCounts leak 4-16 bytes per call; winmine's timer + dialog paths then

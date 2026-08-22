@@ -158,6 +158,62 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
     };
   }, [runner, hwnd]);
 
+  // Forward mouse events from the canvas to the guest process.
+  // Translates browser mouse coordinates to Win32 client-area coordinates
+  // and posts WM_LBUTTONDOWN / WM_RBUTTONDOWN / WM_LBUTTONUP / WM_RBUTTONUP.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const buttonToMsg = (button: number, down: boolean): number => {
+      if (button === 2) return down ? 0x0204 : 0x0205; // WM_RBUTTONDOWN / WM_RBUTTONUP
+      return down ? 0x0201 : 0x0202; // WM_LBUTTONDOWN / WM_LBUTTONUP
+    };
+
+    const mkWParam = (e: MouseEvent): number => {
+      let wp = 0;
+      if (e.buttons & 1) wp |= 0x0001; // MK_LBUTTON
+      if (e.buttons & 2) wp |= 0x0002; // MK_RBUTTON
+      if (e.shiftKey) wp |= 0x0004;    // MK_SHIFT
+      if (e.ctrlKey) wp |= 0x0008;     // MK_CONTROL
+      if (e.buttons & 4) wp |= 0x0010; // MK_MBUTTON
+      return wp;
+    };
+
+    const mkLParam = (e: MouseEvent, canvas: HTMLCanvasElement): number => {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.max(0, Math.min(Math.round(e.clientX - rect.left), canvas.width - 1));
+      const y = Math.max(0, Math.min(Math.round(e.clientY - rect.top), canvas.height - 1));
+      return ((y & 0xffff) << 16) | (x & 0xffff);
+    };
+
+    const handleMouseDown = (e: MouseEvent): void => {
+      e.preventDefault();
+      const msg = buttonToMsg(e.button, true);
+      runner.postMessage({ hwnd, msg, wParam: mkWParam(e), lParam: mkLParam(e, canvas) });
+    };
+
+    const handleMouseUp = (e: MouseEvent): void => {
+      e.preventDefault();
+      const msg = buttonToMsg(e.button, false);
+      runner.postMessage({ hwnd, msg, wParam: mkWParam(e), lParam: mkLParam(e, canvas) });
+    };
+
+    const handleContextMenu = (e: MouseEvent): void => {
+      e.preventDefault();
+    };
+
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mouseup', handleMouseUp);
+    canvas.addEventListener('contextmenu', handleContextMenu);
+
+    return () => {
+      canvas.removeEventListener('mousedown', handleMouseDown);
+      canvas.removeEventListener('mouseup', handleMouseUp);
+      canvas.removeEventListener('contextmenu', handleContextMenu);
+    };
+  }, [runner, hwnd]);
+
   // Real menu only — no fallback: keep the sections the RT_MENU parser
   // produced (File/Edit parse fully; nested submenus flatten into items).
   // Ampersands are Win32 accelerator markers ("&File" -> "File").
