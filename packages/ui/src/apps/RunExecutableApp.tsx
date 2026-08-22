@@ -398,7 +398,7 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
     } catch (err: unknown) {
       setStatus(`Error: ${String(err)}`);
     }
-  }, [source, kernel, ensureGuestWindows, fs, modulePath]);
+  }, [source, kernel, ensureGuestWindows, fs, modulePath, controller]);
 
   // Double-clicked .exe (initialFile set): run immediately, no security
   // warning / confirm phase — the user already chose to open it.

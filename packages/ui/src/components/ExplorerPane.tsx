@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components */
+
 import { useRef, useState } from 'react';
 import type {
   DragEvent as ReactDragEvent,

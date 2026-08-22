@@ -142,7 +142,7 @@ export function BrowserApp() {
     if (typeof wm.setTitle === 'function') {
       wm.setTitle(winId, title);
     }
-  }, [active.title, active.url]);
+  }, [active.title, active.url, controller.windowManager]);
 
   const goto = useCallback(
     (raw: string, opts: { push?: boolean } = {}): void => {

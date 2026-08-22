@@ -18,7 +18,7 @@ import { preloadUiResources } from './resource-preload';
 
 // 1.2 安全上下文强制：OPFS/WebUSB/AudioWorklet 等均需安全上下文。
 // 仅 localhost/HTTPS 允许启动，否则直接拒绝并给出提示。
-export function assertSecureContext(container: HTMLElement): void {
+export function assertSecureContext(_container: HTMLElement): void {
   if (typeof window === 'undefined') return;
   if (window.isSecureContext) return;
   // In development / remote sandbox environments isSecureContext may be false
