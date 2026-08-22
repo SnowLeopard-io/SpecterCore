@@ -97,6 +97,7 @@ export class MemoryFileStore implements FileStore {
     let current = '';
     for (const segment of segments) {
       current = current === '' ? segment : `${current}/${segment}`;
+      if (this.dirs.has(current)) continue; // already exists, no-op
       this.assertNoAncestorFile(current);
       this.dirs.add(current);
     }

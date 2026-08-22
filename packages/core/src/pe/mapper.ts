@@ -547,6 +547,13 @@ export const X86_API_ARG_COUNT: Readonly<Record<string, number>> = {
   'allocateandinitializesid': 8,
   'equalsid': 2,
   'regqueryvalueexw': 6,
+  'regqueryvalueexa': 6,
+  'regopenkeyexa': 5,
+  'outputdebugstringa': 1,
+  'getprivateprofileintw': 4,
+  'getprivateprofilestringw': 6,
+  'dialogboxparamw': 5,
+  'shellaboutw': 4,
   // RegGetValueW/A: 7 params stdcall (hkey, lpSubKey, lpValue, dwFlags,
   // pdwType, pvData, pcbData). Missing -> stub ret 0 -> 28 bytes leaked per
   // call -> GS cookie copy in the caller's frame is shifted ->

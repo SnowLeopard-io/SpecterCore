@@ -168,7 +168,7 @@ async function provisionFiles(
         continue;
       }
       const data = await fetchWithRetry(f.url);
-      const file = await fs.openFile(f.storePath, 'write');
+      const file = await fs.openFile(f.storePath, 'create');
       try {
         await file.write(0, data);
       } finally {
