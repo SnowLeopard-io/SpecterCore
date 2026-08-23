@@ -198,7 +198,7 @@ export interface GdiBridge {
   ): Promise<WinError>;
   polyline(dc: number, points: Point[], color: Color, rop?: number): Promise<WinError>;
   polygon(dc: number, points: Point[], color: Color, rop?: number): Promise<WinError>;
-  setPixel(dc: number, x: number, y: number, color: Color): Promise<WinError>;
+  setPixel(dc: number, x: number, y: number, color: Color, rop?: number): Promise<WinError>;
 
   // -- 裁剪（3.2.3） ---------------------------------------------------------
   setClip(dc: number, region: ClipRegion | null): Promise<void>;

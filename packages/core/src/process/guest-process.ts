@@ -3795,6 +3795,15 @@ export class GuestProcessRunner {
     const ok1 = (): ApiResult => ({ returnValue: 1, errorCode: E.NO_ERROR });
     /** COLORREF (0x00BBGGRR) -> ARGB Color. */
     const colorFromBgr = (n: number): Color => ({ r: n & 0xff, g: (n >>> 8) & 0xff, b: (n >>> 16) & 0xff, a: 255 });
+    /** Windows SetROP2 R2_* value (1-16) -> 8-bit ROP truth-table index. */
+    const ROP2_TO_INDEX: readonly number[] = [
+      0x00, 0x11, 0x02, 0x33, 0x04, 0x55, 0x66, 0x77,
+      0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    const rop2Index = (r2: number): number => {
+      if (r2 >= 1 && r2 <= 16) return ROP2_TO_INDEX[r2 - 1] ?? 0xcc;
+      return r2 & 0xff;
+    };
     const BLACK: Color = { r: 0, g: 0, b: 0, a: 255 };
     const WHITE: Color = { r: 255, g: 255, b: 255, a: 255 };
     const brushColorByObj = new Map<number, Color>();
@@ -4000,7 +4009,10 @@ export class GuestProcessRunner {
       const color = colorFromBgr(ctx.rawArgs[3] ?? 0);
       const bridge = bridgeFor(hdc);
       if (bridge) {
-        await safe(() => bridge.setPixel(hdc, x, y, color));
+        const rop2 = rop2ByHdc.get(hdc) ?? 13; // R2_COPYPEN
+        const rop = rop2Index(rop2);
+        console.log('[GDI-walk] SetPixel hdc=%d (%d,%d) color=0x%s rop2=%d ropIndex=%d', hdc, x, y, ctx.rawArgs[3]?.toString(16) ?? '0', rop2, rop);
+        await safe(() => bridge.setPixel(hdc, x, y, color, rop));
         return { returnValue: ctx.rawArgs[3] ?? 0, errorCode: E.NO_ERROR };
       }
       return { returnValue: ctx.rawArgs[3] ?? 0, errorCode: E.NO_ERROR };
@@ -4158,7 +4170,8 @@ export class GuestProcessRunner {
       const biSize = peek(lpbmi);
       if (biSize < 40) return ok1();
       const biWidth = peek(lpbmi + 4);
-      const biHeight = peek(lpbmi + 8);
+      // Use signed peek for biHeight — negative values mean top-down DIB.
+      const biHeight = new DataView(runtime.memory.buffer).getInt32(lpbmi + 8, true);
       const biBitCount = peek(lpbmi + 14) & 0xffff;
       const biCompression = peek(lpbmi + 16);
       if (biCompression !== 0 || biWidth <= 0 || biHeight === 0) return ok1(); // BI_RGB only

@@ -190,13 +190,21 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
     const handleMouseDown = (e: MouseEvent): void => {
       e.preventDefault();
       const msg = buttonToMsg(e.button, true);
-      runner.postMessage({ hwnd, msg, wParam: mkWParam(e), lParam: mkLParam(e, canvas) });
+      const lParam = mkLParam(e, canvas);
+      const x = lParam & 0xffff;
+      const y = (lParam >>> 16) & 0xffff;
+      console.log('[MSE] mousedown btn=%d msg=0x%s (%d,%d)', e.button, msg.toString(16), x, y);
+      runner.postMessage({ hwnd, msg, wParam: mkWParam(e), lParam });
     };
 
     const handleMouseUp = (e: MouseEvent): void => {
       e.preventDefault();
       const msg = buttonToMsg(e.button, false);
-      runner.postMessage({ hwnd, msg, wParam: mkWParam(e), lParam: mkLParam(e, canvas) });
+      const lParam = mkLParam(e, canvas);
+      const x = lParam & 0xffff;
+      const y = (lParam >>> 16) & 0xffff;
+      console.log('[MSE] mouseup btn=%d msg=0x%s (%d,%d)', e.button, msg.toString(16), x, y);
+      runner.postMessage({ hwnd, msg, wParam: mkWParam(e), lParam });
     };
 
     const handleContextMenu = (e: MouseEvent): void => {

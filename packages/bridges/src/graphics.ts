@@ -377,9 +377,9 @@ export class CanvasGdiBridge implements GdiBridge {
     return E.NO_ERROR;
   }
 
-  async setPixel(dc: number, x: number, y: number, color: Color): Promise<WinError> {
+  async setPixel(dc: number, x: number, y: number, color: Color, rop?: number): Promise<WinError> {
     const { surface } = this.requireDc(dc);
-    surface.setPixel(x, y, color);
+    surface.setPixel(x, y, color, rop ?? ROP_INDEX_COPY);
     this.notify(dc, { x, y, width: 1, height: 1 });
     return E.NO_ERROR;
   }
@@ -443,9 +443,12 @@ export class CanvasGdiBridge implements GdiBridge {
 
   async setDIBitsToDevice(dc: number, xDest: number, yDest: number, dib: DibSurface): Promise<WinError> {
     const { surface } = this.requireDc(dc);
-    const { width, height, bitCount, palette, bits, xSrc, ySrc, drawWidth, drawHeight, startScan, cLines } = dib;
+    const { width, bitCount, palette, bits, xSrc, ySrc, drawWidth, drawHeight, startScan, cLines } = dib;
+    // height may be negative (top-down DIB) — use absolute value for row count.
+    const dibHeight = dib.height;
+    const absHeight = Math.abs(dibHeight);
     const stride = Math.floor((width * bitCount + 31) / 32) * 4;
-    const bottomUp = height > 0;
+    const bottomUp = dibHeight > 0;
     const rows = Math.max(0, Math.min(drawHeight, cLines));
     if (rows > 0) {
       console.log('[GDI-bridge] setDIBitsToDevice dc=%d xDest=%d yDest=%d w=%d h=%d xSrc=%d ySrc=%d startScan=%d cLines=%d stride=%d bottomUp=%s bitsLen=%d surface=%dx%d',
