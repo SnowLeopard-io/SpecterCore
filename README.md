@@ -14,7 +14,7 @@ See the [architecture notes](docs/ARCHITECTURE.md) for the full spec.
 
 ![Minesweeper](docs/minesweeper.png)
 
-> Minesweeper (`winmine.exe`, 32-bit PE) running through the x86 → WASM JIT, GDI bridge, and the L6 desktop shell. The board is fully interactive — click to reveal cells, right-click to flag mines.
+> Minesweeper (`winmine.exe`, 32-bit PE) running through the x86 → WASM JIT, GDI bridge, and the L6 desktop shell. The board is fully interactive — click to reveal cells, right-click to flag mines. The screenshot shows the game mid-play after a cell was clicked, with the GDI software rasterizer (`SetDIBitsToDevice` / `BitBlt` / `TextOut`) correctly rendering the board, the mine counter, and the timer through the canvas bridge.
 
 ---
 
