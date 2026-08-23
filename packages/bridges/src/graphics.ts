@@ -185,6 +185,15 @@ export class CanvasGdiBridge implements GdiBridge {
   private readonly dcs = new Map<number, GdiDc>();
   private readonly invalidateHandlers = new Set<(dc: number, rect: Rect) => void>();
   private readonly textCtx: CanvasRenderingContext2D | null;
+  /**
+   * All DCs created by this bridge share the same primary surface, so that
+   * drawing to any DC (including memory DCs from CreateCompatibleDC) is
+   * visible when flushing the window DC. Without this, each createDC /
+   * createCompatibleDC call would allocate its own GdiSurface, and BitBlt /
+   * flush would operate on different surfaces — the canvas would only show
+   * whatever was flushed on the last DC, missing content rendered on other DCs.
+   */
+  private primarySurface: GdiSurface | null = null;
 
   constructor(private readonly display: HTMLCanvasElement) {
     this.textCtx = typeof document !== 'undefined' ? display.getContext('2d') : null;
@@ -206,8 +215,36 @@ export class CanvasGdiBridge implements GdiBridge {
   }
 
   async createDC(name: string): Promise<number> {
-    // Match the L6 window canvas size when present (pixel path); node/headless
-    // falls back to a default 800x600 surface.
+    // All DCs share the same primary surface so that rendering to any DC
+    // (via SetDIBitsToDevice, TextOut, etc.) lands on the same pixel buffer
+    // that flush() writes to the canvas.
+    const w = this.display?.width || 800;
+    const h = this.display?.height || 600;
+    if (!this.primarySurface) {
+      this.primarySurface = new GdiSurface(w, h);
+    }
+    const surface = this.primarySurface;
+    const handle = nextId();
+    this.dcs.set(handle, {
+      surface,
+      state: cloneState(DEFAULT_STATE),
+      saveStack: [],
+      canvas: null,
+    });
+    console.log('[GDI-bridge] createDC name=%s → handle=%d surface=%dx%d canvas=%sx%s', name, handle, surface.width, surface.height, this.display?.width ?? '?', this.display?.height ?? '?');
+    void name;
+    return handle;
+  }
+
+  async createCompatibleDC(dc: number): Promise<number> {
+    // Create a new surface for the memory DC instead of sharing the parent
+    // DC's surface. This ensures that drawing to the memory DC (e.g.
+    // SetDIBitsToDevice for board tiles) is not overwritten when the window
+    // DC is cleared (e.g. FillRect in WM_PAINT). In the real Windows, each
+    // memory DC has its own bitmap, so drawings on different DCs are
+    // independent. Sharing the same surface between a memory DC and the
+    // window DC would cause the memory DC's tile data to be lost when the
+    // window DC is cleared during WM_PAINT processing.
     const w = this.display?.width || 800;
     const h = this.display?.height || 600;
     const surface = new GdiSurface(w, h);
@@ -218,20 +255,9 @@ export class CanvasGdiBridge implements GdiBridge {
       saveStack: [],
       canvas: null,
     });
-    console.log('[GDI-bridge] createDC name=%s → handle=%d surface=%dx%d canvas=%sx%s', name, handle, w, h, this.display?.width ?? '?', this.display?.height ?? '?');
-    void name;
-    return handle;
-  }
-
-  async createCompatibleDC(dc: number): Promise<number> {
-    const { surface } = this.requireDc(dc);
-    const handle = nextId();
-    this.dcs.set(handle, {
-      surface: new GdiSurface(surface.width, surface.height),
-      state: cloneState(DEFAULT_STATE),
-      saveStack: [],
-      canvas: null,
-    });
+    // If the source DC is not in this bridge (e.g. null/0), fall back to
+    // the primary surface size so the new DC is still usable.
+    console.log('[GDI-bridge] createCompatibleDC parent=%d → handle=%d surface=%dx%d (new)', dc, handle, surface.width, surface.height);
     return handle;
   }
 

@@ -295,6 +295,13 @@ export class GuestProcessRunner {
   /** DC handle -> owning bridge, for the pixel GDI path (L6 image bridge). */
   private gdiBridgeByHdc = new Map<number, GdiBridge>();
   /**
+   * The bridge for the main application window, tracked so that
+   * CreateCompatibleDC with a pre-bridge (or null) source DC can still
+   * create a bridge-backed DC (with a shared surface) instead of falling
+   * back to the softDIB store which gets overwritten on each tile draw.
+   */
+  private mainWindowBridge: GdiBridge | null = null;
+  /**
    * GUI bridge state (see installGuiBridge): class atom -> window procedure
    * address, fake HWND -> { window procedure, parent } record, and the
    * synthetic message queue that drives the guest's GetMessageW loop.
@@ -3820,6 +3827,12 @@ export class GuestProcessRunner {
      * DC can still reach the real window bridge.
      */
     const softDibByHdc = new Map<number, DibSurface>();
+    /**
+     * Fallback DC on the main window bridge, used to draw SetDIBitsToDevice
+     * pixels from pre-bridge DCs directly onto the shared bridge surface.
+     * Created lazily when the first pre-bridge SetDIBitsToDevice is handled.
+     */
+    let bridgeFallbackDc = 0;
     /** Swallow drawing errors (e.g. a guest passing a stale HDC). */
     const safe = async (fn: () => Promise<unknown>): Promise<void> => {
       try {
@@ -3897,6 +3910,14 @@ export class GuestProcessRunner {
       if (!bridge) return { returnValue: nextGdiObj(), errorCode: E.NO_ERROR };
       const hdc = await bridge.createDC('DISPLAY');
       bridgeByHdc.set(hdc, bridge);
+      this.mainWindowBridge = bridge;
+      // Eagerly create the bridgeFallbackDc so that BitBlt from pre-bridge
+      // DCs (e.g. winmine's memory DCs created before the bridge was wired)
+      // can still copy tiles to the window surface.
+      if (!bridgeFallbackDc) {
+        bridgeFallbackDc = await bridge.createDC('DISPLAY');
+        bridgeByHdc.set(bridgeFallbackDc, bridge);
+      }
       return { returnValue: hdc, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('user32.dll', 'GetWindowDC', async (ctx) => {
@@ -3922,6 +3943,14 @@ export class GuestProcessRunner {
       if (bridge) {
         const hdc = await bridge.createDC('DISPLAY');
         bridgeByHdc.set(hdc, bridge);
+        this.mainWindowBridge = bridge;
+        // Eagerly create the bridgeFallbackDc so that BitBlt from pre-bridge
+        // DCs (e.g. winmine's memory DCs created before the bridge was wired)
+        // can still copy tiles to the window surface.
+        if (!bridgeFallbackDc) {
+          bridgeFallbackDc = await bridge.createDC('DISPLAY');
+          bridgeByHdc.set(bridgeFallbackDc, bridge);
+        }
         if (lpPaint) {
           runtime.writeInt32(lpPaint + 0, hdc);
           runtime.writeInt32(lpPaint + 4, 0); // fErase
@@ -4129,20 +4158,25 @@ export class GuestProcessRunner {
         );
       } else if (destBridge && !srcBridge) {
         // Source DC was created before the bridge existed (winmine's board
-        // tiles): replay its stored DIB pixels onto the real window bridge.
-        const dib = softDibByHdc.get(src);
-        if (dib) {
+        // tiles): the pixels were drawn onto the bridgeFallbackDc's surface
+        // (same as the shared primary surface). Use bitBlt with the fallback
+        // DC as source to copy the accumulated tiles to the target position.
+        if (!bridgeFallbackDc && this.mainWindowBridge) {
+          bridgeFallbackDc = await this.mainWindowBridge.createDC('DISPLAY');
+          bridgeByHdc.set(bridgeFallbackDc, this.mainWindowBridge);
+        }
+        if (bridgeFallbackDc) {
           await safe(() =>
-            destBridge.setDIBitsToDevice(dest, rc.x, rc.y, {
-              ...dib,
-              xSrc: dib.xSrc + sx,
-              ySrc: dib.ySrc + sy,
-              drawWidth: rc.w,
-              drawHeight: rc.h,
-            }),
+            destBridge.bitBlt(
+              dest,
+              toRect(rc),
+              bridgeFallbackDc,
+              toRect({ x: sx, y: sy, w: rc.w, h: rc.h }),
+              ctx.rawArgs[8] ?? 0,
+            ),
           );
         } else {
-          console.log('[GDI-walk] BitBlt: no softDib for src=0x%s', src.toString(16));
+          console.log('[GDI-walk] BitBlt: no bridgeFallbackDc for src=0x%s', src.toString(16));
         }
       } else {
         console.log('[GDI-walk] BitBlt: no destBridge srcBridge=%s', srcBridge ? 'Y' : 'N');
@@ -4211,8 +4245,17 @@ export class GuestProcessRunner {
         hdc.toString(16), bridge ? 'Y' : 'N', xDest, yDest, drawWidth, drawHeight, biWidth, biHeight, xSrc, ySrc, startScan, cLines, stride, biBitCount, biWidth, biHeight, palette?.length ?? 0);
       if (bridge) {
         await safe(() => bridge.setDIBitsToDevice(hdc, xDest, yDest, dib));
+      } else if (this.mainWindowBridge) {
+        // Pre-bridge DC: draw pixels directly onto the bridge's shared surface
+        // so that multiple SetDIBitsToDevice calls (one per tile) accumulate
+        // correctly, instead of overwriting a single softDIB entry.
+        if (!bridgeFallbackDc) {
+          bridgeFallbackDc = await this.mainWindowBridge.createDC('DISPLAY');
+          bridgeByHdc.set(bridgeFallbackDc, this.mainWindowBridge);
+        }
+        await safe(() => this.mainWindowBridge!.setDIBitsToDevice(bridgeFallbackDc, xDest, yDest, dib));
       } else {
-        // Pre-bridge DC: keep the pixels so a later BitBlt can replay them.
+        // No bridge at all: fall back to the softDIB store.
         softDibByHdc.set(hdc, dib);
       }
       return { returnValue: cLines, errorCode: E.NO_ERROR };
@@ -4230,8 +4273,11 @@ export class GuestProcessRunner {
     });
     this.interceptor.hook('gdi32.dll', 'CreateCompatibleDC', async (ctx) => {
       const src = ctx.rawArgs[0] ?? 0;
-      const bridge = bridgeFor(src);
-      console.log('[GDI-walk] CreateCompatibleDC src=0x%s bridge=%s', src.toString(16), bridge ? 'Y' : 'N');
+      let bridge = bridgeFor(src);
+      // If the source DC is not in any bridge (e.g. pre-bridge DC allocated
+      // before the bridge was registered, or null/0), fall back to the main
+      // window bridge so all memory DCs share the same surface.
+      if (!bridge) bridge = this.mainWindowBridge;
       if (bridge) {
         const hdc = await bridge.createCompatibleDC(src);
         bridgeByHdc.set(hdc, bridge);
