@@ -3462,6 +3462,54 @@ export class GuestProcessRunner {
       return { returnValue: inside ? 1 : 0, errorCode: E.NO_ERROR };
     });
 
+    // Rect helpers. winmine builds its smiley-face hit rect with SetRect at
+    // click time — the generic stub returned 0 WITHOUT writing the struct, so
+    // PtInRect tested stack garbage and the face was unclickable while tiles
+    // (arithmetically hit-tested) worked. RECT = {left, top, right, bottom}.
+    this.interceptor.hook('user32.dll', 'SetRect', (ctx) => {
+      const lprc = ctx.rawArgs[0] ?? 0;
+      if (lprc) {
+        runtime.writeInt32(lprc + 0, ctx.rawArgs[1] ?? 0);
+        runtime.writeInt32(lprc + 4, ctx.rawArgs[2] ?? 0);
+        runtime.writeInt32(lprc + 8, ctx.rawArgs[3] ?? 0);
+        runtime.writeInt32(lprc + 12, ctx.rawArgs[4] ?? 0);
+      }
+      return this.ok1();
+    });
+    this.interceptor.hook('user32.dll', 'OffsetRect', (ctx) => {
+      const lprc = ctx.rawArgs[0] ?? 0;
+      if (lprc) {
+        runtime.writeInt32(lprc + 0, runtime.readInt32(lprc + 0) + (ctx.rawArgs[1] ?? 0));
+        runtime.writeInt32(lprc + 4, runtime.readInt32(lprc + 4) + (ctx.rawArgs[2] ?? 0));
+        runtime.writeInt32(lprc + 8, runtime.readInt32(lprc + 8) + (ctx.rawArgs[1] ?? 0));
+        runtime.writeInt32(lprc + 12, runtime.readInt32(lprc + 12) + (ctx.rawArgs[2] ?? 0));
+      }
+      return this.ok1();
+    });
+    this.interceptor.hook('user32.dll', 'InflateRect', (ctx) => {
+      const lprc = ctx.rawArgs[0] ?? 0;
+      const dx = ctx.rawArgs[1] ?? 0;
+      const dy = ctx.rawArgs[2] ?? 0;
+      if (lprc) {
+        runtime.writeInt32(lprc + 0, runtime.readInt32(lprc + 0) - dx);
+        runtime.writeInt32(lprc + 4, runtime.readInt32(lprc + 4) - dy);
+        runtime.writeInt32(lprc + 8, runtime.readInt32(lprc + 8) + dx);
+        runtime.writeInt32(lprc + 12, runtime.readInt32(lprc + 12) + dy);
+      }
+      return this.ok1();
+    });
+    this.interceptor.hook('user32.dll', 'CopyRect', (ctx) => {
+      const dst = ctx.rawArgs[0] ?? 0;
+      const src = ctx.rawArgs[1] ?? 0;
+      if (dst && src) runtime.writeBytes(dst, runtime.readBytes(src, 16));
+      return this.ok1();
+    });
+    this.interceptor.hook('user32.dll', 'IsRectEmpty', (ctx) => {
+      const lprc = ctx.rawArgs[0] ?? 0;
+      const rc = readRect(lprc);
+      return { returnValue: rc.w <= 0 || rc.h <= 0 ? 1 : 0, errorCode: E.NO_ERROR };
+    });
+
     // Mouse capture: winmine captures on WM_LBUTTONDOWN and releases on
     // WM_LBUTTONUP. Returning the previous-owner NULL (0) / TRUE (1) keeps
     // that flow intact without real capture semantics.
