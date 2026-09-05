@@ -7,10 +7,28 @@
 import type { Operand, Size } from './ir';
 import { CTX_BASE, EFLAGS_OFFSET, FLAG_DF } from './cpu';
 import type { WasmFunction } from './wasm-encoder';
-import { L_A, L_B, L_I64, L_I64A, L_I64B, L_ORIG, L_S, L_TMP, L_TMP2, pushOperand, storeOperand } from './codegen-shared';
+import {
+  L_A,
+  L_B,
+  L_I64,
+  L_I64A,
+  L_I64B,
+  L_ORIG,
+  L_S,
+  L_TMP,
+  L_TMP2,
+  pushOperand,
+  storeOperand,
+} from './codegen-shared';
 import { beginFlags, emitZspFlags, emitZspFlags64, flagMask, orFlag } from './codegen-flags';
 
-export function emitShift(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror', size: Size, dst: Operand, count: Operand): void {
+export function emitShift(
+  fn: WasmFunction,
+  op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror',
+  size: Size,
+  dst: Operand,
+  count: Operand,
+): void {
   if (size === 64) {
     emitShift64(fn, op, dst, count);
     return;
@@ -140,7 +158,12 @@ export function emitShift(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 
 }
 
 /** 64-bit shift/rotate. Count masked to 6 bits; flags chosen old when count==0. */
-export function emitShift64(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror', dst: Operand, count: Operand): void {
+export function emitShift64(
+  fn: WasmFunction,
+  op: 'shl' | 'shr' | 'sar' | 'rol' | 'ror',
+  dst: Operand,
+  count: Operand,
+): void {
   pushOperand(fn, dst);
   fn.localSet(L_I64A);
   // count (CL or imm), masked to 6 bits
@@ -274,7 +297,13 @@ export function emitShift64(fn: WasmFunction, op: 'shl' | 'shr' | 'sar' | 'rol' 
  * effective rotation is count mod (N+1). Flags are kept from before when the
  * masked count is 0 (matching the other shifts).
  */
-export function emitRotateCarry(fn: WasmFunction, op: 'rcl' | 'rcr', size: Size, dst: Operand, count: Operand): void {
+export function emitRotateCarry(
+  fn: WasmFunction,
+  op: 'rcl' | 'rcr',
+  size: Size,
+  dst: Operand,
+  count: Operand,
+): void {
   if (size === 64) {
     emitRotateCarry64(fn, op, dst, count);
     return;
@@ -390,7 +419,12 @@ export function emitRotateCarry(fn: WasmFunction, op: 'rcl' | 'rcr', size: Size,
 /** 64-bit RCL/RCR. The 65-bit (CF, operand) value is rotated by b in [1, 63];
  * the a<<64 / a>>>64 terms are avoided by folding the extra step into a second
  * shift (a>>>64 == (a>>>63)>>>1 == 0). */
-export function emitRotateCarry64(fn: WasmFunction, op: 'rcl' | 'rcr', dst: Operand, count: Operand): void {
+export function emitRotateCarry64(
+  fn: WasmFunction,
+  op: 'rcl' | 'rcr',
+  dst: Operand,
+  count: Operand,
+): void {
   pushOperand(fn, dst);
   fn.localSet(L_I64A); // a
   pushOperand(fn, count);
@@ -502,4 +536,3 @@ export function emitRotateCarry64(fn: WasmFunction, op: 'rcl' | 'rcr', dst: Oper
   fn.localGet(L_TMP2);
   fn.i32Store();
 }
-

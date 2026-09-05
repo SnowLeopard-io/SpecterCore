@@ -13,7 +13,6 @@ import { L_S, L_TMP, L_TMP2, emitEa, regAddr } from './codegen-shared';
 // misc
 // ---------------------------------------------------------------------------
 
-
 /**
  * CPUID (0F A2): leaf in EAX, results in EAX/EBX/ECX/EDX. Emits a small
  * synthetic CPU. IMPORTANT: the JIT has no XMM/MMX support, so leaf 1
@@ -142,7 +141,13 @@ export function emitRdtsc(fn: WasmFunction): void {
  * the upper half of the slot / writing only 4 bytes to memory). No real
  * float arithmetic — enough for CRT/init code.
  */
-export function emitFpuMove(fn: WasmFunction, op: 'fld' | 'fst' | 'fstp', dst: MemOperand | undefined, src: MemOperand | undefined, size: 32 | 64): void {
+export function emitFpuMove(
+  fn: WasmFunction,
+  op: 'fld' | 'fst' | 'fstp',
+  dst: MemOperand | undefined,
+  src: MemOperand | undefined,
+  size: 32 | 64,
+): void {
   if (op === 'fld' && src) {
     // ST(0) <- [src]
     emitEa(fn, src);
@@ -195,7 +200,13 @@ export function emitFpuMove(fn: WasmFunction, op: 'fld' | 'fst' | 'fstp', dst: M
  * signed int<->f64 conversion through ST(0); m64 forms are raw 8-byte copies
  * (the Delphi move-through-FPU integer idiom, where the bits round-trip).
  */
-export function emitFpuIntMove(fn: WasmFunction, op: 'fild' | 'fist' | 'fistp', dst: MemOperand | undefined, src: MemOperand | undefined, size: 32 | 64): void {
+export function emitFpuIntMove(
+  fn: WasmFunction,
+  op: 'fild' | 'fist' | 'fistp',
+  dst: MemOperand | undefined,
+  src: MemOperand | undefined,
+  size: 32 | 64,
+): void {
   if (op === 'fild' && src) {
     if (size === 64) {
       emitFpuMove(fn, 'fld', undefined, src, 64);
@@ -223,4 +234,3 @@ export function emitFpuIntMove(fn: WasmFunction, op: 'fild' | 'fist' | 'fistp', 
     return;
   }
 }
-

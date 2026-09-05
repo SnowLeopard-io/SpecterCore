@@ -8,7 +8,10 @@ import type { ApiHost, ApiResult } from '@specter-core/contracts';
 import { ok } from './handlers-shared';
 
 /** Reads an 8-word SYSTEMTIME structure at `address`. */
-export function readSysTime(host: ApiHost, address: number): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
+export function readSysTime(
+  host: ApiHost,
+  address: number,
+): { y: number; mo: number; d: number; h: number; mi: number; s: number } {
   const b = host.memory.read(address, 16);
   const v = new DataView(b.buffer, b.byteOffset, 16);
   return {
@@ -36,13 +39,40 @@ export function writeDateStr(host: ApiHost, out: number, cch: number, s: string)
 const DAYS_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const DAYS_ABBR = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS_FULL = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
 ];
-const MONTHS_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_ABBR = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
 
 /** Minimal GetDateFormatW/GetTimeFormatW format engine (M/d/yyyy, h:mm:ss tt...). */
-export function formatDateTime(st: { y: number; mo: number; d: number; h: number; mi: number; s: number }, fmt: string, isTime: boolean): string {
+export function formatDateTime(
+  st: { y: number; mo: number; d: number; h: number; mi: number; s: number },
+  fmt: string,
+  isTime: boolean,
+): string {
   const dow = new Date(Date.UTC(st.y, st.mo - 1, st.d)).getUTCDay();
   const h12 = st.h % 12 === 0 ? 12 : st.h % 12;
   const ampm = st.h < 12 ? 'AM' : 'PM';
@@ -140,4 +170,3 @@ export const LOCALE_STRINGS: Record<number, string> = {
   0x31: 'h:mm tt', // SSHORTTIME
   0x1003: 'h:mm:ss tt', // STIMEFORMAT
 };
-

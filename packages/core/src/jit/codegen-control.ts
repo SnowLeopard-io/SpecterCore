@@ -8,7 +8,15 @@ import type { Cond } from './cpu';
 import { CTX_BASE, EFLAGS_OFFSET, EIP_OFFSET, INT_VECTOR_OFFSET, STATUS_TRAP } from './cpu';
 import type { Operand, Size } from './ir';
 import type { WasmFunction } from './wasm-encoder';
-import { L_TMP, L_TMP2, MODE, pushOperand, regAddr, stackWidth, storeOperand } from './codegen-shared';
+import {
+  L_TMP,
+  L_TMP2,
+  MODE,
+  pushOperand,
+  regAddr,
+  stackWidth,
+  storeOperand,
+} from './codegen-shared';
 import { emitPopRaw, emitPushRaw, espAddr } from './codegen-stack';
 
 // ---------------------------------------------------------------------------
@@ -269,4 +277,3 @@ export function emitCond(fn: WasmFunction, cond: Cond): void {
       break;
   }
 }
-

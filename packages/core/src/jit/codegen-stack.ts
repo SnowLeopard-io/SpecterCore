@@ -7,7 +7,17 @@
 import type { Operand, RegName, Size } from './ir';
 import { CTX_BASE, REG_OFFSET } from './cpu';
 import type { WasmFunction } from './wasm-encoder';
-import { L_I64, L_ORIG, L_TMP, L_TMP2, loadWidth, pushOperand, regAddr, stackWidth, storeOperand } from './codegen-shared';
+import {
+  L_I64,
+  L_ORIG,
+  L_TMP,
+  L_TMP2,
+  loadWidth,
+  pushOperand,
+  regAddr,
+  stackWidth,
+  storeOperand,
+} from './codegen-shared';
 
 export function espAddr(): number {
   return CTX_BASE + (REG_OFFSET['esp'] ?? 0);
@@ -150,4 +160,3 @@ export function emitPopa(fn: WasmFunction): void {
     }
   }
 }
-

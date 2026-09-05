@@ -96,11 +96,15 @@ export function ucrtbaseHandlers(): Record<string, ApiHandler> {
     __stdio_common_vswprintf: (ctx, host) => vswprintfImpl(host, ctx),
     _o_iswspace: (ctx) => {
       const c = raw(ctx, 0) & 0xffff;
-      return ok(c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20 ? 1 : 0);
+      return ok(
+        c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20 ? 1 : 0,
+      );
     },
     iswspace: (ctx) => {
       const c = raw(ctx, 0) & 0xffff;
-      return ok(c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20 ? 1 : 0);
+      return ok(
+        c === 0x09 || c === 0x0a || c === 0x0b || c === 0x0c || c === 0x0d || c === 0x20 ? 1 : 0,
+      );
     },
     _o_towupper: (ctx) => {
       const c = raw(ctx, 0) & 0xffff;
@@ -177,4 +181,3 @@ export function ucrtbaseHandlers(): Record<string, ApiHandler> {
   };
   return ucrtbase;
 }
-

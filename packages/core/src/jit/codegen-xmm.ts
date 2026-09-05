@@ -7,7 +7,17 @@
 import type { MemOperand, Operand, XmmOperand } from './ir';
 import { xmmAddr } from './cpu';
 import type { WasmFunction } from './wasm-encoder';
-import { L_A, L_B, L_ORIG, L_S, L_TMP, L_TMP2, emitEa, pushOperand, storeOperand } from './codegen-shared';
+import {
+  L_A,
+  L_B,
+  L_ORIG,
+  L_S,
+  L_TMP,
+  L_TMP2,
+  emitEa,
+  pushOperand,
+  storeOperand,
+} from './codegen-shared';
 
 // ---------------------------------------------------------------------------
 // SSE (minimal XMM support)
@@ -35,7 +45,13 @@ export function pushXmmLane(fn: WasmFunction, src: MemOperand | XmmOperand, lane
  * Scalar semantics: a memory load zero-extends the upper lanes, a register
  * load leaves them untouched, and a scalar store only writes `lanes` dwords.
  */
-export function emitXmmMove(fn: WasmFunction, xmm: XmmOperand, other: MemOperand | XmmOperand, load: boolean, lanes: 1 | 2 | 4 = 4): void {
+export function emitXmmMove(
+  fn: WasmFunction,
+  xmm: XmmOperand,
+  other: MemOperand | XmmOperand,
+  load: boolean,
+  lanes: 1 | 2 | 4 = 4,
+): void {
   for (let i = 0; i < 4; i++) {
     if (load) {
       if (i >= lanes) {
@@ -82,7 +98,13 @@ export function emitXmmMove(fn: WasmFunction, xmm: XmmOperand, other: MemOperand
  * MOVLPS/MOVLPD/MOVHPS/MOVHPD: 8-byte half-register move between one half of
  * an XMM register (low pair when `high`=0, high pair when 1) and memory.
  */
-export function emitXmmHalfMove(fn: WasmFunction, xmm: XmmOperand, mem: MemOperand, high: 0 | 1, load: boolean): void {
+export function emitXmmHalfMove(
+  fn: WasmFunction,
+  xmm: XmmOperand,
+  mem: MemOperand,
+  high: 0 | 1,
+  load: boolean,
+): void {
   for (let i = 0; i < 2; i++) {
     const lane = high * 2 + i;
     if (load) {
@@ -107,7 +129,8 @@ export function emitXmmHalfMove(fn: WasmFunction, xmm: XmmOperand, mem: MemOpera
 }
 
 /** MOVD xmm, r/m32 / MOVD r/m32, xmm (66 0F 6E/7E). */
-export function emitXmmMovd(fn: WasmFunction, dst: Operand, src: Operand): void {  if (dst.kind === 'xmm') {
+export function emitXmmMovd(fn: WasmFunction, dst: Operand, src: Operand): void {
+  if (dst.kind === 'xmm') {
     // zero-extend the dword into lane 0; upper 96 bits are zeroed
     pushOperand(fn, src);
     fn.localSet(L_TMP);
@@ -128,7 +151,12 @@ export function emitXmmMovd(fn: WasmFunction, dst: Operand, src: Operand): void 
 }
 
 /** PSHUFD xmm, xmm/m128, imm8 (66 0F 70) — dword lane shuffle. */
-export function emitXmmPshufd(fn: WasmFunction, dst: XmmOperand, src: MemOperand | XmmOperand, imm: number): void {
+export function emitXmmPshufd(
+  fn: WasmFunction,
+  dst: XmmOperand,
+  src: MemOperand | XmmOperand,
+  imm: number,
+): void {
   pushXmmLane(fn, src, 0);
   fn.localSet(L_A);
   pushXmmLane(fn, src, 1);
@@ -198,7 +226,13 @@ export function emitXmmPxor(fn: WasmFunction, dst: XmmOperand, src: MemOperand |
  * to bytes): byte-shift the whole 128-bit XMM register right/left by `imm`.
  * Iterates in the direction that keeps an in-place (dst === src) shift safe.
  */
-export function emitXmmShiftBytes(fn: WasmFunction, dst: XmmOperand, src: MemOperand | XmmOperand, imm: number, left: boolean): void {
+export function emitXmmShiftBytes(
+  fn: WasmFunction,
+  dst: XmmOperand,
+  src: MemOperand | XmmOperand,
+  imm: number,
+  left: boolean,
+): void {
   const count = imm & 15;
   if (count === 0) {
     emitXmmMove(fn, dst, src, true, 4);
@@ -240,4 +274,3 @@ export function emitXmmShiftBytes(fn: WasmFunction, dst: XmmOperand, src: MemOpe
     }
   }
 }
-

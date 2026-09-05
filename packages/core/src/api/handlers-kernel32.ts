@@ -6,7 +6,19 @@
 
 import type { ApiCallContext, ApiHandler, ApiHost, ApiResult } from '@specter-core/contracts';
 import { CreationDisposition, DesiredAccess, WinError as E } from '@specter-core/contracts';
-import { fail, memCStr, memWStr, memWStrLen, numArg, ok, raw, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, strArg } from './handlers-shared';
+import {
+  fail,
+  memCStr,
+  memWStr,
+  memWStrLen,
+  numArg,
+  ok,
+  raw,
+  STD_ERROR_HANDLE,
+  STD_INPUT_HANDLE,
+  STD_OUTPUT_HANDLE,
+  strArg,
+} from './handlers-shared';
 import { formatDateTime, LOCALE_STRINGS, readSysTime, writeDateStr } from './handlers-datetime';
 import { splitFindPattern, volumeSerial, writeFindData } from './handlers-fs';
 
@@ -740,4 +752,3 @@ export function kernel32Handlers(): Record<string, ApiHandler> {
   };
   return kernel32;
 }
-

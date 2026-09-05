@@ -23,7 +23,6 @@ import {
   pushOperand,
   regAddr,
   storeOperand,
-  storeWidth,
 } from './codegen-shared';
 import {
   beginFlags,
@@ -106,7 +105,13 @@ export function emitMov(fn: WasmFunction, inst: Instruction, size: Size): void {
 // binary arithmetic
 // ---------------------------------------------------------------------------
 
-export function emitArith(fn: WasmFunction, op: Instruction['op'], size: Size, dst: Operand, src: Operand): void {
+export function emitArith(
+  fn: WasmFunction,
+  op: Instruction['op'],
+  size: Size,
+  dst: Operand,
+  src: Operand,
+): void {
   if (size === 64) {
     emitArith64(fn, op, dst, src);
     return;
@@ -280,7 +285,12 @@ export function emitTest64(fn: WasmFunction, dst: Operand, src: Operand): void {
 }
 
 /** 64-bit arithmetic/logic/comparison. Uses L_I64A/L_I64B operands, L_I64 result. */
-export function emitArith64(fn: WasmFunction, op: Instruction['op'], dst: Operand, src: Operand): void {
+export function emitArith64(
+  fn: WasmFunction,
+  op: Instruction['op'],
+  dst: Operand,
+  src: Operand,
+): void {
   pushOperand(fn, dst);
   fn.localSet(L_I64A);
   pushOperand(fn, src);
@@ -709,4 +719,3 @@ export function emitXadd64(fn: WasmFunction, dst: Operand, src: Operand): void {
   emitAfAdd64(fn);
   storeFlags(fn);
 }
-

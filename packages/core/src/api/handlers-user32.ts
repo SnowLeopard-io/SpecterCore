@@ -114,4 +114,3 @@ export function user32Handlers(): Record<string, ApiHandler> {
   };
   return user32;
 }
-

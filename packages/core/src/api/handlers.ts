@@ -41,4 +41,3 @@ export function registerDefaultHandlers(interceptor: ApiInterceptor): void {
 }
 
 export type { ApiHost, ApiResult, ApiCallContext } from '@specter-core/contracts';
-

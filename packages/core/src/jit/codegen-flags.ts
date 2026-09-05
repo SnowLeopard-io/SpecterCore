@@ -213,4 +213,3 @@ export function storeFlags(fn: WasmFunction): void {
   fn.localGet(L_TMP);
   fn.i32Store();
 }
-

@@ -6,7 +6,19 @@
 
 import type { Operand, Size } from './ir';
 import type { WasmFunction } from './wasm-encoder';
-import { L_A, L_B, L_ORIG, L_S, L_TMP, L_TMP2, emitEa, pushOperand, regAddr, storeOperand, storeWidth } from './codegen-shared';
+import {
+  L_A,
+  L_B,
+  L_ORIG,
+  L_S,
+  L_TMP,
+  L_TMP2,
+  emitEa,
+  pushOperand,
+  regAddr,
+  storeOperand,
+  storeWidth,
+} from './codegen-shared';
 import { beginFlags, orFlag, storeFlags } from './codegen-flags';
 
 /**
@@ -14,7 +26,13 @@ import { beginFlags, orFlag, storeFlags } from './codegen-flags';
  * when the source is zero (dest then holds 0, matching the common convention).
  * Maps onto i32.ctz / 31 - i32.clz.
  */
-export function emitBitScan(fn: WasmFunction, op: 'bsf' | 'bsr', size: Size, dst: Operand, src: Operand): void {
+export function emitBitScan(
+  fn: WasmFunction,
+  op: 'bsf' | 'bsr',
+  size: Size,
+  dst: Operand,
+  src: Operand,
+): void {
   pushOperand(fn, src);
   fn.localSet(L_A);
   // dest = (L_A == 0) ? 0 : scan(L_A)
@@ -44,7 +62,13 @@ export function emitBitScan(fn: WasmFunction, op: 'bsf' | 'bsr', size: Size, dst
  * set/clear/toggle it. For memory operands the dword address is
  * dst + (index >> 5) * 4 (the high bits of the index select the word).
  */
-export function emitBitTest(fn: WasmFunction, op: 'bt' | 'bts' | 'btr' | 'btc', size: Size, dst: Operand, src: Operand): void {
+export function emitBitTest(
+  fn: WasmFunction,
+  op: 'bt' | 'bts' | 'btr' | 'btc',
+  size: Size,
+  dst: Operand,
+  src: Operand,
+): void {
   pushOperand(fn, src);
   fn.localSet(L_B); // bit index
   let wordAddr: number | null = null;
@@ -112,4 +136,3 @@ export function emitBitTest(fn: WasmFunction, op: 'bt' | 'bts' | 'btr' | 'btc', 
   orFlag(fn, 0);
   storeFlags(fn);
 }
-

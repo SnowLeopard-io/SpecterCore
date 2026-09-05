@@ -36,7 +36,11 @@ export function splitFindPattern(path: string): { dir: string; pattern: string }
 }
 
 /** Writes a WIN32_FIND_DATAW record (592 bytes) from a bridge FindData. */
-export function writeFindData(host: ApiHost, address: number, data: { attributes: number; size: number; name: string }): void {
+export function writeFindData(
+  host: ApiHost,
+  address: number,
+  data: { attributes: number; size: number; name: string },
+): void {
   if (!address) return;
   const w = new Uint8Array(592);
   const view = new DataView(w.buffer);
@@ -48,4 +52,3 @@ export function writeFindData(host: ApiHost, address: number, data: { attributes
   }
   host.memory.write(address, w);
 }
-

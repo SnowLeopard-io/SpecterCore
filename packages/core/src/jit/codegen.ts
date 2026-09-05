@@ -59,7 +59,10 @@ import { emitDiv, emitMul } from './codegen-muldiv';
 import { emitCmps, emitLods, emitMovs, emitScas, emitStos } from './codegen-string';
 
 /** Compiles a decoded block into a WASM function body. */
-export function buildBlockFunction(instructions: readonly { inst: Instruction; nextAddress: number }[], opts: { terminated: boolean; endAddress: number; mode?: 'x86' | 'x64' }): WasmFunction {
+export function buildBlockFunction(
+  instructions: readonly { inst: Instruction; nextAddress: number }[],
+  opts: { terminated: boolean; endAddress: number; mode?: 'x86' | 'x64' },
+): WasmFunction {
   setMode(opts.mode ?? 'x86');
   const fn = new WasmFunction();
   for (let i = 0; i <= 5; i++) fn.declareLocal('i32');
@@ -189,33 +192,74 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
       emitRdtsc(fn);
       return;
     case 'xmm-load':
-      emitXmmMove(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, true, inst.lanes ?? 4);
+      emitXmmMove(
+        fn,
+        inst.dst as XmmOperand,
+        inst.src as MemOperand | XmmOperand,
+        true,
+        inst.lanes ?? 4,
+      );
       return;
     case 'xmm-store':
-      emitXmmMove(fn, inst.src as XmmOperand, inst.dst as MemOperand | XmmOperand, false, inst.lanes ?? 4);
+      emitXmmMove(
+        fn,
+        inst.src as XmmOperand,
+        inst.dst as MemOperand | XmmOperand,
+        false,
+        inst.lanes ?? 4,
+      );
       return;
     case 'xmm-movd':
       emitXmmMovd(fn, inst.dst!, inst.src!);
       return;
     case 'xmm-movlps-load':
     case 'xmm-movhps-load':
-      emitXmmHalfMove(fn, inst.dst as XmmOperand, inst.src as MemOperand, inst.op === 'xmm-movhps-load' ? 1 : 0, true);
+      emitXmmHalfMove(
+        fn,
+        inst.dst as XmmOperand,
+        inst.src as MemOperand,
+        inst.op === 'xmm-movhps-load' ? 1 : 0,
+        true,
+      );
       return;
     case 'xmm-movlps-store':
     case 'xmm-movhps-store':
-      emitXmmHalfMove(fn, inst.src as XmmOperand, inst.dst as MemOperand, inst.op === 'xmm-movhps-store' ? 1 : 0, false);
+      emitXmmHalfMove(
+        fn,
+        inst.src as XmmOperand,
+        inst.dst as MemOperand,
+        inst.op === 'xmm-movhps-store' ? 1 : 0,
+        false,
+      );
       return;
     case 'xmm-pshufd':
-      emitXmmPshufd(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, (inst.target as { value: number }).value);
+      emitXmmPshufd(
+        fn,
+        inst.dst as XmmOperand,
+        inst.src as MemOperand | XmmOperand,
+        (inst.target as { value: number }).value,
+      );
       return;
     case 'xmm-pxor':
       emitXmmPxor(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand);
       return;
     case 'xmm-psrldq':
-      emitXmmShiftBytes(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, (inst.target as { value: number }).value, false);
+      emitXmmShiftBytes(
+        fn,
+        inst.dst as XmmOperand,
+        inst.src as MemOperand | XmmOperand,
+        (inst.target as { value: number }).value,
+        false,
+      );
       return;
     case 'xmm-pslldq':
-      emitXmmShiftBytes(fn, inst.dst as XmmOperand, inst.src as MemOperand | XmmOperand, (inst.target as { value: number }).value, true);
+      emitXmmShiftBytes(
+        fn,
+        inst.dst as XmmOperand,
+        inst.src as MemOperand | XmmOperand,
+        (inst.target as { value: number }).value,
+        true,
+      );
       return;
     case 'finit':
     case 'fldcw':
@@ -241,12 +285,24 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
     case 'fld':
     case 'fst':
     case 'fstp':
-      emitFpuMove(fn, inst.op as 'fld' | 'fst' | 'fstp', inst.dst as MemOperand | undefined, inst.src as MemOperand | undefined, inst.size === 32 ? 32 : 64);
+      emitFpuMove(
+        fn,
+        inst.op as 'fld' | 'fst' | 'fstp',
+        inst.dst as MemOperand | undefined,
+        inst.src as MemOperand | undefined,
+        inst.size === 32 ? 32 : 64,
+      );
       return;
     case 'fild':
     case 'fist':
     case 'fistp':
-      emitFpuIntMove(fn, inst.op as 'fild' | 'fist' | 'fistp', inst.dst as MemOperand | undefined, inst.src as MemOperand | undefined, inst.size === 32 ? 32 : 64);
+      emitFpuIntMove(
+        fn,
+        inst.op as 'fild' | 'fist' | 'fistp',
+        inst.dst as MemOperand | undefined,
+        inst.src as MemOperand | undefined,
+        inst.size === 32 ? 32 : 64,
+      );
       return;
     case 'fld1':
     case 'fldz': {
@@ -401,4 +457,3 @@ function emitInstruction(fn: WasmFunction, inst: Instruction, nextAddress: numbe
       fn.unreachable();
   }
 }
-

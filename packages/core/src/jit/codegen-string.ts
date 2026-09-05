@@ -180,7 +180,12 @@ export function emitAdvance(fn: WasmFunction, reg: RegName, size: Size): void {
  * F3 = REPE (repeat while ZF=1), F2 = REPNE (repeat while ZF=0). The body must
  * set ZF (via a `cmp`) before this checks the termination condition.
  */
-export function emitRepCond(fn: WasmFunction, rep: boolean, repne: boolean, body: () => void): void {
+export function emitRepCond(
+  fn: WasmFunction,
+  rep: boolean,
+  repne: boolean,
+  body: () => void,
+): void {
   if (!rep) {
     body();
     return;
@@ -243,4 +248,3 @@ export function emitCmps(fn: WasmFunction, inst: Instruction, size: Size): void 
   };
   emitRepCond(fn, inst.rep ?? false, inst.repne ?? false, body);
 }
-

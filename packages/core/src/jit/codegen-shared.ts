@@ -5,7 +5,7 @@
  */
 
 import type { Instruction, MemOperand, Operand, RegName, Size } from './ir';
-import { CTX_BASE, EIP_OFFSET, REG_OFFSET } from './cpu';
+import { CTX_BASE, REG_OFFSET } from './cpu';
 import type { WasmFunction } from './wasm-encoder';
 
 // scratch local indices (all i32 unless noted)
@@ -130,4 +130,3 @@ export function operandSize(inst: Instruction): Size {
   if (src && src.kind !== 'rel' && src.kind !== 'xmm') return src.size;
   return 32;
 }
-

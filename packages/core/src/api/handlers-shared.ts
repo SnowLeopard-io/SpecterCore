@@ -69,4 +69,3 @@ export function memWStrLen(host: ApiHost, address: number, count: number): strin
   }
   return s;
 }
-

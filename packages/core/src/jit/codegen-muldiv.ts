@@ -27,7 +27,14 @@ import {
   regAddr,
   storeOperand,
 } from './codegen-shared';
-import { beginFlags, emitZspFlags, emitZspFlags64, flagMask, orFlag, storeFlags } from './codegen-flags';
+import {
+  beginFlags,
+  emitZspFlags,
+  emitZspFlags64,
+  flagMask,
+  orFlag,
+  storeFlags,
+} from './codegen-flags';
 
 export function emitMul(fn: WasmFunction, inst: Instruction, size: Size): void {
   if (size === 64) {
@@ -404,4 +411,3 @@ export function emitDiv(fn: WasmFunction, op: 'div' | 'idiv', size: Size, dst: O
   fn.i32Store();
   // flags undefined after div — leave as-is
 }
-

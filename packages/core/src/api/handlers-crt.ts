@@ -19,7 +19,7 @@ export const randImpl = (): ApiResult => {
   return ok((randState >>> 16) & 0x7fff);
 };
 export const srandImpl = (ctx: ApiCallContext): ApiResult => {
-  randState = (raw(ctx, 0) >>> 0) || 1;
+  randState = raw(ctx, 0) >>> 0 || 1;
   return ok(0);
 };
 
@@ -179,7 +179,14 @@ export function vswprintfImpl(host: ApiHost, ctx: ApiCallContext): ApiResult {
       if (precision >= 0) text = text.slice(0, precision);
     } else if (conv === 'p') {
       text = `0x${nextArg().toString(16)}`;
-    } else if (conv === 'd' || conv === 'i' || conv === 'u' || conv === 'o' || conv === 'x' || conv === 'X') {
+    } else if (
+      conv === 'd' ||
+      conv === 'i' ||
+      conv === 'u' ||
+      conv === 'o' ||
+      conv === 'x' ||
+      conv === 'X'
+    ) {
       let v: bigint;
       if (long64) {
         v = nextArg64();
@@ -255,4 +262,3 @@ export function wcsicmpImpl(host: ApiHost, aPtr: number, bPtr: number, wide: boo
   const b = wide ? readW(bPtr) : memCStr(host, bPtr).toLowerCase();
   return a < b ? -1 : a > b ? 1 : 0;
 }
-
