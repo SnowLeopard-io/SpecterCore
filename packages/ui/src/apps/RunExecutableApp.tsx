@@ -21,8 +21,6 @@ import { useGuestMenu } from '../guest-window-meta';
  * area (used by winmine's board). The guest never draws it (no DrawEdge), it
  * relies on the OS non-client frame, so we synthesize it on the host. */
 const WS_EX_CLIENTEDGE = 0x200;
-const WS_EX_DLGMODALFRAME = 0x1;
-const WS_BORDER = 0x00800000;
 
 interface RunExecutableProps {
   /** 要运行的 .exe（store 路径），来自 open 动词或桌面拖入。 */
@@ -464,7 +462,7 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
     } catch (err: unknown) {
       setStatus(`Error: ${String(err)}`);
     }
-  }, [source, kernel, ensureGuestWindows, fs, modulePath]);
+  }, [source, kernel, ensureGuestWindows, fs, modulePath, controller]);
 
   // Double-clicked .exe (initialFile set): run immediately, no security
   // warning / confirm phase — the user already chose to open it.
