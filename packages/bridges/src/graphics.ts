@@ -185,6 +185,15 @@ export class CanvasGdiBridge implements GdiBridge {
   private readonly dcs = new Map<number, GdiDc>();
   private readonly invalidateHandlers = new Set<(dc: number, rect: Rect) => void>();
   private readonly textCtx: CanvasRenderingContext2D | null;
+  /**
+   * Shared "screen" surface: all screen DCs (GetDC/BeginPaint) draw onto the
+   * window's single frame, mirroring real GDI where a screen DC renders to
+   * the screen. Direct draws outside the WM_PAINT cycle (winmine reveals
+   * tiles via GetDC/ReleaseDC) accumulate here instead of evaporating with
+   * the per-DC surface. Memory DCs (createCompatibleDC) keep private
+   * surfaces — double-buffering semantics unchanged.
+   */
+  private screenSurface: GdiSurface | null = null;
 
   constructor(private readonly display: HTMLCanvasElement) {
     this.textCtx = typeof document !== 'undefined' ? display.getContext('2d') : null;
@@ -210,7 +219,13 @@ export class CanvasGdiBridge implements GdiBridge {
     // falls back to a default 800x600 surface.
     const w = this.display?.width || 800;
     const h = this.display?.height || 600;
-    const surface = new GdiSurface(w, h);
+    // Screen DCs share the persistent screen surface (recreated when the
+    // display canvas resizes; content loss is fine — the guest repaints).
+    const isScreen = name === 'DISPLAY' || name === 'SCREEN';
+    if (isScreen && (!this.screenSurface || this.screenSurface.width !== w || this.screenSurface.height !== h)) {
+      this.screenSurface = new GdiSurface(w, h);
+    }
+    const surface = isScreen ? this.screenSurface! : new GdiSurface(w, h);
     const handle = nextId();
     this.dcs.set(handle, {
       surface,
@@ -218,7 +233,7 @@ export class CanvasGdiBridge implements GdiBridge {
       saveStack: [],
       canvas: null,
     });
-    console.log('[GDI-bridge] createDC name=%s → handle=%d surface=%dx%d canvas=%sx%s', name, handle, w, h, this.display?.width ?? '?', this.display?.height ?? '?');
+    console.log('[GDI-bridge] createDC name=%s → handle=%d surface=%dx%d canvas=%sx%s', name, handle, surface.width, surface.height, this.display?.width ?? '?', this.display?.height ?? '?');
     void name;
     return handle;
   }

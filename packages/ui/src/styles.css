@@ -3347,6 +3347,21 @@
   overflow: hidden;
 }
 
+/* WS_EX_CLIENTEDGE emulation: classic Win9x sunken 3D border around the
+ * client area. The guest never paints it (no DrawEdge/GetWindowDC), so we
+ * synthesize it on the host. Top/left = shadow (pushed in), bottom/right =
+ * highlight. The inset box-shadow deepens the bevel to match winmine's
+ * chunky board frame. */
+.sc-gwin-canvas-container.sc-gwin-clientedge {
+  border: 3px solid;
+  border-color: #808080 #ffffff #ffffff #808080;
+  box-shadow:
+    inset 1px 1px 0 #404040,
+    inset -1px -1px 0 #dfdfdf;
+  padding: 3px;
+  background: #c0c0c0;
+}
+
 .sc-gwin-canvas {
   display: block;
   width: 100%;

@@ -34,6 +34,7 @@ import { Desktop } from './components/Desktop';
 import { DEFAULT_APPS } from './apps';
 import { ensureBuiltinWinFiles } from './builtin-win';
 import { setGuestText } from './guest-text';
+import { setGuestMenu } from './guest-window-meta';
 import { guestGdiBridgeProvider } from './gdi-bridge-registry';
 import { GuestWindowView } from './apps/RunExecutableApp';
 import { CmdGuestTerminal } from './apps/CmdGuestTerminal';
@@ -569,6 +570,7 @@ export class DesktopControllerImpl implements DesktopController {
                     hwnd={w.hwnd}
                     editHwnd={edit ? edit.hwnd : null}
                     menu={w.menu}
+                    exStyle={w.exStyle}
                   />,
                 ),
               })
@@ -576,6 +578,10 @@ export class DesktopControllerImpl implements DesktopController {
           }
         },
         onTextChanged: (hwnd, text) => setGuestText(hwnd, text),
+        onWindowMetaChanged: (hwnd) => {
+          const rec = runner.getWindows().find((w) => w.hwnd === hwnd);
+          if (rec) setGuestMenu(hwnd, rec.menu);
+        },
       });
       // Process exited (WM_QUIT / ExitProcess) — close the hosted windows.
       for (const id of guestWinIds.values()) {

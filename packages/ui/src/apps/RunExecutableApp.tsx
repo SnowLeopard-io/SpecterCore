@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { CanvasGdiBridge } from '@specter-core/bridges';
 import { extractPeIcon, parsePe, toStorePath } from '@specter-core/shared';
 import { tokens } from '@specter-core/contracts';
@@ -14,6 +15,14 @@ import {
 import { useUi } from '../context';
 import { setGuestText, useGuestText } from '../guest-text';
 import { setGuestGdiBridge, guestGdiBridgeProvider } from '../gdi-bridge-registry';
+import { useGuestMenu } from '../guest-window-meta';
+
+/** WS_EX_CLIENTEDGE = 0x200 — the classic sunken 3D border around a client
+ * area (used by winmine's board). The guest never draws it (no DrawEdge), it
+ * relies on the OS non-client frame, so we synthesize it on the host. */
+const WS_EX_CLIENTEDGE = 0x200;
+const WS_EX_DLGMODALFRAME = 0x1;
+const WS_BORDER = 0x00800000;
 
 interface RunExecutableProps {
   /** 要运行的 .exe（store 路径），来自 open 动词或桌面拖入。 */
@@ -84,19 +93,50 @@ interface GuestWindowViewProps {
   runner: GuestProcessRunner;
   hwnd: number;
   editHwnd: number | null;
+  /** Initial menu sections (set via CreateWindowExW hMenu). Most apps, and
+   * winmine specifically, attach their menu *after* create via SetMenu — the
+   * live menu from useGuestMenu takes precedence when present. */
   menu: GuestMenuSection[];
+  /** CreateWindowExW extended style. WS_EX_CLIENTEDGE (0x200) makes us draw
+   * the classic Win9x sunken 3D border the guest never paints (winmine's
+   * board frame). */
+  exStyle?: number;
 }
 /** Content of a guest window hosted as a real L6 desktop window (Layer 3).
  * Renders the menu bar + a GDI canvas for pixel output, with the EDIT control
  * textarea overlaid on top (transparent background) so typing goes straight
  * into the guest via runner.postText. Closing the window posts WM_CLOSE so
  * the guest process terminates. */
-export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowViewProps) {
+export function GuestWindowView({ runner, hwnd, editHwnd, menu, exStyle = 0 }: GuestWindowViewProps) {
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Live text of the guest EDIT control: notepad's own WM_SETTEXT (New,
   // paste, ...) flows back through onTextChanged -> setGuestText.
   const text = useGuestText(editHwnd);
+  // Live menu of this guest window. winmine attaches its Game/Help bar via
+  // SetMenu *after* CreateWindowExW returned, so the create-time `menu` prop
+  // is empty; the store reflects the post-create update and re-renders.
+  const liveMenu = useGuestMenu(hwnd);
+  const effectiveMenu = liveMenu.length > 0 ? liveMenu : menu;
+  // WS_EX_CLIENTEDGE sunken border (classic Win9x look) the guest never draws.
+  const clientEdge = (exStyle & WS_EX_CLIENTEDGE) !== 0;
+  // Forward mouse activity to the guest as Win32 client-area mouse messages:
+  // WM_MOUSEMOVE/LBUTTONDOWN/LBUTTONUP/RBUTTONDOWN/RBUTTONUP with
+  // lParam = MAKELONG(x, y) client coords and wParam = MK_* button flags.
+  // winmine is unplayable without this — its whole input path is the mouse.
+  const postMouse = useCallback(
+    (msg: number, e: ReactMouseEvent<HTMLCanvasElement>, wParam: number): void => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const sx = rect.width > 0 ? canvas.width / rect.width : 1;
+      const sy = rect.height > 0 ? canvas.height / rect.height : 1;
+      const x = Math.max(0, Math.min(0xffff, Math.round((e.clientX - rect.left) * sx)));
+      const y = Math.max(0, Math.min(0xffff, Math.round((e.clientY - rect.top) * sy)));
+      runner.postMessage({ hwnd, msg, wParam, lParam: ((y & 0xffff) << 16) | (x & 0xffff) });
+    },
+    [runner, hwnd],
+  );
 
   // Register a CanvasGdiBridge for this window so guest GDI calls
   // (BeginPaint/TextOut/FillRect/...) render pixels to our canvas.
@@ -162,7 +202,7 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
   // produced (File/Edit parse fully; nested submenus flatten into items).
   // Ampersands are Win32 accelerator markers ("&File" -> "File").
   const stripAmps = (s: string): string => s.replace(/&/g, '');
-  const sections = menu.filter(
+  const sections = effectiveMenu.filter(
     (s) => s.items.length > 0 && !s.title.includes('\t') && /^[A-Za-z&]/.test(s.title),
   );
   return (
@@ -197,8 +237,33 @@ export function GuestWindowView({ runner, hwnd, editHwnd, menu }: GuestWindowVie
         ))}
         </div>
       )}
-      <div className="sc-gwin-canvas-container">
-        <canvas ref={canvasRef} width={800} height={560} className="sc-gwin-canvas" />
+      <div className={`sc-gwin-canvas-container${clientEdge ? ' sc-gwin-clientedge' : ''}`}>
+        <canvas
+          ref={canvasRef}
+          width={800}
+          height={560}
+          className="sc-gwin-canvas"
+          onMouseDown={(e) => {
+            // MK_LBUTTON = 0x0001, MK_RBUTTON = 0x0002 (e.buttons uses the
+            // same bit layout).
+            const mk = e.buttons & 3;
+            if (mk !== 0) {
+              const down = e.button === 2 ? 0x0204 /* WM_RBUTTONDOWN */ : 0x0201 /* WM_LBUTTONDOWN */;
+              postMouse(down, e, mk);
+            }
+          }}
+          onMouseUp={(e) => {
+            const up = e.button === 2 ? 0x0205 /* WM_RBUTTONUP */ : 0x0202 /* WM_LBUTTONUP */;
+            postMouse(up, e, 0);
+          }}
+          onMouseMove={(e) => {
+            postMouse(0x0200 /* WM_MOUSEMOVE */, e, e.buttons & 3);
+          }}
+          onContextMenu={(e) => {
+            // Right-click belongs to the guest (winmine flags mines).
+            e.preventDefault();
+          }}
+        />
         {editHwnd && (
           <textarea
             className="sc-gwin-edit-overlay"
@@ -259,6 +324,7 @@ export function RunExecutableApp({ initialFile, modulePath }: RunExecutableProps
                 hwnd={w.hwnd}
                 editHwnd={edit ? edit.hwnd : null}
                 menu={w.menu}
+                exStyle={w.exStyle}
               />
             ),
           },

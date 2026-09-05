@@ -11,6 +11,7 @@
 
 import type { PeImage } from '@specter-core/contracts';
 import type { WasmRuntimeImpl } from '../jit/runtime';
+import { archForPe, type ArchBackend } from '../arch';
 
 /** Stub region: below the default 0x400000 image base. */
 export const STUB_BASE = 0x00200000;
@@ -861,7 +862,12 @@ function applyRelocations(runtime: WasmRuntimeImpl, pe: PeImage, imageBase: numb
 }
 
 /** Maps the image and rewrites the IAT; returns the stub/import table. */
-export function mapPeImage(runtime: WasmRuntimeImpl, rawImage: Uint8Array, pe: PeImage): MappedImage {
+export function mapPeImage(
+  runtime: WasmRuntimeImpl,
+  rawImage: Uint8Array,
+  pe: PeImage,
+  arch: ArchBackend = archForPe(pe),
+): MappedImage {
   // Choose the effective image base (rebase oversized PE32+ images).
   const rebase = pe.baseAddress > MAX_IMAGE_BASE;
   const baseAddress = rebase ? X64_BASE : pe.baseAddress;
@@ -889,44 +895,19 @@ export function mapPeImage(runtime: WasmRuntimeImpl, rawImage: Uint8Array, pe: P
     for (const fn of imp.functions) {
       const proc = fn.name ?? `#${fn.ordinal ?? 0}`;
       const stubAddress = nextStub;
-      // mov eax, <index>; int 0x2E; ret [<args*4>]
-      // 32-bit APIs are stdcall: the stub must pop the caller's arguments or
-      // the guest stack drifts and the next `ret` pops a garbage address.
-      const argCount = pe.is64 ? 0 : X86_API_ARG_COUNT[proc.toLowerCase()] ?? 0;
-      const stubLen = pe.is64 || argCount === 0 ? 8 : 10;
-      const stub = new Uint8Array(stubLen);
-      stub[0] = 0xb8;
-      stub[1] = index & 0xff;
-      stub[2] = (index >> 8) & 0xff;
-      stub[3] = (index >> 16) & 0xff;
-      stub[4] = (index >> 24) & 0xff;
-      stub[5] = 0xcd;
-      stub[6] = 0x2e;
-      if (argCount > 0) {
-        // ret <args*4> — clears the pushed arguments (stdcall).
-        const popBytes = argCount * 4;
-        stub[7] = 0xc2;
-        stub[8] = popBytes & 0xff;
-        stub[9] = (popBytes >> 8) & 0xff;
-      } else {
-        stub[7] = 0xc3;
-      }
+      const argCount = arch.importArgCount(proc);
+      const stub = arch.emitImportStub(index, argCount);
       runtime.writeBytes(stubAddress, stub);
 
-      // IAT slot: image base + iatRva + slot*8 (thunks are 8 bytes on PE32+).
+      // IAT slot: image base + iatRva + slot*pointerSize (8 bytes on PE32+).
       // The slot must use the entry's ILT index: dropping entries (e.g. ordinal
       // imports) earlier would shift later slots and mispatch `call [IAT]` sites.
       const slot = fn.index ?? imp.functions.indexOf(fn);
-      const iatAddress = baseAddress + imp.iatRva + slot * (pe.is64 ? 8 : 4);
-      if (pe.is64) {
-        runtime.writeInt32(iatAddress, stubAddress);
-        runtime.writeInt32(iatAddress + 4, 0);
-      } else {
-        runtime.writeInt32(iatAddress, stubAddress);
-      }
+      const iatAddress = baseAddress + imp.iatRva + slot * arch.pointerSize;
+      arch.writeIatSlot(runtime, iatAddress, stubAddress);
 
       stubs.push({ index, module: imp.moduleName, proc, stubAddress, iatAddress });
-      nextStub += stubLen;
+      nextStub += stub.length;
       index += 1;
     }
   }

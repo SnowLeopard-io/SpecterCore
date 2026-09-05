@@ -9,6 +9,7 @@
  */
 
 import type { ApiInterceptor } from '@specter-core/contracts';
+import type { ArchBackend } from '../arch/types';
 import type { ApiStub } from '../pe/mapper';
 import type { TrapHandler } from './executor';
 import type { WasmRuntimeImpl } from './runtime';
@@ -24,7 +25,7 @@ export class ApiTrapDispatcher implements TrapHandler {
     private readonly runtime: WasmRuntimeImpl,
     private readonly stubs: readonly ApiStub[],
     private readonly maxArgs = 8,
-    private readonly mode: 'x86' | 'x64' = 'x86',
+    private readonly arch: ArchBackend,
   ) {}
 
   async handle(vector: number): Promise<void> {
@@ -34,29 +35,7 @@ export class ApiTrapDispatcher implements TrapHandler {
     if (!stub) return;
     this.lastCalled = stub;
 
-    const rawArgs: number[] = [];
-    if (this.mode === 'x64') {
-      // x86-64 calling convention: rcx, rdx, r8, r9, then the stack.
-      // At trap time rsp = caller-rsp - 8 (the CALL pushed a return address),
-      // so the 5th+ args live at [rsp + 0x28 + (i-4)*8].
-      const regArgs = ['rcx', 'rdx', 'r8', 'r9'] as const;
-      const rsp = this.runtime.getReg('rsp');
-      for (let i = 0; i < this.maxArgs; i++) {
-        if (i < 4) {
-          rawArgs.push(this.runtime.getReg(regArgs[i] as 'rcx' | 'rdx' | 'r8' | 'r9'));
-        } else {
-          rawArgs.push(this.runtime.readInt32(rsp + 0x28 + (i - 4) * 8));
-        }
-      }
-    } else {
-      const esp = this.runtime.getReg('esp');
-      // Read a fixed number of stdcall stack slots (arg0 at [esp+4], design 4.2.5).
-      // Zero-valued arguments are meaningful (NULL pointers/handles), so every
-      // slot is read; handlers index the ones they need.
-      for (let i = 0; i < this.maxArgs; i++) {
-        rawArgs.push(this.runtime.readInt32(esp + 4 + i * 4));
-      }
-    }
+    const rawArgs = this.arch.marshalTrapArgs(this.runtime, this.maxArgs);
 
     const result = await this.interceptor.dispatch({
       module: stub.module,
@@ -67,10 +46,6 @@ export class ApiTrapDispatcher implements TrapHandler {
       lastError: 0,
     });
 
-    this.runtime.setReg('eax', result.returnValue);
-    if (result.returnValueHigh !== undefined) {
-      // 64-bit return (edx:eax / rdx:rax)
-      this.runtime.setReg(this.mode === 'x64' ? 'rdx' : 'edx', result.returnValueHigh >>> 0);
-    }
+    this.arch.writeTrapReturn(this.runtime, result);
   }
 }

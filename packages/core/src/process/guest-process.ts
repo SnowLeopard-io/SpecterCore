@@ -30,7 +30,8 @@ import { STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE } from '../api/ha
 import type { ApiHost } from '../api/handlers';
 import { ApiTrapDispatcher } from '../jit/trap-dispatcher';
 import { Executor, type TrapHandler } from '../jit/executor';
-import { mapPeImage, X86_API_ARG_COUNT, type ApiStub, type MappedImage } from '../pe/mapper';
+import { mapPeImage, type ApiStub, type MappedImage } from '../pe/mapper';
+import { archForPe, type ArchBackend } from '../arch';
 import type { WasmRuntimeImpl } from '../jit/runtime';
 import type { RegName } from '../jit/ir';
 
@@ -120,6 +121,10 @@ export interface GuestWindowRecord {
   text: string;
   /** Menu bar sections parsed from the window's RT_MENU (empty when none). */
   menu: GuestMenuSection[];
+  /** Window styles from CreateWindowExW — used to emulate non-client chrome
+   * (e.g. WS_EX_CLIENTEDGE sunken border, WS_BORDER) the guest never paints. */
+  exStyle: number;
+  style: number;
   /** Client size last reported by MoveWindow (0 when never resized). */
   width: number;
   height: number;
@@ -200,6 +205,13 @@ export interface GuestProcessOptions {
   onMessageWait?: () => void;
   /** Called when a guest EDIT control's text changes (host syncs the UI). */
   onTextChanged?: (hwnd: number, text: string) => void;
+  /**
+   * Called when a window's menu/title/style changes *after* creation — most
+   * importantly when the guest calls SetMenu (winmine attaches its Game/Help
+   * bar this way, after CreateWindowExW already returned). Lets the host
+   * refresh the rendered menu bar without re-creating the desktop window.
+   */
+  onWindowMetaChanged?: (hwnd: number) => void;
   /**
    * Command line reported by GetCommandLineW/A (e.g. 'cmd.exe /c dir').
    * Empty by default; cmd.exe needs it to decide interactive vs /c mode.
@@ -308,6 +320,8 @@ export class GuestProcessRunner {
       className: string;
       text: string;
       menu: GuestMenuSection[];
+      exStyle: number;
+      style: number;
       width: number;
       height: number;
     }
@@ -319,6 +333,15 @@ export class GuestProcessRunner {
   /** RT_MENU (type 4) resources by numeric id, from the exe/MUI table. */
   private menuResourceTable = new Map<number, { size: number; address: number }>();
   private guiMessageQueue: Array<{ hwnd: number; msg: number; wParam: number; lParam: number }> = [];
+  /** Active guest timers (SetTimer): key = ((hwnd & 0xffff) << 16) | id. */
+  private guiTimers = new Map<number, ReturnType<typeof setInterval>>();
+
+  /** Stops all guest timers (per-run lifecycle; run() start and exit). */
+  private clearGuiTimers(): void {
+    for (const handle of this.guiTimers.values()) clearInterval(handle);
+    this.guiTimers.clear();
+  }
+
   /** GDI draw operations captured by the Layer 2 bridge. */
   private paintCommands: PaintCommand[] = [];
   /** Pseudo object handles minted by GDI handlers (DC / font / brush / pen). */
@@ -340,6 +363,8 @@ export class GuestProcessRunner {
   private pendingInputResolve: (() => void) | null = null;
   /** Host callback for EDIT text changes (see GuestProcessOptions.onTextChanged). */
   private onTextChanged?: (hwnd: number, text: string) => void;
+  /** Host callback when a window's menu/title/style changes post-creation. */
+  private onWindowMetaChanged?: (hwnd: number) => void;
   /** Host callback when GetMessageW blocks (see GuestProcessOptions.onMessageWait). */
   private onMessageWait?: () => void;
   /** Host-driven file dialog (see GuestProcessOptions.fileDialog). */
@@ -365,8 +390,8 @@ export class GuestProcessRunner {
   private wideEnvBlock = 0;
   /** Narrow environment block pointer (GetEnvironmentStringsA). */
   private narrowEnvBlock = 0;
-  /** Active execution mode for the current run (x86 / x64). */
-  private mode: 'x86' | 'x64' = 'x86';
+  /** Architecture backend (owns all mode-specific policy) for the current run. */
+  private arch!: ArchBackend;
   /** Mode-correct JIT engine (per-run, from run()'s createEngine path). */
   private activeJit!: JitEngine;
   /** Trap dispatcher used by nested WndProc executions. */
@@ -398,6 +423,7 @@ export class GuestProcessRunner {
     this.classWndProcs.clear();
     this.windowRecords.clear();
     this.guiMessageQueue.length = 0;
+    this.clearGuiTimers();
     this.paintCommands = [];
     this.gdiObjSeq = 0x3000;
     this.gdiBridgeByHdc.clear();
@@ -409,6 +435,7 @@ export class GuestProcessRunner {
     this.pendingInputResolve = null;
     this.onTextChanged = options.onTextChanged;
     this.onMessageWait = options.onMessageWait;
+    this.onWindowMetaChanged = options.onWindowMetaChanged;
     this.fileDialog = options.fileDialog;
     this.screenSize = options.screenSize ?? { width: 1024, height: 768 };
     this.muiLoaded = false;
@@ -419,7 +446,8 @@ export class GuestProcessRunner {
     this.runtime.resetCpu();
 
     const pe = await this.loader.load(image);
-    const mapped = mapPeImage(this.runtime, image, pe);
+    this.arch = archForPe(pe);
+    const mapped = mapPeImage(this.runtime, image, pe, this.arch);
     // Apply raw memory patches (e.g. neutralize cmd.exe's GS cookie check)
     // right after the image is mapped and before any execution, so the JIT
     // compiles the patched bytes on first call.
@@ -431,17 +459,14 @@ export class GuestProcessRunner {
     let dynStubCursor = mapped.stubEnd;
     await this.installStartupHandlers(pe, mapped, stubs, () => dynStubCursor, (next) => { dynStubCursor = next; }, image);
     this.installFileDialogs();
-    const mode: 'x86' | 'x64' = pe.is64 ? 'x64' : 'x86';
-    const jit = options.createEngine ? options.createEngine(mode) : this.jit;
-    this.mode = mode;
+    const jit = options.createEngine ? options.createEngine(this.arch.mode) : this.jit;
     this.activeJit = jit;
     this.activeOptions = options;
 
     // Initial stack: grows down from stackTop; the null return address makes a
-    // bare `ret` out of the entry point look like a clean exit (eip -> 0).
-    // On x86-64 the stack is 8-byte aligned and slots are 8 bytes wide.
+    // bare `ret` out of the entry point look like a clean exit (eip -> 0). The
+    // x86/x64 framing (sentinel + stack pointer) is delegated to the backend.
     const stackTop = options.stackTop ?? DEFAULT_STACK_TOP;
-    const width = mode === 'x64' ? 8 : 4;
     // Headroom above the stack top so the entry function's shadow-space and
     // prologue writes ([rsp+N]) don't exceed the allocated linear memory.
     // Real CRT startup also probes the stack guard region ABOVE the top (e.g.
@@ -451,15 +476,13 @@ export class GuestProcessRunner {
     // "memory access out of bounds" trap.
     const stackHeadroom = 0x80000; // 512 KiB of slack above the stack top
     this.runtime.ensure(stackTop + stackHeadroom);
-    this.runtime.writeInt32(stackTop - 4, 0);
-    if (mode === 'x64') this.runtime.writeInt32(stackTop - 8, 0);
-    this.runtime.setReg(mode === 'x64' ? 'rsp' : 'esp', stackTop - width);
+    this.arch.setupStack(this.runtime, stackTop);
 
     // 16 arg slots: CreateWindowExW has 12 params and handlers (GUI bridge)
     // read hWndParent at rawArgs[8] — the default 8 slots were not enough.
-    const dispatcher = new ApiTrapDispatcher(this.interceptor, this.runtime, stubs, 16, mode);
-    this.installSehDispatch(dispatcher, jit, mode);
-    this.installGuiBridge(dispatcher, jit, mode, options);
+    const dispatcher = new ApiTrapDispatcher(this.interceptor, this.runtime, stubs, 16, this.arch);
+    this.installSehDispatch(dispatcher, jit);
+    this.installGuiBridge(dispatcher, jit, options);
     const trapHandler: TrapHandler = {
       handle: async (vector, rt) => {
         if (vector === SEH_SENTINEL_VECTOR) {
@@ -487,6 +510,10 @@ export class GuestProcessRunner {
     });
     const result = await executor.run(mapped.entryPoint);
 
+    // The guest is done — stop WM_TIMER intervals before the host inspects
+    // the result (faults/limits exit without PostQuitMessage).
+    this.clearGuiTimers();
+
     const guestResult: GuestProcessResult = {
       status: this.exitRequested ? 'exit' : result.status,
       exitCode: this.exitRequested ? this.exitCode : 0,
@@ -503,12 +530,13 @@ export class GuestProcessRunner {
         parent: r.parent,
         text: r.text,
         menu: r.menu,
+        exStyle: r.exStyle,
+        style: r.style,
         width: r.width,
         height: r.height,
       })),
       paintCommands: [...this.paintCommands],
-      muiLoaded: this.muiLoaded,
-      muiSource: this.muiSource,
+      muiLoaded: this.muiLoaded,      muiSource: this.muiSource,
     };
     if (guestResult.status === 'fault') options.onFault?.(this.runtime, guestResult);
     return guestResult;
@@ -878,6 +906,19 @@ export class GuestProcessRunner {
       if (res.returnValue) this.menuByHandle.set(res.returnValue, this.parseMenuResource(res.returnValue));
       return res;
     });
+    // SetMenu attaches a previously LoadMenuW'd RT_MENU to a window. winmine
+    // calls this AFTER CreateWindowExW returned (hMenu was NULL at create), so
+    // without this hook the host never sees the Game/Help bar. We copy the
+    // parsed sections into the window record and notify the host to re-render.
+    this.interceptor.hook('user32.dll', 'SetMenu', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const hMenu = ctx.rawArgs[1] ?? 0;
+      const rec = this.windowRecords.get(hwnd);
+      if (!rec) return { returnValue: 0, errorCode: E.NO_ERROR };
+      rec.menu = hMenu ? this.menuByHandle.get(hMenu) ?? [] : [];
+      this.onWindowMetaChanged?.(hwnd);
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    });
     this.interceptor.hook('user32.dll', 'LoadMenuA', (ctx) => loadResBytes(ctx, 4));
     this.interceptor.hook('user32.dll', 'LoadAcceleratorsW', (ctx) => loadResBytes(ctx, 9));
     this.interceptor.hook('user32.dll', 'LoadAcceleratorsA', (ctx) => loadResBytes(ctx, 9));
@@ -1118,35 +1159,16 @@ export class GuestProcessRunner {
       // Wldp.dll#2 = 5). Without this the stub `ret 0` leaks 4*N bytes per call
       // and drifts the guest stack (cmd parser 0x40b743 +12 -> ebx clobbered).
       // x64 uses the Microsoft x64 calling convention: the CALLER cleans the
-      // stack, so every stub must be a plain `ret` (c3). Only 32-bit stdcall
+      // stack, so the backend emits a plain `ret` (c3). Only 32-bit stdcall
       // imports need `ret <args*4>` — an x64 `ret N` pops N extra bytes and
       // drifts the guest stack (SHGetKnownFolderPath: ret 16 vs ret -> +0x10).
-      const argCount = pe.is64 ? 0 : (
-        (moduleName ? X86_API_ARG_COUNT[`${moduleName.toLowerCase()}!${procName.toLowerCase()}`] : undefined) ??
-        X86_API_ARG_COUNT[procName.toLowerCase()] ??
-        0);
+      const argCount = this.arch.importArgCount(procName, moduleName);
       const index = stubs.length;
       const stubAddress = dynCursor();
-      const stubLen = argCount === 0 ? 8 : 10;
-      const stub = new Uint8Array(stubLen);
-      stub[0] = 0xb8;
-      stub[1] = index & 0xff;
-      stub[2] = (index >> 8) & 0xff;
-      stub[3] = (index >> 16) & 0xff;
-      stub[4] = (index >> 24) & 0xff;
-      stub[5] = 0xcd;
-      stub[6] = 0x2e;
-      if (argCount > 0) {
-        const popBytes = argCount * 4;
-        stub[7] = 0xc2;
-        stub[8] = popBytes & 0xff;
-        stub[9] = (popBytes >> 8) & 0xff;
-      } else {
-        stub[7] = 0xc3;
-      }
+      const stub = this.arch.emitImportStub(index, argCount);
       this.runtime.writeBytes(stubAddress, stub);
       stubs.push({ index, module, proc: procName, stubAddress, iatAddress: 0 });
-      setDynCursor(stubAddress + stubLen);
+      setDynCursor(stubAddress + stub.length);
       return stubAddress;
     };
 
@@ -1184,11 +1206,6 @@ export class GuestProcessRunner {
       const desc = (ctx.rawArgs[1] ?? 0) >>> 0;
       const thunk = (ctx.rawArgs[4] ?? 0) >>> 0;
       const rd32 = (a: number): number => (a ? this.runtime.readInt32(a) >>> 0 : 0);
-      const rd64 = (a: number): bigint => {
-        const lo = this.runtime.readInt32(a) >>> 0;
-        const hi = this.runtime.readInt32(a + 4) >>> 0;
-        return (BigInt(hi) << 32n) | BigInt(lo);
-      };
       // x64 IAT/INT entries are 8 bytes; x86 entries are 4. The name RVA lives
       // in the low 4 bytes of each entry (RVAs are < 4GB). For x64 the ordinal
       // marker is bit 63 (IMAGE_ORDINAL_FLAG64), which sits in the HIGH dword —
@@ -1196,7 +1213,7 @@ export class GuestProcessRunner {
       // name RVA, resolve nothing, and make ResolveDelayLoadedAPI return 0,
       // which aborts cmd.exe's Wldp.dll delay-load init. So read the full
       // 8-byte thunk-data to detect ordinals on x64.
-      const stride = pe.is64 ? 8 : 4;
+      const stride = this.arch.thunkStride;
       const dllRva = rd32(desc + 4);
       const iatRva = rd32(desc + 12);
       const intRva = rd32(desc + 16);
@@ -1204,8 +1221,8 @@ export class GuestProcessRunner {
       const dllName = readCStr(parentBase + dllRva).toLowerCase();
       const idx = (thunk - (parentBase + iatRva)) / stride;
       const intThunk = parentBase + intRva + idx * stride;
-      const entry = pe.is64 ? rd64(intThunk) : BigInt(rd32(intThunk));
-      const ORDINAL_FLAG = pe.is64 ? 0x8000000000000000n : 0x80000000n;
+      const entry = this.arch.readThunkEntry(this.runtime, intThunk);
+      const ORDINAL_FLAG = this.arch.ordinalFlag;
       let procName: string;
       if ((entry & ORDINAL_FLAG) !== 0n) {
         procName = `#${Number(entry & 0xffffn)}`;
@@ -1217,10 +1234,9 @@ export class GuestProcessRunner {
       const stub = allocDynamicStub(procName, dllName);
       if (!stub) return { returnValue: 0, errorCode: E.NO_ERROR };
       // For x64 the IAT slot is 8 bytes; resolve it with a full 64-bit pointer
-      // (guest addresses stay in the low 4GB, so the high dword is 0).
-      this.runtime.writeInt32(thunk, stub >>> 0);
-      if (pe.is64) this.runtime.writeInt32(thunk + 4, 0);
-      else if (dllName) this.runtime.writeInt32(thunk + 4, 0);
+      // (guest addresses stay in the low 4GB, so the high dword is 0). The
+      // backend's writeIatSlot mirrors the delay-load x86/x64 behavior.
+      this.arch.writeIatSlot(this.runtime, thunk, stub >>> 0, dllName);
       return { returnValue: stub, errorCode: E.NO_ERROR };
     });
 
@@ -2073,12 +2089,9 @@ export class GuestProcessRunner {
     const pmpFactoryAddr = ((): number => {
       // x64 vtable slots are 8-byte pointers at 8-byte stride (notepad reads
       // vtable[12] at offset 0x60); the 32-bit build uses 4-byte slots.
-      const writePtr = (address: number, value: number): void => {
-        this.runtime.writeInt32(address, value | 0);
-        if (pe.is64) this.runtime.writeInt32(address + 4, 0);
-      };
-      const slotCount = pe.is64 ? 32 : 16;
-      const vt = bumpAlloc(pe.is64 ? slotCount * 8 : slotCount * 4);
+      const writePtr = (address: number, value: number): void => this.arch.writePointer(this.runtime, address, value | 0);
+      const slotCount = this.arch.vtableSlotCount();
+      const vt = bumpAlloc(slotCount * this.arch.pointerSize);
       const factory = bumpAlloc(0x10);
       // IUnknown: [0]=QueryInterface(3 args), [1]=AddRef(0), [2]=Release(0).
       // notepad's EDP helper then calls [12] (CheckAccess-ish, 3 args) and
@@ -2096,7 +2109,7 @@ export class GuestProcessRunner {
                 : 'pmp_vtbl_stub';
       for (let i = 0; i < slotCount; i++) {
         const stub = allocDynamicStub(slotName(i));
-        writePtr(vt + i * (pe.is64 ? 8 : 4), stub);
+        writePtr(vt + i * this.arch.pointerSize, stub);
       }
       writePtr(factory, vt);
       return factory;
@@ -2119,8 +2132,7 @@ export class GuestProcessRunner {
       }
       if (name === 'Windows.Security.EnterpriseData.ProtectionPolicyManager') {
         if (out) {
-          this.runtime.writeInt32(out, pmpFactoryAddr | 0);
-          if (pe.is64) this.runtime.writeInt32(out + 4, 0);
+          this.arch.writePointer(this.runtime, out, pmpFactoryAddr | 0);
         }
         return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
       }
@@ -2135,8 +2147,7 @@ export class GuestProcessRunner {
       const out = ctx.rawArgs[2] ?? 0;
       const self = ctx.rawArgs[0] ?? 0;
       if (out) {
-        this.runtime.writeInt32(out, self | 0);
-        if (pe.is64) this.runtime.writeInt32(out + 4, 0);
+        this.arch.writePointer(this.runtime, out, self | 0);
       }
       return { returnValue: 0, errorCode: E.NO_ERROR };
     });
@@ -2158,22 +2169,20 @@ export class GuestProcessRunner {
     // proceeds. This is the first step of "emulate WinUI/XAML": enough object
     // surface for notepad to drive its own host window; richer XAML content
     // rendering is out of scope here.
-    if (pe.is64) {
+    if (this.arch.mode === 'x64') {
     const notepadHostClsid = [0x0b, 0x35, 0xf8, 0xb5, 0x48, 0x05, 0xb1, 0x48, 0xa6, 0xee, 0x88, 0xbd, 0x00, 0xb4, 0xa5, 0xe7];
-    const comSlotCount = pe.is64 ? 64 : 32;
-    const comVt = bumpAlloc(pe.is64 ? comSlotCount * 8 : comSlotCount * 4);
+    const comSlotCount = this.arch.comVtableSlotCount();
+    const comVt = bumpAlloc(comSlotCount * this.arch.pointerSize);
     const comObj = bumpAlloc(0x10);
     {
       const slotName = (i: number): string =>
         i === 0 ? 'com_qi' : i === 1 ? 'com_addref' : i === 2 ? 'com_release' : 'com_method';
       for (let i = 0; i < comSlotCount; i++) {
         const stub = allocDynamicStub(slotName(i));
-        const addr = comVt + i * (pe.is64 ? 8 : 4);
-        this.runtime.writeInt32(addr, stub | 0);
-        if (pe.is64) this.runtime.writeInt32(addr + 4, 0);
+        const addr = comVt + i * this.arch.pointerSize;
+        this.arch.writePointer(this.runtime, addr, stub | 0);
       }
-      this.runtime.writeInt32(comObj, comVt | 0);
-      if (pe.is64) this.runtime.writeInt32(comObj + 4, 0);
+      this.arch.writePointer(this.runtime, comObj, comVt | 0);
     }
     const clsidMatches = (p: number): boolean => {
       if (!p) return false;
@@ -2185,8 +2194,7 @@ export class GuestProcessRunner {
       const out = (ctx.rawArgs?.[2] ?? 0) >>> 0;
       const self = (ctx.rawArgs?.[0] ?? 0) >>> 0;
       if (out) {
-        this.runtime.writeInt32(out, self | 0);
-        if (pe.is64) this.runtime.writeInt32(out + 4, 0);
+        this.arch.writePointer(this.runtime, out, self | 0);
       }
       return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
     });
@@ -2206,8 +2214,7 @@ export class GuestProcessRunner {
       const ppv = (ctx.rawArgs?.[4] ?? 0) >>> 0;
       if (clsidMatches(rclsid)) {
         if (ppv) {
-          this.runtime.writeInt32(ppv, comObj | 0);
-          if (pe.is64) this.runtime.writeInt32(ppv + 4, 0);
+          this.arch.writePointer(this.runtime, ppv, comObj | 0);
         }
         return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
       }
@@ -2219,8 +2226,7 @@ export class GuestProcessRunner {
       const ppv = (ctx.rawArgs?.[4] ?? 0) >>> 0;
       if (clsidMatches(rclsid)) {
         if (ppv) {
-          this.runtime.writeInt32(ppv, comObj | 0);
-          if (pe.is64) this.runtime.writeInt32(ppv + 4, 0);
+          this.arch.writePointer(this.runtime, ppv, comObj | 0);
         }
         return { returnValue: 0, errorCode: E.NO_ERROR }; // S_OK
       }
@@ -2563,8 +2569,8 @@ export class GuestProcessRunner {
    * treats the sentinel vector as "handler returned; EAX = disposition".
    * Registers are restored after every call except the final transfer.
    */
-  private installSehDispatch(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64'): void {
-    if (mode === 'x64' || this.sehSentinelAddr === 0) return;
+  private installSehDispatch(dispatcher: ApiTrapDispatcher, jit: JitEngine): void {
+    if (!this.arch.supportsSeh || this.sehSentinelAddr === 0) return;
     const runtime = this.runtime;
     const sentinel = this.sehSentinelAddr;
     const excAddr = this.sehExcAddr;
@@ -3144,29 +3150,15 @@ export class GuestProcessRunner {
     //        lpstrInitialDir=0x2c lpstrTitle=0x30 nFileOffset=0x38 nFileExtension=0x3a
     //   x64  lpstrFilter=0x18 lpstrFile=0x30 nMaxFile=0x38 lpstrFileTitle=0x40
     //        lpstrInitialDir=0x50 lpstrTitle=0x58 nFileOffset=0x64 nFileExtension=0x66
-    // NOTE: this.mode is assigned AFTER installFileDialogs() runs, so the
-    // offset table + pointer reader must be computed per CALL (below), not here.
+    // NOTE: offsets + pointer reader are mode-specific policy; delegate to the
+    // arch backend at call time (this.arch is assigned before run() reaches us).
     const dialogHandler =
       (kind: 'open' | 'save', wide: boolean) =>
       async (ctx: ApiCallContext): Promise<ApiResult> => {
         const ofn = ctx.rawArgs[0] ?? 0;
         if (!ofn) return { returnValue: 0, errorCode: E.NO_ERROR };
-        // Compute x86/x64 offsets at call time, when this.mode is known.
-        const is64 = this.mode === 'x64';
-        const off = is64
-          ? { lpstrFilter: 0x18, lpstrFile: 0x30, nMaxFile: 0x38, lpstrFileTitle: 0x40, lpstrInitialDir: 0x50, lpstrTitle: 0x58, nFileOffset: 0x64, nFileExtension: 0x66 }
-          : { lpstrFilter: 0x0c, lpstrFile: 0x1c, nMaxFile: 0x20, lpstrFileTitle: 0x24, lpstrInitialDir: 0x2c, lpstrTitle: 0x30, nFileOffset: 0x38, nFileExtension: 0x3a };
-        // Pointer fields are 8 bytes on x64; read the full width there (addresses
-        // are still < 4GB, but the field spans 8 bytes so a 32-bit read is wrong
-        // at the x64 offset). rd32 is fine for the 4-byte DWORDs (nMaxFile, etc.).
-        const rdPtr = (a: number): number => {
-          if (!a) return 0;
-          if (is64) {
-            const b = runtime.readBytes(a >>> 0, 8);
-            return b.byteLength < 8 ? 0 : Number(new DataView(b.buffer, b.byteOffset, b.byteLength).getBigUint64(0, true));
-          }
-          return rd32(a);
-        };
+        const off = this.arch.openFileNameOffsets();
+        const rdPtr = (a: number): number => (a ? this.arch.readPointer(this.runtime, a >>> 0) : 0);
         const lpstrFile = rdPtr(ofn + off.lpstrFile) >>> 0;
         const nMaxFile = rd32(ofn + off.nMaxFile) >>> 0;
         if (!lpstrFile || nMaxFile === 0) return { returnValue: 0, errorCode: E.NO_ERROR };
@@ -3277,7 +3269,7 @@ export class GuestProcessRunner {
    * + shadow space + 8-byte sentinel return), so 64-bit guests (e.g.
    * notepad-x64) render through the same bridge path as x86.
    */
-  private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, mode: 'x86' | 'x64', _options: GuestProcessOptions = {}): void {
+  private installGuiBridge(dispatcher: ApiTrapDispatcher, jit: JitEngine, _options: GuestProcessOptions = {}): void {
     const runtime = this.runtime;
     this.guiDispatcher = dispatcher;
     // Bounds-checked 32-bit guest read (never grows the linear memory).
@@ -3307,8 +3299,7 @@ export class GuestProcessRunner {
         // WNDCLASSEXW field offsets differ between x86 and x64 because x64 has
         // 8-byte pointers: x86  lpfnWndProc=+8, lpszMenuName=+36, lpszClassName=+40
         //                  x64  lpfnWndProc=+8, lpszMenuName=+56, lpszClassName=+64
-        const menuNameOff = this.mode === 'x64' ? 56 : 36;
-        const nameOff = this.mode === 'x64' ? 64 : 40;
+        const { menuName: menuNameOff, name: nameOff } = this.arch.wndClassExOffsets();
         this.classWndProcs.set(atom, peek(lpWndClass + 8)); // WNDCLASSEXW.lpfnWndProc
         const name = readWStr(peek(lpWndClass + nameOff)); // lpszClassName
         if (name) classNames.set(name.toLowerCase(), atom);
@@ -3348,6 +3339,15 @@ export class GuestProcessRunner {
     const createWindow = (ctx: ApiCallContext): ApiResult => {
       const hwnd = ++hwndSeq;
       const classNameArg = ctx.rawArgs[1] ?? 0;
+      // CreateWindowExW layout (stdcall, [esp+4] = arg1):
+      //   rawArgs[0]=dwExStyle, [1]=lpClassName, [2]=lpWindowName, [3]=dwStyle,
+      //   [8]=hWndParent, [9]=hMenu. We keep exStyle/style so the host can
+      //   emulate non-client chrome the guest never paints (WS_EX_CLIENTEDGE,
+      //   WS_BORDER) — winmine relies on the OS for its sunken board frame.
+      const exStyle = ctx.rawArgs[0] ?? 0;
+      const style = ctx.rawArgs[3] ?? 0;
+      const nameArg = ctx.rawArgs[2] ?? 0;
+      const text = (nameArg >>> 16) !== 0 ? readWStr(nameArg) : '';
       let wndProc = 0;
       let className = '';
       let atom = 0;
@@ -3367,7 +3367,9 @@ export class GuestProcessRunner {
         wndProc,
         parent: ctx.rawArgs[8] ?? 0,
         className,
-        text: '',
+        text,
+        exStyle,
+        style,
         menu,
         width: 0,
         height: 0,
@@ -3388,7 +3390,7 @@ export class GuestProcessRunner {
 
     // The window is "shown and painted" instantly.
     this.interceptor.hook('user32.dll', 'ShowWindow', () => this.ok1());
-    this.interceptor.hook('user32.dll', 'UpdateWindow', () => this.ok1());
+    // UpdateWindow is registered further down (flushes a WM_PAINT).
 
     // Message loop: pop the synthetic queue. A non-empty queue yields one
     // message (return 1, MSG written to lpMsg); an empty queue is WM_QUIT
@@ -3428,6 +3430,106 @@ export class GuestProcessRunner {
     this.interceptor.hook('user32.dll', 'GetMessageW', getMessage);
     this.interceptor.hook('user32.dll', 'GetMessageA', getMessage);
 
+    // PeekMessageW/A: non-blocking queue drain sharing GetMessage's MSG
+    // layout. winmine imports PeekMessageW for its dialog/sleep paths; a
+    // missing stub would report "no message" forever there.
+    const peekMessage = (ctx: ApiCallContext): ApiResult => {
+      const m = this.guiMessageQueue[0];
+      if (!m) return { returnValue: 0, errorCode: E.NO_ERROR };
+      if (((ctx.rawArgs[4] ?? 0) & 0x0001) !== 0) {
+        // PM_REMOVE: consume the message and fill the MSG struct.
+        this.guiMessageQueue.shift();
+        return writeMsg(ctx, m);
+      }
+      // PM_NOREMOVE: report presence without consuming.
+      return { returnValue: 1, errorCode: E.NO_ERROR };
+    };
+    this.interceptor.hook('user32.dll', 'PeekMessageW', peekMessage);
+    this.interceptor.hook('user32.dll', 'PeekMessageA', peekMessage);
+
+    // PtInRect gates winmine's board clicks: the WndProc drops WM_LBUTTONUP
+    // unless the point is inside the board/tile rect. Without this hook the
+    // generic stub returns 0 ("outside") and the game is unclickable.
+    // PtInRect(const RECT*, POINT pt) — pt is packed (x = low word, y = high
+    // word), each a signed 16-bit value.
+    this.interceptor.hook('user32.dll', 'PtInRect', (ctx) => {
+      const rc = readRect(ctx.rawArgs[0] ?? 0);
+      const pt = ctx.rawArgs[1] ?? 0;
+      const px = ((pt & 0xffff) << 16) >> 16;
+      const py = ((pt >>> 16) << 16) >> 16;
+      const inside =
+        px >= rc.x && px < rc.x + rc.w && py >= rc.y && py < rc.y + rc.h;
+      return { returnValue: inside ? 1 : 0, errorCode: E.NO_ERROR };
+    });
+
+    // Mouse capture: winmine captures on WM_LBUTTONDOWN and releases on
+    // WM_LBUTTONUP. Returning the previous-owner NULL (0) / TRUE (1) keeps
+    // that flow intact without real capture semantics.
+    this.interceptor.hook('user32.dll', 'SetCapture', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
+    this.interceptor.hook('user32.dll', 'ReleaseCapture', () => this.ok1());
+
+    // InvalidateRect: our paint model is queue-driven, so "mark dirty" means
+    // queue a WM_PAINT. Without this the board state changes on click but
+    // nothing ever repaints — the game looks dead. UpdateWindow (below)
+    // flushes the same way, at the front of the queue.
+    const wakeMessageLoop = (): void => {
+      if (this.pendingMessageResolve) {
+        const resolve = this.pendingMessageResolve;
+        this.pendingMessageResolve = null;
+        resolve();
+      }
+    };
+    this.interceptor.hook('user32.dll', 'InvalidateRect', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      if (hwnd) {
+        this.queueGuiMessage({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 });
+        wakeMessageLoop();
+      }
+      return this.ok1();
+    });
+    this.interceptor.hook(
+      'user32.dll',
+      'UpdateWindow',
+      (ctx) => {
+        const hwnd = ctx.rawArgs[0] ?? 0;
+        if (hwnd) {
+          // Real UpdateWindow paints synchronously if the update region is
+          // non-empty; front-of-queue is the closest queue-driven equivalent.
+          this.queueGuiMessage({ hwnd, msg: 0x000f /* WM_PAINT */, wParam: 0, lParam: 0 }, true);
+          wakeMessageLoop();
+        }
+        return this.ok1();
+      },
+    );
+
+    // SetTimer/KillTimer: winmine starts a 1s game timer once the first tile
+    // is revealed; WM_TIMER ticks drive the LED clock. A real SetTimer
+    // returns a nonzero id — the generic 0 stub read as failure. Intervals
+    // are torn down on run() start/end and PostQuitMessage.
+    this.interceptor.hook('user32.dll', 'SetTimer', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const id = ctx.rawArgs[1] ?? 0;
+      const elapse = Math.max(1, ctx.rawArgs[2] ?? 1000);
+      const key = ((hwnd & 0xffff) << 16) | (id & 0xffff);
+      const prev = this.guiTimers.get(key);
+      if (prev !== undefined) clearInterval(prev);
+      const handle = setInterval(() => {
+        this.queueGuiMessage({ hwnd, msg: 0x0113 /* WM_TIMER */, wParam: id & 0xffff, lParam: 0 });
+        wakeMessageLoop();
+      }, elapse);
+      this.guiTimers.set(key, handle);
+      return { returnValue: key || 1, errorCode: E.NO_ERROR };
+    });
+    this.interceptor.hook('user32.dll', 'KillTimer', (ctx) => {
+      const hwnd = ctx.rawArgs[0] ?? 0;
+      const id = ctx.rawArgs[1] ?? 0;
+      const key = ((hwnd & 0xffff) << 16) | (id & 0xffff);
+      const prev = this.guiTimers.get(key);
+      if (prev !== undefined) clearInterval(prev);
+      this.guiTimers.delete(key);
+      return this.ok1();
+    });
+
     // Message-loop slots only reached when GetMessageW returns a message.
     this.interceptor.hook('user32.dll', 'TranslateAcceleratorW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
     this.interceptor.hook('user32.dll', 'IsDialogMessageW', () => ({ returnValue: 0, errorCode: E.NO_ERROR }));
@@ -3449,6 +3551,7 @@ export class GuestProcessRunner {
       return { returnValue: 0, errorCode: E.NO_ERROR };
     });
     this.interceptor.hook('user32.dll', 'PostQuitMessage', () => {
+      this.clearGuiTimers();
       this.guiMessageQueue.length = 0;
       this.quitRequested = true; // next GetMessageW returns 0 (WM_QUIT)
       if (this.pendingMessageResolve) {
@@ -3547,7 +3650,7 @@ export class GuestProcessRunner {
       const hwnd = ctx.rawArgs[0] ?? 0;
       const msg = ctx.rawArgs[1] ?? 0;
       console.log('[GDI-walk] PostMessageW hwnd=0x%s msg=0x%s wParam=%d lParam=%d', hwnd.toString(16), msg.toString(16), ctx.rawArgs[2] ?? 0, ctx.rawArgs[3] ?? 0);
-      this.guiMessageQueue.push({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
+      this.queueGuiMessage({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
       if (this.pendingMessageResolve) {
         const r = this.pendingMessageResolve;
         this.pendingMessageResolve = null;
@@ -3558,7 +3661,7 @@ export class GuestProcessRunner {
     this.interceptor.hook('user32.dll', 'PostMessageA', (ctx) => {
       const hwnd = ctx.rawArgs[0] ?? 0;
       const msg = ctx.rawArgs[1] ?? 0;
-      this.guiMessageQueue.push({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
+      this.queueGuiMessage({ hwnd, msg, wParam: ctx.rawArgs[2] ?? 0, lParam: ctx.rawArgs[3] ?? 0 });
       if (this.pendingMessageResolve) {
         const r = this.pendingMessageResolve;
         this.pendingMessageResolve = null;
@@ -3805,6 +3908,11 @@ export class GuestProcessRunner {
       const hdc = ctx.rawArgs[1] ?? 0;
       const bridge = bridgeFor(hdc);
       if (!bridge) return ok1();
+      // Flush before teardown: guests that draw via GetDC/ReleaseDC outside
+      // the BeginPaint/EndPaint cycle (winmine reveals tiles this way) have
+      // their pixels stuck in the surface until the NEXT paint otherwise —
+      // the board only "caught up" when a menu action forced a WM_PAINT.
+      await safe(() => bridge.flush(hdc));
       await safe(() => bridge.deleteDC(hdc));
       bridgeByHdc.delete(hdc);
       return ok1();
@@ -3922,8 +4030,13 @@ export class GuestProcessRunner {
       const x = ctx.rawArgs[1] ?? 0;
       const y = ctx.rawArgs[2] ?? 0;
       const bridge = bridgeFor(hdc);
+      // GDI: LineTo draws from the current position AND moves it to the
+      // endpoint. winmine draws its 3D bevels with MoveToEx/LineTo chains —
+      // without the update every segment after the first started from the
+      // stale start point (the diagonal-line artifact across the board).
+      const from = penPosByHdc.get(hdc) ?? { x: 0, y: 0 };
+      penPosByHdc.set(hdc, { x, y });
       if (bridge) {
-        const from = penPosByHdc.get(hdc) ?? { x: 0, y: 0 };
         await safe(() => bridge.lineTo(hdc, from.x, from.y, x, y, curPenByHdc.get(hdc) ?? BLACK));
         return ok1();
       }
@@ -4147,7 +4260,7 @@ export class GuestProcessRunner {
     const wndRec = this.windowRecords.get(hwnd);
     const wndProc = wndRec?.wndProc ?? 0;
     const sAddr = this.sehSentinelAddr;
-    console.log('[GDI-walk] DispatchMessageW hwnd=0x%s wndProc=0x%s sAddr=0x%s mode=%s', hwnd.toString(16), wndProc.toString(16), sAddr.toString(16), this.mode);
+    console.log('[GDI-walk] DispatchMessageW hwnd=0x%s wndProc=0x%s sAddr=0x%s mode=%s', hwnd.toString(16), wndProc.toString(16), sAddr.toString(16), this.arch.mode);
     // System classes (EDIT, BUTTON, STATIC, …) have no guest WndProc.
     // Handle their messages directly here instead of dropping them.
     if (!wndProc) {
@@ -4165,37 +4278,7 @@ export class GuestProcessRunner {
     }
     if (sAddr === 0) return;
     const saved = this.snapshotRegs();
-    if (this.mode === 'x86') {
-      const esp = this.runtime.getReg('esp') >>> 0;
-      const frame = (esp - 20) >>> 0; // 4 stdcall args + sentinel return addr
-      this.runtime.writeInt32(frame + 0, sAddr);
-      this.runtime.writeInt32(frame + 4, hwnd);
-      this.runtime.writeInt32(frame + 8, message);
-      this.runtime.writeInt32(frame + 12, wParam);
-      this.runtime.writeInt32(frame + 16, lParam);
-      this.runtime.setReg('esp', frame);
-      this.runtime.setEip(wndProc);
-      const nested = new Executor(this.runtime, this.activeJit, this.sentinelHandler(), { maxSteps: 500_000, onStep: this.dispatchOnStep() });
-      await nested.run(wndProc);
-      this.restoreRegs(saved);
-      return;
-    }
-    // x64: Microsoft x64 calling convention. Place the 8-byte sentinel return
-    // address at frameR; set rsp = frameR so the prologue `sub rsp,0x28` leaves
-    // [rsp+0x28] = sentinel. rcx/rdx/r8/r9 carry the four args. The WndProc's
-    // `ret` pops the sentinel into rip → SEH sentinel trap.
-    const rsp = this.runtime.getReg('rsp') >>> 0;
-    let frameR = (rsp & ~0xf) - 0x40;
-    if ((frameR & 0xf) === 0) frameR -= 8; // ensure frameR % 16 == 8 (post-call alignment)
-    const dv = new DataView(new ArrayBuffer(8));
-    dv.setBigUint64(0, BigInt(sAddr >>> 0), true);
-    this.runtime.writeBytes(frameR, new Uint8Array(dv.buffer));
-    this.runtime.setReg('rcx', hwnd);
-    this.runtime.setReg('rdx', message);
-    this.runtime.setReg('r8', wParam);
-    this.runtime.setReg('r9', lParam);
-    this.runtime.setReg('rsp', frameR);
-    this.runtime.setEip(wndProc);
+    this.arch.setupWndProcCall(this.runtime, wndProc, hwnd, message, wParam, lParam, sAddr);
     const nested = new Executor(this.runtime, this.activeJit, this.sentinelHandler(), { maxSteps: 500_000, onStep: this.dispatchOnStep() });
     await nested.run(wndProc);
     this.restoreRegs(saved);
@@ -4234,9 +4317,7 @@ export class GuestProcessRunner {
 
   /** Save/restore the full GP register file around a nested WndProc execution. */
   private snapshotRegs(): { regs: Array<[RegName, number]>; eflags: number; eip: number } {
-    const names: RegName[] = this.mode === 'x64'
-      ? ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']
-      : ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+    const names = this.arch.gpRegisterNames();
     return {
       regs: names.map((r) => [r, this.runtime.getReg64(r)]),
       eflags: this.runtime.getEflags(),
@@ -4288,20 +4369,25 @@ export class GuestProcessRunner {
 
   /**
    * Parses an RT_MENU (type 4) resource into flat menu sections for the host
-   * to render. notepad's layout: MENUHEADER {version, size} (4 bytes), then
-   * records of WORD flags + string. MF_POPUP (0x10) items carry their title
-   * right after the 4-byte header; plain items put it after the flags word.
-   * There is no mtID field in this menu, and notepad's command ids are the
-   * sequential 1..n classic layout — assign them in order.
+   * to render. Classic MENUITEMTEMPLATE layout with NO alignment padding
+   * (verified against winmine.exe menu #500):
+   *   header: WORD version, WORD offset — items start right after
+   *   item:   WORD option; if not MF_POPUP, WORD command id; then a
+   *           NUL-terminated wide string.
+   * MF_POPUP (0x10) opens a submenu (top-level ones become sections), MF_END
+   * (0x80) marks the last item of the current level, separators ([option
+   * 0x800] or empty-string items) render nothing. The command id is the
+   * resource's own WORD — posting it back via WM_COMMAND is what makes menu
+   * items actually work (winmine expects 0x1FE = New, 0x209 = Beginner, ...).
    */
   private parseMenuResource(addr: number, size = 0): GuestMenuSection[] {
     if (!addr) return [];
     const mem = this.runtime.memory.buffer;
-    const peekW16 = (a: number): number =>
-      a + 2 <= mem.byteLength ? new DataView(mem).getUint16(a, true) : 0;
+    const view = new DataView(mem);
+    const u16 = (a: number): number =>
+      a + 2 <= mem.byteLength ? view.getUint16(a, true) : 0;
     const readW = (a: number): string => {
       if (!a) return '';
-      const view = new DataView(mem);
       let s = '';
       for (let i = 0; a + i + 1 < mem.byteLength && i < 512; i += 2) {
         const c = view.getUint16(a + i, true);
@@ -4311,48 +4397,56 @@ export class GuestProcessRunner {
       return s;
     };
     const sections: GuestMenuSection[] = [];
-    let cur: GuestMenuSection | null = null;
-    let depth = 0;
-    const limit = size > 0 ? addr + size : mem.byteLength;
-    let off = (addr + 4 + 3) & ~3;
-    for (let guard = 0; guard < 1024 && off + 2 <= limit; guard++) {
-      const flags = peekW16(off);
-      if (flags === 0) {
-        off += 2; // alignment/padding between records
-        continue;
-      }
-      if ((flags & 0x80) !== 0) {
-        // MF_END: popup items are done. Nested popups (submenus) flatten into
-        // the current top-level section; the section itself stays open until
-        // the next top-level popup (notepad puts File>Exit after an MF_END).
-        depth = Math.max(0, depth - 1);
+    // Stack of open item containers: [0] is a top-level pseudo list, each
+    // open popup pushes the array its children belong to. Nested popups
+    // flatten: the submenu title becomes an item and its children share the
+    // parent section's list (the host renders one flat list per menu).
+    // `ends` is parallel to the stack: whether the popup that OPENED this
+    // level carried MF_END. That flag means "last item of the PARENT level",
+    // so completing the level completes the parent too — cascade pop
+    // (winmine's "&Help" is 0x0090 = MF_POPUP|MF_END).
+    const stack: GuestMenuItem[][] = [[]];
+    const ends: boolean[] = [false];
+    let top: GuestMenuSection | null = null;
+    const limit = size > 0 ? Math.min(addr + size, mem.byteLength) : mem.byteLength;
+    let off = addr + 4 + u16(addr + 2);
+    for (let guard = 0; guard < 1024 && off + 2 <= limit && stack.length > 0; guard++) {
+      const option = u16(off);
+      off += 2;
+      let id = 0;
+      if ((option & 0x10) === 0) {
+        id = u16(off); // plain items carry a WORD command id before the string
         off += 2;
-        continue;
       }
-      if ((flags & 0x800) !== 0) {
-        // MF_SEPARATOR: no title — just the flags word.
-        off += 2;
-        continue;
-      }
-      if ((flags & 0x10) !== 0) {
-        // Popup: like plain items, the title immediately follows the flags
-        // word (there is no popupOffset field — notepad's first title char
-        // occupies that slot). Top-level popups open a section; nested ones
-        // (submenus like Edit>Format) become items of the current section
-        // (flattened, children appended after them).
-        const title = readW(off + 2);
-        if (depth === 0) {
-          cur = { title, items: [] };
-          sections.push(cur);
-        } else if (cur) {
-          cur.items.push({ id: flags & 0xffff, label: title });
+      const label = readW(off);
+      off += (label.length + 1) * 2;
+      const popup = (option & 0x10) !== 0;
+      const end = (option & 0x80) !== 0;
+      if (popup) {
+        if (stack.length === 1) {
+          top = { title: label, items: [] };
+          sections.push(top);
+        } else {
+          top?.items.push({ id: 0, label });
         }
-        depth += 1;
-        off = (off + 2 + (title.length + 1) * 2 + 3) & ~3;
-      } else {
-        const label = readW(off + 2);
-        if (cur && label) cur.items.push({ id: flags & 0xffff, label });
-        off = (off + 2 + (label.length + 1) * 2 + 3) & ~3;
+        if (top) {
+          stack.push(top.items);
+          ends.push(end);
+        }
+      } else if (label.length > 0 && (option & 0x800) === 0 && stack.length > 1) {
+        stack[stack.length - 1]!.push({ id, label });
+      }
+      // MF_END on a plain item closes its level. On a POPUP item it means
+      // "last entry of the parent level" — the level just opened still
+      // receives its children first, so the immediate pop is skipped and the
+      // stored flag cascades when the child level completes instead.
+      if (end && !popup) {
+        stack.pop();
+        let cascade = ends.pop();
+        while (cascade && stack.length > 1) {
+          stack.pop();
+          cascade = ends.pop() ?? false;
+        }
       }
     }
     return sections;
@@ -4362,8 +4456,33 @@ export class GuestProcessRunner {
    * Interactive API (see GuestProcessOptions.interactive): pushes a message
    * into the guest's queue and wakes a GetMessageW that is blocked waiting.
    */
+  /**
+   * Queues a GUI message with Windows-style coalescing. The real message
+   * queue never holds more than one WM_MOUSEMOVE per window (mouse motion
+   * replaces the pending one) and coalesces WM_PAINT as well. Without this,
+   * a sweep of the mouse queues dozens of WM_MOUSEMOVEs ahead of a click —
+   * and since every dispatch is a nested JIT WndProc run, the click and its
+   * repaint starve for seconds (winmine felt unclickable).
+   */
+  private queueGuiMessage(
+    msg: { hwnd: number; msg: number; wParam: number; lParam: number },
+    atFront = false,
+  ): void {
+    if (msg.msg === 0x0200 /* WM_MOUSEMOVE */) {
+      const idx = this.guiMessageQueue.findIndex((q) => q.hwnd === msg.hwnd && q.msg === 0x0200);
+      if (idx >= 0) {
+        this.guiMessageQueue[idx] = msg;
+        return;
+      }
+    } else if (msg.msg === 0x000f /* WM_PAINT */) {
+      if (this.guiMessageQueue.some((q) => q.hwnd === msg.hwnd && q.msg === 0x000f)) return;
+    }
+    if (atFront) this.guiMessageQueue.unshift(msg);
+    else this.guiMessageQueue.push(msg);
+  }
+
   postMessage(msg: { hwnd: number; msg: number; wParam: number; lParam: number }): void {
-    this.guiMessageQueue.push(msg);
+    this.queueGuiMessage(msg);
     if (this.pendingMessageResolve) {
       const r = this.pendingMessageResolve;
       this.pendingMessageResolve = null;
@@ -4388,6 +4507,8 @@ export class GuestProcessRunner {
       parent: r.parent,
       text: r.text,
       menu: r.menu,
+      exStyle: r.exStyle,
+      style: r.style,
       width: r.width,
       height: r.height,
     }));
